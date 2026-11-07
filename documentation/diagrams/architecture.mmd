@@ -1,0 +1,24 @@
+graph TD
+    subgraph Remote Computer [Remote PC / Scanning Node]
+        A[Local Folders <br> P: Books / Magazines] -->|Scan| B(sync_files.py)
+        K[Calibre Library <br> metadata.db] -->|Query| L(sync_calibre.py)
+        C[(scanner_state.db <br> SQLite Cache on P: or local)] <-->|Change check| B
+        C <-->|Change check| L
+        B -->|JSON Payload| D[HTTPS / REST API]
+        L -->|JSON Payload| D
+        E(sync_amazon.py) -->|Interactive MFA Session| F[Audible Private API]
+        E -->|Import CSV/JSON| G[Kindle Export list]
+        E -->|JSON Payload| D
+    end
+
+    subgraph Central Host [Docker Containers / Server Host]
+        D -->|Token Auth / Bearer| H[Django Web App <br> Catalog API & Dashboard]
+        H <-->|ORM / psycopg3| I[(PostgreSQL 18 <br> BookDB)]
+        H <-->|django-redis| J[(Redis Cache)]
+    end
+
+    style Remote Computer fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#f8fafc
+    style Central Host fill:#020617,stroke:#a855f7,stroke-width:2px,color:#f8fafc
+    style H fill:#1e1b4b,stroke:#86198f,stroke-width:1px,color:#f8fafc
+    style I fill:#064e3b,stroke:#059669,stroke-width:1px,color:#f8fafc
+    style J fill:#7f1d1d,stroke:#dc2626,stroke-width:1px,color:#f8fafc

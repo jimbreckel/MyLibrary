@@ -1,0 +1,14 @@
+requests
+ebooklib
+pypdf
+mobi-python
+beautifulsoup4
+audible
+selenium
+pymupdf>=1.24.0
+lxml>=5.0.0
+click>=8.1.0
+python-dotenv>=1.0.0
+google-genai>=1.0.0
+pillow>=10.0.0
+tqdm>=4.66.0

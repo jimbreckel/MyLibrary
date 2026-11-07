@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  scanner:
+    build: .
+    container_name: mylibrary_scanner
+    volumes:
+      # Map configuration and DB state locally in the same directory:
+      - ./config.json:/config/config.json
+      - ./scanner_state.db:/app/scanner_state.db
+      - ./logs:/app/logs
+      
+      # Mount your media shares (adjust paths if needed):
+      - /ufi/pool-raw/syspool/Books:/books
+      - /ufi/pool-raw/syspool/audiobooks:/audiobooks
+    environment:
+      - SCAN_INTERVAL_HOURS=12
+    restart: always

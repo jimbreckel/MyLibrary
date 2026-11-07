@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: mylibrary-web
+    command: gunicorn --bind 0.0.0.0:8000 --workers 4 --threads 4 --timeout 120 core.wsgi:application
+    volumes:
+      - .:/app
+      - /volume1/common/Media/Books:/books
+      - /volume1/common/Media/Books_bad:/books_bad
+      - /volume1/common/Media/toMags:/toMags
+      - /volume1/common/Media/Audiobooks:/audiobooks:ro
+      - /volume1/common/webdav:/webdav
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DEBUG=True
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    networks:
+      - default
+    restart: always
+
+  scanner:
+    build:
+      context: ./nas_scanner
+      dockerfile: Dockerfile
+    container_name: mylibrary_scanner
+    mem_limit: 3g
+    memswap_limit: 3g
+    volumes:
+      - ./nas_scanner/config.json:/config/config.json
+      - ./nas_scanner/scanner_state.db:/app/scanner_state.db
+      - ./nas_scanner/logs:/app/logs
+      - ./nas_scanner/epubmeta:/app/epubmeta
+      - ./nas_scanner/utils:/app/utils
+      - ./nas_scanner/sync_files.py:/app/sync_files.py
+      - ./nas_scanner/docker_scanner_loop.py:/app/docker_scanner_loop.py
+      - /volume1/common/Media/Books:/books
+      - /volume1/common/Media/Books_bad:/books_bad
+      - /volume1/common/Media/toMags:/toMags
+      - /volume1/common/Media/Audiobooks:/audiobooks
+    env_file:
+      - .env
+    environment:
+      - SCAN_INTERVAL_HOURS=4
+    networks:
+      - default
+    restart: always
+
+# Connect to shared DevStack network (PostgreSQL, Redis, Nginx webserver)
+networks:
+  default:
+    name: devstack-net
+    external: true

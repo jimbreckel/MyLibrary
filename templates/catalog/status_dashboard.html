@@ -1,0 +1,2411 @@
+{% extends 'catalog/base.html' %}
+{% load static humanize %}
+
+{% block title %}Conversion & Import Status Dashboard - MyLibrary{% endblock %}
+
+{% block extra_css %}
+<style>
+    .clickable-metric {
+        cursor: pointer;
+        transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+    }
+    .clickable-metric:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+        border-color: rgba(139, 92, 246, 0.65) !important;
+    }
+    .clickable-submetric {
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 6px;
+        transition: background 0.15s ease;
+    }
+    .clickable-submetric:hover {
+        background: rgba(255, 255, 255, 0.1);
+        text-decoration: underline;
+    }
+    .explorer-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.85rem 1.25rem;
+        background: rgba(15, 23, 42, 0.55);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .status-filter-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+    .filter-pill-btn {
+        background: rgba(30, 41, 59, 0.8);
+        color: #cbd5e1;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 999px;
+        padding: 0.35rem 0.8rem;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        transition: all 0.15s ease;
+    }
+    .filter-pill-btn:hover {
+        background: rgba(51, 65, 85, 0.9);
+        color: #fff;
+    }
+    .filter-pill-btn.active {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: #fff;
+        border-color: transparent;
+        box-shadow: 0 2px 10px rgba(139, 92, 246, 0.4);
+    }
+    .explorer-search-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .explorer-search-input {
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #f8fafc;
+        border-radius: 8px;
+        padding: 0.4rem 0.75rem;
+        font-size: 0.82rem;
+        min-width: 240px;
+    }
+    .explorer-search-input:focus {
+        outline: none;
+        border-color: #38bdf8;
+    }
+    .explorer-pagination {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.75rem 1.25rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 0.82rem;
+        color: #94a3b8;
+    }
+    .dash-table tbody tr.clickable-row {
+        cursor: pointer;
+        transition: background 0.12s ease;
+    }
+    .dash-table tbody tr.clickable-row:hover {
+        background: rgba(56, 189, 248, 0.08);
+    }
+    .btn-mini-action {
+        background: rgba(56, 189, 248, 0.15);
+        color: #38bdf8;
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        border-radius: 6px;
+        padding: 0.22rem 0.55rem;
+        font-size: 0.72rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .btn-mini-action:hover {
+        background: rgba(56, 189, 248, 0.3);
+        color: #fff;
+    }
+    .btn-mini-action.approve {
+        background: rgba(34, 197, 94, 0.15);
+        color: #4ade80;
+        border-color: rgba(34, 197, 94, 0.35);
+    }
+    .btn-mini-action.approve:hover {
+        background: rgba(34, 197, 94, 0.3);
+        color: #fff;
+    }
+    /* Detail Modal */
+    .conv-modal-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 6, 23, 0.78);
+        backdrop-filter: blur(6px);
+        z-index: 9999;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+    }
+    .conv-modal-backdrop.open {
+        display: flex;
+    }
+    .conv-modal-card {
+        background: #0f172a;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 14px;
+        max-width: 860px;
+        max-height: 90vh;
+        overflow-y: auto;
+        width: 100%;
+        padding: 1.5rem;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+        color: #f8fafc;
+    }
+    .meta-compare-body {
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-start;
+        margin-bottom: 0.6rem;
+    }
+    .meta-cover-box {
+        width: 72px;
+        height: 104px;
+        flex-shrink: 0;
+        border-radius: 6px;
+        overflow: hidden;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #64748b;
+        font-size: 0.68rem;
+        text-align: center;
+    }
+    .meta-cover-box img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .meta-desc-box {
+        background: rgba(15, 23, 42, 0.65);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 6px;
+        padding: 0.5rem 0.65rem;
+        font-size: 0.78rem;
+        line-height: 1.45;
+        color: #cbd5e1;
+        max-height: 115px;
+        overflow-y: auto;
+        word-break: break-word;
+    }
+    .pickable-field {
+        cursor: pointer;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 0.25rem 0.45rem;
+        margin-bottom: 0.25rem;
+        transition: all 0.14s ease;
+        position: relative;
+    }
+    .pickable-field:hover {
+        border-color: rgba(56, 189, 248, 0.5);
+        background: rgba(56, 189, 248, 0.07);
+    }
+    .pickable-field.selected-field {
+        border-color: rgba(34, 197, 94, 0.75) !important;
+        background: rgba(34, 197, 94, 0.12) !important;
+        box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.35);
+    }
+    .pick-badge {
+        float: right;
+        font-size: 0.65rem;
+        font-weight: 700;
+        color: #4ade80;
+        display: none;
+    }
+    .pickable-field.selected-field .pick-badge {
+        display: inline;
+    }
+    .meta-cover-box.pickable-cover {
+        cursor: pointer;
+        position: relative;
+        transition: all 0.14s ease;
+    }
+    .meta-cover-box.pickable-cover.selected-field {
+        border: 2px solid #4ade80 !important;
+        box-shadow: 0 0 10px rgba(34, 197, 94, 0.4);
+    }
+    .merged-edit-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.55rem;
+        margin-top: 0.35rem;
+    }
+    .merged-input {
+        width: 100%;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        border-radius: 6px;
+        color: #f8fafc;
+        font-size: 0.8rem;
+        padding: 0.32rem 0.55rem;
+    }
+    .merged-input:focus {
+        outline: none;
+        border-color: #4ade80;
+    }
+    .conv-modal-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        padding-bottom: 0.85rem;
+        margin-bottom: 1rem;
+    }
+    .conv-modal-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.85rem;
+        margin-bottom: 1rem;
+    }
+    .conv-modal-field {
+        background: rgba(30, 41, 59, 0.65);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 8px;
+        padding: 0.65rem 0.85rem;
+    }
+    .conv-modal-field.full {
+        grid-column: 1 / -1;
+    }
+    .conv-modal-field label {
+        display: block;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #94a3b8;
+        margin-bottom: 0.25rem;
+    }
+    .conv-modal-field div {
+        font-size: 0.88rem;
+        word-break: break-all;
+    }
+    .conv-modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.65rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        padding-top: 1rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Header & Navigation -->
+<header class="dashboard-header">
+    <div class="logo-section">
+        <h1><i class="fa-solid fa-gauge-high"></i> MyLibrary Pipeline</h1>
+        <span>Unified Conversion (epubmeta) &amp; Catalog Import Status Dashboard</span>
+    </div>
+
+    <div class="stats-container">
+        <!-- Live Scanner Status Pill -->
+        <div class="stat-badge scanner-status-pill {% if dashboard.scanner.is_scanning %}status-active{% else %}status-idle{% endif %}" id="scanner-status-pill">
+            <span class="pulse-dot {% if dashboard.scanner.is_scanning %}active{% else %}idle{% endif %}"></span>
+            <span id="scanner-state-label">
+                {% if dashboard.scanner.is_scanning %}
+                    Scanner: <strong>Active</strong>
+                {% elif dashboard.scanner.daemon_active %}
+                    Scanner: <strong>Standby</strong>
+                {% else %}
+                    Scanner: <strong>Idle</strong>
+                {% endif %}
+            </span>
+        </div>
+
+        <!-- Auto-Refresh Controls -->
+        <button type="button" class="stat-badge action-badge" id="toggle-autorefresh-btn" title="Toggle 15-second live auto-refresh">
+            <i class="fa-solid fa-rotate cyan" id="refresh-spin-icon"></i>
+            <span>Auto-Refresh: <strong id="countdown-label">15s</strong></span>
+        </button>
+
+        <button type="button" class="stat-badge action-badge" onclick="window.location.reload();" title="Refresh dashboard immediately">
+            <i class="fa-solid fa-arrows-rotate purple"></i>
+            <span>Refresh Now</span>
+        </button>
+
+        <a href="{% url 'catalog:duplicates_dashboard' %}" class="stat-badge nav-dashboard-btn" title="Open Enriched Duplicates Manager">
+            <i class="fa-solid fa-clone" style="color:#38bdf8;"></i>
+            <span>Duplicates</span>
+        </a>
+
+        <a href="{% url 'catalog:dashboard' %}" class="stat-badge nav-dashboard-btn" title="Return to Catalog Search">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <span>Catalog Search</span>
+        </a>
+
+        <button type="button" class="stat-badge action-badge" onclick="openAppHelpModal();" title="Open Help, CLI, REST API & MCP Server Reference">
+            <i class="fa-solid fa-circle-question" style="color:#f472b6;"></i>
+            <span>Help &amp; CLI/MCP</span>
+        </button>
+    </div>
+</header>
+
+<!-- Live Scanner Activity Banner -->
+<section class="scanner-activity-banner">
+    <div class="activity-main">
+        <div class="activity-icon-wrap {% if dashboard.scanner.is_scanning %}scanning{% endif %}" id="activity-icon-wrap">
+            <i class="fa-solid {% if dashboard.scanner.is_scanning %}fa-satellite-dish fa-beat-fade{% else %}fa-clock{% endif %}" id="activity-icon"></i>
+        </div>
+        <div class="activity-details">
+            <div class="activity-title-row">
+                <span class="activity-badge">LIVE PIPELINE ACTIVITY</span>
+                {% if dashboard.scanner.current_library %}
+                    <span class="library-pill" id="current-library-pill"><i class="fa-solid fa-folder-tree"></i> {{ dashboard.scanner.current_library }}</span>
+                {% endif %}
+                {% if dashboard.scanner.last_log_update %}
+                    <span class="activity-timestamp"><i class="fa-regular fa-clock"></i> Last log event: <span id="last-log-update-label">{{ dashboard.scanner.last_log_update }}</span></span>
+                {% endif %}
+                <span class="library-pill" id="next-scan-pill" data-next-iso="{{ dashboard.scanner.next_scan_iso }}" data-interval-hours="{{ dashboard.scanner.scan_interval_hours }}" style="background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;">
+                    <i class="fa-solid fa-calendar-check"></i>
+                    Next Scan:
+                    <strong id="next-scan-time-label">{{ dashboard.scanner.next_scan_at|default:"Scheduled" }}</strong>
+                    {% if dashboard.scanner.next_scan_countdown %}
+                        (<strong id="next-scan-countdown-label" style="color: #4ade80;">{{ dashboard.scanner.next_scan_countdown }}</strong>)
+                    {% else %}
+                        (<strong id="next-scan-countdown-label" style="color: #4ade80;">—</strong>)
+                    {% endif %}
+                </span>
+            </div>
+            <div class="activity-current-line" id="live-activity-line">
+                {{ dashboard.scanner.current_activity }}
+            </div>
+        </div>
+    </div>
+    <div class="activity-meta" style="display:flex; flex-direction:column; align-items:flex-end; gap:0.25rem;">
+        <span>Schedule: <strong>Every {{ dashboard.scanner.scan_interval_hours|floatformat:"-1" }}h</strong></span>
+        <span>Snapshot: <strong id="snapshot-time">{{ dashboard.generated_at }}</strong></span>
+    </div>
+</section>
+
+<!-- Top KPI Cards Grid -->
+<section class="kpi-grid">
+    <!-- Card 1: Catalog Items -->
+    <div class="kpi-card">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">Catalog Items (BookDB)</span>
+                <h2 class="kpi-value" id="kpi-total-items">{{ dashboard.catalog.total_items|intcomma }}</h2>
+            </div>
+            <div class="kpi-icon purple">
+                <i class="fa-solid fa-layer-group"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span><i class="fa-solid fa-book"></i> Books: <strong id="kpi-sub-books">{{ dashboard.catalog.books_count|intcomma }}</strong></span>
+            <span><i class="fa-solid fa-newspaper"></i> Mags: <strong id="kpi-sub-mags">{{ dashboard.catalog.magazines_count|intcomma }}</strong></span>
+            <span><i class="fa-solid fa-tablet-screen-button"></i> Kindle: <strong id="kpi-sub-kindle">{{ dashboard.catalog.kindle_count|intcomma }}</strong></span>
+            <span><i class="fa-solid fa-headphones"></i> Audio: <strong id="kpi-sub-audio">{{ dashboard.catalog.audible_count|intcomma }}</strong></span>
+        </div>
+    </div>
+
+    <!-- Card 2: Physical Files Indexed -->
+    <div class="kpi-card">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">Physical Files Imported</span>
+                <h2 class="kpi-value" id="kpi-total-files">{{ dashboard.catalog.total_files|intcomma }}</h2>
+            </div>
+            <div class="kpi-icon cyan">
+                <i class="fa-solid fa-hard-drive"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span class="text-green"><i class="fa-solid fa-circle-check"></i> Valid: <strong id="kpi-sub-valid">{{ dashboard.catalog.valid_files|intcomma }}</strong> ({{ dashboard.catalog.valid_files_pct }}%)</span>
+            <span class="text-amber"><i class="fa-solid fa-lock"></i> DRM: <strong id="kpi-sub-drm">{{ dashboard.catalog.drm_files|intcomma }}</strong></span>
+            <span class="text-red"><i class="fa-solid fa-triangle-exclamation"></i> Invalid: <strong id="kpi-sub-invalid">{{ dashboard.catalog.invalid_files|intcomma }}</strong></span>
+        </div>
+    </div>
+
+    <!-- Card 3: Scanner File State Cache -->
+    <div class="kpi-card clickable-metric" onclick="openHistoryChartModal('TRACKED')" title="Click to view Tracked File States (SQLite) growth graph over time">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">Tracked File States (SQLite) <i class="fa-solid fa-chart-line" style="font-size:0.72rem; color:#38bdf8; margin-left:4px;"></i></span>
+                <h2 class="kpi-value" id="kpi-tracked-files">{{ dashboard.conversion.tracked_files_count|intcomma }}</h2>
+            </div>
+            <div class="kpi-icon blue">
+                <i class="fa-solid fa-database"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span style="color:#38bdf8;"><i class="fa-solid fa-hourglass-half"></i> Remaining to Catalog: <strong id="kpi-rem-catalog">{{ dashboard.conversion.remaining_to_catalog|intcomma }}</strong> <small id="kpi-rem-catalog-chunk">{% if dashboard.conversion.catalog_sync_chunk_info %}({{ dashboard.conversion.catalog_sync_chunk_info }}){% endif %}</small></span>
+            <span><i class="fa-solid fa-folder-open"></i> Discovered on NAS: <strong id="kpi-discovered-total">{{ dashboard.conversion.discovered_files_total|intcomma }}</strong></span>
+            {% if dashboard.conversion.last_synced_at %}
+                <span><i class="fa-regular fa-calendar-check"></i> Synced: <strong>{{ dashboard.conversion.last_synced_at }}</strong></span>
+            {% endif %}
+            <span><i class="fa-solid fa-chart-line" style="color:#38bdf8;"></i> Click to view sync &amp; growth chart over time</span>
+        </div>
+    </div>
+
+    <!-- Card 4: Curated Metadata Cache -->
+    <div class="kpi-card clickable-metric" onclick="openHistoryChartModal('CACHE')" title="Click to view Local Metadata Cache growth graph over time">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">Local Metadata Cache <i class="fa-solid fa-chart-line" style="font-size:0.72rem; color:#f472b6; margin-left:4px;"></i></span>
+                <h2 class="kpi-value" id="kpi-meta-cache">{{ dashboard.conversion.metadata_cache_count|intcomma }}</h2>
+            </div>
+            <div class="kpi-icon pink">
+                <i class="fa-solid fa-brain"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span><i class="fa-solid fa-wand-magic-sparkles"></i> Curated Title/ISBN Index</span>
+            <span>Click to view growth chart over time</span>
+        </div>
+    </div>
+
+    <!-- Card 5: epubmeta Conversions Processed -->
+    <div class="kpi-card clickable-metric" onclick="openHistoryChartModal('ALL')" title="Click to view epubmeta Enrichments graph over time">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">epubmeta Enrichments <i class="fa-solid fa-chart-line" style="font-size:0.72rem; color:#4ade80; margin-left:4px;"></i></span>
+                <h2 class="kpi-value" id="kpi-total-processed">{{ dashboard.conversion.total_processed|intcomma }}</h2>
+            </div>
+            <div class="kpi-icon green">
+                <i class="fa-solid fa-file-pen"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span class="text-green clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('SUCCESS');" title="Click to view Enriched graph over time"><i class="fa-solid fa-check-double"></i> Enriched: <strong id="kpi-sub-enriched">{{ dashboard.conversion.status_counts.SUCCESS|intcomma }}</strong> ({{ dashboard.conversion.success_rate }}%) <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
+            <span class="text-amber clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('NEEDS_REVIEW');" title="Click to view Needs Review graph over time"><i class="fa-solid fa-clipboard-question"></i> Review: <strong id="kpi-sub-review">{{ dashboard.conversion.status_counts.NEEDS_REVIEW|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
+            <span class="clickable-submetric" style="color:#94a3b8;" onclick="event.stopPropagation(); openHistoryChartModal('NO_ISBN');" title="Click to view No ISBN graph over time"><i class="fa-solid fa-barcode"></i> No ISBN: <strong id="kpi-sub-noisbn">{{ dashboard.conversion.status_counts.NO_ISBN|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
+            <span class="text-red clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('QUARANTINED');" title="Click to view Quarantine graph over time"><i class="fa-solid fa-shield-virus"></i> Quarantine: <strong id="kpi-sub-quarantine">{{ dashboard.conversion.status_counts.QUARANTINED|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
+        </div>
+        <div style="border-top: 1px solid rgba(255,255,255,0.08); margin-top: 0.45rem; padding-top: 0.45rem; font-size: 0.76rem; color: #cbd5e1; display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem;">
+            <span style="color:#38bdf8;" title="Eligible EPUB files still waiting for epubmeta enrichment"><i class="fa-solid fa-hourglass-half"></i> Remaining to Enrich: <strong id="kpi-rem-enrich">{{ dashboard.conversion.remaining_to_enrich|intcomma }}</strong></span>
+            <span style="color:#a78bfa;" title="External catalog/AI lookups used in the current scan cycle out of max_files cap"><i class="fa-solid fa-Bolt"></i> Cycle Batch: <strong id="kpi-cycle-net">{{ dashboard.conversion.cycle_net_used|intcomma }} / {{ dashboard.conversion.cycle_net_cap|intcomma }}</strong> (<span id="kpi-cycle-left">{{ dashboard.conversion.cycle_net_remaining|intcomma }}</span> left)</span>
+            <span style="color:#94a3b8;" title="Files skipped because BookDB already has complete ISBN + description + author"><i class="fa-solid fa-circle-check"></i> Complete in BookDB: <strong id="kpi-complete-bookdb">{{ dashboard.conversion.skipped_complete_bookdb|intcomma }}</strong></span>
+        </div>
+    </div>
+
+    <!-- Card 6: Catalog Metadata Completeness -->
+    <div class="kpi-card">
+        <div class="kpi-card-top">
+            <div>
+                <span class="kpi-label">Rich Metadata Coverage</span>
+                <h2 class="kpi-value">{{ dashboard.catalog.complete_metadata_pct }}%</h2>
+            </div>
+            <div class="kpi-icon amber">
+                <i class="fa-solid fa-award"></i>
+            </div>
+        </div>
+        <div class="kpi-submetrics">
+            <span><i class="fa-solid fa-barcode"></i> ISBN: <strong>{{ dashboard.catalog.with_isbn|intcomma }}</strong> ({{ dashboard.catalog.with_isbn_pct }}%)</span>
+            <span><i class="fa-solid fa-image"></i> Cover: <strong>{{ dashboard.catalog.with_cover|intcomma }}</strong> ({{ dashboard.catalog.with_cover_pct }}%)</span>
+        </div>
+    </div>
+</section>
+
+<!-- Two-Column Analytics & Distribution Section -->
+<section class="dashboard-two-col">
+    <!-- Left Column: epubmeta Conversion & Enrichment Status Breakdown -->
+    <div class="dash-panel">
+        <div class="dash-panel-header">
+            <div>
+                <h3><i class="fa-solid fa-wand-magic-sparkles purple"></i> Conversion &amp; Enrichment Status (epubmeta)</h3>
+                <p>Single-pass metadata verification, ISBN discovery, OPF/PDF tagging, and quarantine tracking</p>
+            </div>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+                <span class="panel-pill"><span id="panel-processed-cnt">{{ dashboard.conversion.total_processed|intcomma }}</span> Processed</span>
+                <span class="panel-pill" style="background:rgba(56,189,248,0.14); border-color:rgba(56,189,248,0.35); color:#38bdf8;"><span id="panel-rem-enrich-cnt">{{ dashboard.conversion.remaining_to_enrich|intcomma }}</span> Remaining</span>
+            </div>
+        </div>
+
+        <!-- Stacked Distribution Bar -->
+        <div class="stacked-bar-container" title="Conversion Outcome Distribution">
+            {% if dashboard.conversion.total_processed > 0 %}
+                <div class="stacked-segment seg-success" style="width: {{ dashboard.conversion.status_pcts.SUCCESS }}%;" title="Success: {{ dashboard.conversion.status_counts.SUCCESS|intcomma }} ({{ dashboard.conversion.status_pcts.SUCCESS }}%)"></div>
+                <div class="stacked-segment seg-review" style="width: {{ dashboard.conversion.status_pcts.NEEDS_REVIEW }}%;" title="Needs Review: {{ dashboard.conversion.status_counts.NEEDS_REVIEW|intcomma }} ({{ dashboard.conversion.status_pcts.NEEDS_REVIEW }}%)"></div>
+                <div class="stacked-segment seg-notfound" style="width: {{ dashboard.conversion.status_pcts.NOT_FOUND }}%;" title="Not Found: {{ dashboard.conversion.status_counts.NOT_FOUND|intcomma }} ({{ dashboard.conversion.status_pcts.NOT_FOUND }}%)"></div>
+                <div class="stacked-segment seg-drm" style="width: {{ dashboard.conversion.status_pcts.HAS_DRM }}%;" title="DRM Protected: {{ dashboard.conversion.status_counts.HAS_DRM|intcomma }} ({{ dashboard.conversion.status_pcts.HAS_DRM }}%)"></div>
+                <div class="stacked-segment seg-quarantined" style="width: {{ dashboard.conversion.status_pcts.QUARANTINED }}%;" title="Quarantined: {{ dashboard.conversion.status_counts.QUARANTINED|intcomma }} ({{ dashboard.conversion.status_pcts.QUARANTINED }}%)"></div>
+                <div class="stacked-segment seg-failed" style="width: {{ dashboard.conversion.status_pcts.FAILED }}%;" title="Failed: {{ dashboard.conversion.status_counts.FAILED|intcomma }} ({{ dashboard.conversion.status_pcts.FAILED }}%)"></div>
+            {% else %}
+                <div class="stacked-segment seg-empty" style="width: 100%;"></div>
+            {% endif %}
+        </div>
+
+        <!-- Status Breakdown Cards (Click any box to filter the Explorer table below) -->
+        <div class="status-breakdown-grid">
+            <div class="status-metric-box box-success clickable-metric" onclick="filterConversionsByStatus('SUCCESS')" title="Click to inspect Enriched (SUCCESS) files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-success"></span>
+                    <span>SUCCESS (Enriched) <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-success">{{ dashboard.conversion.status_counts.SUCCESS|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.SUCCESS }}%</span>
+                </div>
+            </div>
+
+            <div class="status-metric-box box-review clickable-metric" onclick="filterConversionsByStatus('NEEDS_REVIEW')" title="Click to inspect NEEDS REVIEW files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-review"></span>
+                    <span>NEEDS REVIEW <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-review">{{ dashboard.conversion.status_counts.NEEDS_REVIEW|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.NEEDS_REVIEW }}%</span>
+                </div>
+            </div>
+
+            <div class="status-metric-box box-notfound clickable-metric" onclick="filterConversionsByStatus('NO_ISBN')" title="Click to inspect NO ISBN (Left As-Is) files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-notfound"></span>
+                    <span>NO ISBN (Left As-Is) <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-noisbn">{{ dashboard.conversion.status_counts.NO_ISBN|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.NO_ISBN }}%</span>
+                </div>
+            </div>
+
+            <div class="status-metric-box box-drm clickable-metric" onclick="filterConversionsByStatus('HAS_DRM')" title="Click to inspect DRM-locked files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-drm"></span>
+                    <span>HAS DRM <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-drm">{{ dashboard.conversion.status_counts.HAS_DRM|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.HAS_DRM }}%</span>
+                </div>
+            </div>
+
+            <div class="status-metric-box box-quarantined clickable-metric" onclick="filterConversionsByStatus('QUARANTINED')" title="Click to inspect QUARANTINED files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-quarantined"></span>
+                    <span>QUARANTINED <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-quarantine">{{ dashboard.conversion.status_counts.QUARANTINED|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.QUARANTINED }}%</span>
+                </div>
+            </div>
+
+            <div class="status-metric-box box-failed clickable-metric" onclick="filterConversionsByStatus('FAILED')" title="Click to inspect FAILED files">
+                <div class="status-metric-header">
+                    <span class="status-dot seg-failed"></span>
+                    <span>FAILED <i class="fa-solid fa-filter" style="font-size:0.68rem; opacity:0.65;"></i></span>
+                </div>
+                <div class="status-metric-body">
+                    <strong id="box-cnt-failed">{{ dashboard.conversion.status_counts.FAILED|intcomma }}</strong>
+                    <span>{{ dashboard.conversion.status_pcts.FAILED }}%</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Library Shares Distribution -->
+        <div class="sub-section-divider">
+            <h4><i class="fa-solid fa-network-wired cyan"></i> Indexed Files by Library Source</h4>
+            <div class="pill-distribution-list">
+                {% for lib in dashboard.catalog.libraries %}
+                    <div class="dist-pill">
+                        <span class="dist-pill-name">{{ lib.library_name }}</span>
+                        <span class="dist-pill-count">{{ lib.count|intcomma }} <small>({{ lib.pct }}%)</small></span>
+                    </div>
+                {% empty %}
+                    <span class="text-muted">No library data available</span>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Column: Catalog Metadata Quality & File Format Distribution -->
+    <div class="dash-panel">
+        <div class="dash-panel-header">
+            <div>
+                <h3><i class="fa-solid fa-chart-pie cyan"></i> Catalog Metadata Completeness &amp; Formats</h3>
+                <p>Field-level metadata health across {{ dashboard.catalog.total_items|intcomma }} catalog items</p>
+            </div>
+            <span class="panel-pill">{{ dashboard.catalog.total_files|intcomma }} Files</span>
+        </div>
+
+        <div class="progress-bars-list">
+            <div class="progress-item">
+                <div class="progress-label-row">
+                    <span><i class="fa-solid fa-user-pen purple"></i> Known Author Identified</span>
+                    <span><strong>{{ dashboard.catalog.known_author|intcomma }}</strong> / {{ dashboard.catalog.total_items|intcomma }} ({{ dashboard.catalog.known_author_pct }}%)</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill fill-purple" style="width: {{ dashboard.catalog.known_author_pct }}%;"></div>
+                </div>
+            </div>
+
+            <div class="progress-item">
+                <div class="progress-label-row">
+                    <span><i class="fa-solid fa-align-left cyan"></i> Synopsis / Description Present</span>
+                    <span><strong>{{ dashboard.catalog.with_description|intcomma }}</strong> / {{ dashboard.catalog.total_items|intcomma }} ({{ dashboard.catalog.with_description_pct }}%)</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill fill-cyan" style="width: {{ dashboard.catalog.with_description_pct }}%;"></div>
+                </div>
+            </div>
+
+            <div class="progress-item">
+                <div class="progress-label-row">
+                    <span><i class="fa-solid fa-building-columns pink"></i> Publisher Recorded</span>
+                    <span><strong>{{ dashboard.catalog.with_publisher|intcomma }}</strong> / {{ dashboard.catalog.total_items|intcomma }} ({{ dashboard.catalog.with_publisher_pct }}%)</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill fill-pink" style="width: {{ dashboard.catalog.with_publisher_pct }}%;"></div>
+                </div>
+            </div>
+
+            <div class="progress-item">
+                <div class="progress-label-row">
+                    <span><i class="fa-solid fa-barcode green"></i> ISBN Identifier Verified</span>
+                    <span><strong>{{ dashboard.catalog.with_isbn|intcomma }}</strong> / {{ dashboard.catalog.total_items|intcomma }} ({{ dashboard.catalog.with_isbn_pct }}%)</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill fill-green" style="width: {{ dashboard.catalog.with_isbn_pct }}%;"></div>
+                </div>
+            </div>
+
+            <div class="progress-item">
+                <div class="progress-label-row">
+                    <span><i class="fa-solid fa-image amber"></i> Cover Thumbnail / Artwork</span>
+                    <span><strong>{{ dashboard.catalog.with_cover|intcomma }}</strong> / {{ dashboard.catalog.total_items|intcomma }} ({{ dashboard.catalog.with_cover_pct }}%)</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill fill-amber" style="width: {{ dashboard.catalog.with_cover_pct }}%;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Format Distribution -->
+        <div class="sub-section-divider">
+            <h4><i class="fa-solid fa-file-RegFile pink"></i> Physical Format Breakdown</h4>
+            <div class="pill-distribution-list">
+                {% for fmt in dashboard.catalog.formats %}
+                    <div class="dist-pill">
+                        <span class="dist-pill-name">{{ fmt.file_format }}</span>
+                        <span class="dist-pill-count">{{ fmt.count|intcomma }} <small>({{ fmt.pct }}%)</small></span>
+                    </div>
+                {% empty %}
+                    <span class="text-muted">No formats indexed yet</span>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Tabbed Activity Tables: Interactive epubmeta Explorer, Recent Imports, Review & Quarantine Queue -->
+<section class="dash-panel full-width-panel" id="conversions-explorer-section">
+    <div class="dash-panel-header tabs-header">
+        <div class="dash-tabs">
+            <button type="button" class="dash-tab active" id="tab-btn-conversions" onclick="switchDashboardTab('tab-conversions', this)">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> epubmeta Enrichments &amp; Quarantine Explorer (<span id="explorer-total-count">{{ dashboard.conversion.total_processed|intcomma }}</span>)
+            </button>
+            <button type="button" class="dash-tab" id="tab-btn-imports" onclick="switchDashboardTab('tab-imports', this)">
+                <i class="fa-solid fa-cloud-arrow-down"></i> Recent Scanner Imports ({{ dashboard.catalog.recent_imports|length|intcomma }})
+            </button>
+            <button type="button" class="dash-tab" id="tab-btn-attention" onclick="filterConversionsByStatus('ATTENTION')">
+                <i class="fa-solid fa-triangle-exclamation"></i> Review &amp; Quarantine Only ({{ dashboard.conversion.status_counts.NEEDS_REVIEW|add:dashboard.conversion.status_counts.QUARANTINED|add:dashboard.conversion.status_counts.FAILED|intcomma }})
+            </button>
+        </div>
+    </div>
+
+    <!-- Tab 1: Interactive epubmeta Enrichments & Quarantine Explorer -->
+    <div id="tab-conversions" class="dash-tab-content active">
+        <div class="explorer-toolbar">
+            <div class="status-filter-pills" id="status-filter-pills">
+                <button type="button" class="filter-pill-btn active" data-status="ALL" onclick="filterConversionsByStatus('ALL', false)">
+                    All (<span id="pill-cnt-all">{{ dashboard.conversion.total_processed|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="SUCCESS" onclick="filterConversionsByStatus('SUCCESS', false)">
+                    <span class="status-dot seg-success"></span> Enriched (<span id="pill-cnt-success">{{ dashboard.conversion.status_counts.SUCCESS|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="NEEDS_REVIEW" onclick="filterConversionsByStatus('NEEDS_REVIEW', false)">
+                    <span class="status-dot seg-review"></span> Needs Review (<span id="pill-cnt-review">{{ dashboard.conversion.status_counts.NEEDS_REVIEW|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="QUARANTINED" onclick="filterConversionsByStatus('QUARANTINED', false)">
+                    <span class="status-dot seg-quarantined"></span> Quarantined (<span id="pill-cnt-quarantine">{{ dashboard.conversion.status_counts.QUARANTINED|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="FAILED" onclick="filterConversionsByStatus('FAILED', false)">
+                    <span class="status-dot seg-failed"></span> Failed (<span id="pill-cnt-failed">{{ dashboard.conversion.status_counts.FAILED|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="HAS_DRM" onclick="filterConversionsByStatus('HAS_DRM', false)">
+                    <span class="status-dot seg-drm"></span> Has DRM (<span id="pill-cnt-drm">{{ dashboard.conversion.status_counts.HAS_DRM|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="NO_ISBN" onclick="filterConversionsByStatus('NO_ISBN', false)">
+                    <span class="status-dot seg-notfound"></span> No ISBN / Left As-Is (<span id="pill-cnt-noisbn">{{ dashboard.conversion.status_counts.NO_ISBN|intcomma }}</span>)
+                </button>
+                <button type="button" class="filter-pill-btn" data-status="IGNORED" onclick="filterConversionsByStatus('IGNORED', false)">
+                    <i class="fa-solid fa-ban" style="font-size:0.7rem; color:#94a3b8;"></i> Ignored (<span id="pill-cnt-ignored">{{ dashboard.conversion.status_counts.IGNORED|default:0|intcomma }}</span>)
+                </button>
+            </div>
+
+            <div class="explorer-search-wrap">
+                <div style="display:inline-flex; align-items:center; gap:0.35rem; background:rgba(15,23,42,0.85); border:1px solid rgba(255,255,255,0.15); border-radius:8px; padding:0.2rem 0.55rem;" title="Local drive/UNC prefix prepended when copying NAS paths">
+                    <span style="font-size:0.72rem; color:#94a3b8; font-weight:600;">Path Prefix:</span>
+                    <input type="text" id="toolbar-path-prefix" value="U:\Media" oninput="updatePathPrefix(this.value)" style="background:transparent; border:none; color:#38bdf8; font-family:monospace; font-size:0.8rem; width:110px; outline:none;">
+                </div>
+                <input type="text" id="explorer-search-input" class="explorer-search-input" placeholder="Search file, title, author, ISBN, error..." onkeydown="if(event.key==='Enter'){loadExplorerItems(0);}">
+                <button type="button" class="btn-mini-action" onclick="loadExplorerItems(0)">
+                    <i class="fa-solid fa-magnifying-glass"></i> Filter
+                </button>
+                <button type="button" class="btn-mini-action" onclick="document.getElementById('explorer-search-input').value=''; filterConversionsByStatus('ALL', false);">
+                    Reset
+                </button>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="dash-table">
+                <thead>
+                    <tr>
+                        <th>Updated (UTC)</th>
+                        <th>Status</th>
+                        <th>File Name</th>
+                        <th>Metadata Enrichment (Before &rarr; After) / Reason</th>
+                        <th>Discovered ISBN</th>
+                        <th>Confidence</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="explorer-table-body">
+                    {% for item in dashboard.conversion.recent_conversions %}
+                    <tr class="clickable-row" onclick='openConversionModal({
+                        file_name: "{{ item.file_name|escapejs }}",
+                        file_path: "{{ item.file_path|escapejs }}",
+                        file_ext: "{{ item.file_ext|escapejs }}",
+                        status: "{{ item.status|escapejs }}",
+                        isbn: "{{ item.isbn|escapejs }}",
+                        title: "{{ item.title|escapejs }}",
+                        author: "{{ item.author|escapejs }}",
+                        publisher: "{{ item.publisher|default:''|escapejs }}",
+                        description: "{{ item.description|default:''|escapejs }}",
+                        new_cover: "{{ item.new_cover|default:''|escapejs }}",
+                        orig_title: "{{ item.orig_title|escapejs }}",
+                        orig_author: "{{ item.orig_author|escapejs }}",
+                        orig_isbn: "{{ item.orig_isbn|escapejs }}",
+                        orig_publisher: "{{ item.orig_publisher|default:''|escapejs }}",
+                        orig_description: "{{ item.orig_description|default:''|escapejs }}",
+                        orig_cover: "{{ item.orig_cover|default:''|escapejs }}",
+                        match_confidence: {{ item.match_confidence|default:"null" }},
+                        error_message: "{{ item.error_message|escapejs }}",
+                        updated_at: "{{ item.updated_at|escapejs }}",
+                        file_size_mb: {{ item.file_size_mb|default:0 }}
+                    })'>
+                        <td class="td-mono">{{ item.updated_at }}</td>
+                        <td>
+                            <span class="status-pill status-{{ item.status|lower }}">
+                                {{ item.status }}
+                            </span>
+                        </td>
+                        <td class="td-filename" title="{{ item.file_path }}">
+                            <span class="fmt-mini-badge">{{ item.file_ext|default:"FILE" }}</span>
+                            <strong>{{ item.file_name }}</strong>
+                            {% if item.file_size_mb %}
+                                <small class="text-muted">({{ item.file_size_mb }} MB)</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if item.title or item.author %}
+                                <div class="meta-diff">
+                                    {% if item.orig_title and item.orig_title != item.title %}
+                                        <div class="diff-before"><i class="fa-solid fa-minus"></i> {{ item.orig_title }} <small>by {{ item.orig_author|default:"Unknown" }}</small></div>
+                                    {% endif %}
+                                    <div class="diff-after"><i class="fa-solid fa-check"></i> <strong>{{ item.title|default:item.file_name }}</strong> <small>by {{ item.author|default:"Unknown" }}</small></div>
+                                </div>
+                            {% endif %}
+                            {% if item.error_message %}
+                                <div class="text-amber" style="font-size:0.78rem; margin-top:2px;"><i class="fa-solid fa-circle-info"></i> {{ item.error_message }}</div>
+                            {% elif not item.title and not item.author %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="td-mono">
+                            {% if item.isbn %}
+                                <span class="isbn-pill">{{ item.isbn }}</span>
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if item.match_confidence is not None %}
+                                <span class="conf-badge {% if item.match_confidence >= 85 %}conf-high{% elif item.match_confidence >= 70 %}conf-med{% else %}conf-low{% endif %}">
+                                    {{ item.match_confidence }}%
+                                </span>
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td onclick="event.stopPropagation();" style="white-space:nowrap;">
+                            <button type="button" class="btn-mini-action" style="margin-right:4px;" onclick="copyMappedNasPath('{{ item.file_path|escapejs }}', this)" title="Copy mapped path (Prefix + NAS path) to clipboard">
+                                <i class="fa-regular fa-copy"></i> Copy Path
+                            </button>
+                            <button type="button" class="btn-mini-action" onclick="requeueConversionItem('{{ item.file_path|escapejs }}', this)" title="Clear state so scanner re-processes this file">
+                                <i class="fa-solid fa-rotate-right"></i> Re-queue
+                            </button>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="7" class="empty-table-msg">No conversion records recorded yet in scanner_state.db.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="explorer-pagination">
+            <span id="explorer-page-info">Showing latest {{ dashboard.conversion.recent_conversions|length|intcomma }} of {{ dashboard.conversion.total_processed|intcomma }} records (Click any status filter above to browse more)</span>
+            <div style="display:flex; gap:0.5rem;">
+                <button type="button" class="btn-mini-action" id="explorer-prev-btn" onclick="changeExplorerPage(-1)" disabled>&laquo; Previous</button>
+                <button type="button" class="btn-mini-action" id="explorer-next-btn" onclick="changeExplorerPage(1)">Next &raquo;</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab 2: Recent Scanner Imports (BookDB) -->
+    <div id="tab-imports" class="dash-tab-content">
+        <div class="table-responsive">
+            <table class="dash-table">
+                <thead>
+                    <tr>
+                        <th>Scanned At</th>
+                        <th>Catalog Title &amp; Author</th>
+                        <th>File Name &amp; Format</th>
+                        <th>Library</th>
+                        <th>ISBN / ASIN</th>
+                        <th>Health</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for imp in dashboard.catalog.recent_imports %}
+                    <tr>
+                        <td class="td-mono">{{ imp.scanned_at }}</td>
+                        <td>
+                            <a href="{% url 'catalog:dashboard' %}?q={{ imp.title|urlencode }}" style="color:#f8fafc; text-decoration:none;">
+                                <strong>{{ imp.title }}</strong>
+                            </a>
+                            <div class="text-muted"><small>by {{ imp.authors }}</small></div>
+                        </td>
+                        <td class="td-filename" title="{{ imp.file_path }}">
+                            <span class="fmt-mini-badge">{{ imp.file_format }}</span>
+                            {{ imp.file_name }}
+                            <small class="text-muted">({{ imp.file_size_mb }} MB)</small>
+                        </td>
+                        <td><span class="library-pill">{{ imp.library_name }}</span></td>
+                        <td class="td-mono">
+                            {% if imp.isbn %}
+                                <span class="isbn-pill">{{ imp.isbn }}</span>
+                            {% else %}
+                                <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if imp.is_invalid %}
+                                <span class="status-pill status-quarantined">INVALID</span>
+                            {% elif imp.has_drm %}
+                                <span class="status-pill status-has_drm">DRM LOCKED</span>
+                            {% else %}
+                                <span class="status-pill status-success">VALID</span>
+                            {% endif %}
+                            {% if imp.has_cover %}
+                                <span class="fmt-mini-badge" title="Cover Thumbnail Saved"><i class="fa-solid fa-image"></i></span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="6" class="empty-table-msg">No recent file imports found.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- Conversion / Quarantine Item Detail Modal -->
+<div class="conv-modal-backdrop" id="conv-detail-modal" onclick="if(event.target===this) closeConversionModal();">
+    <div class="conv-modal-card">
+        <div class="conv-modal-header">
+            <div>
+                <span class="status-pill" id="modal-status-pill">STATUS</span>
+                <h3 id="modal-file-name" style="margin:0.4rem 0 0 0; font-size:1.05rem;">File Name</h3>
+            </div>
+            <button type="button" class="btn-mini-action" onclick="closeConversionModal()"><i class="fa-solid fa-xmark"></i> Close</button>
+        </div>
+
+        <div class="conv-modal-grid">
+            <div class="conv-modal-field full">
+                <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.4rem;">
+                    <label style="margin:0;">Full NAS File Path &amp; Mapped Clipboard Path</label>
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem;">
+                        <span style="font-size:0.72rem; color:#94a3b8;">Prefix:</span>
+                        <input type="text" id="modal-path-prefix" value="U:\Media" oninput="updatePathPrefix(this.value)" style="background:rgba(15,23,42,0.9); border:1px solid rgba(56,189,248,0.4); border-radius:6px; color:#38bdf8; font-family:monospace; font-size:0.78rem; padding:0.2rem 0.5rem; width:125px;">
+                        <button type="button" class="btn-mini-action" id="modal-copy-path-btn" onclick="copyModalPath(false, this)" title="Copy full mapped file path to clipboard">
+                            <i class="fa-regular fa-copy"></i> Copy Full Path
+                        </button>
+                        <button type="button" class="btn-mini-action" id="modal-copy-folder-btn" onclick="copyModalPath(true, this)" title="Copy parent folder path to clipboard">
+                            <i class="fa-regular fa-folder-open"></i> Copy Folder
+                        </button>
+                        <button type="button" class="btn-mini-action" onclick="toggleConvBookPreview()" style="background:rgba(56,189,248,0.22); border-color:rgba(56,189,248,0.55); color:#38bdf8;" title="Inspect the actual pages, cover, title page, and copyright text inside this EPUB/PDF file">
+                            <i class="fa-solid fa-book-open-reader"></i> Preview Inside Book
+                        </button>
+                        <a id="modal-raw-stream-link" href="#" target="_blank" class="btn-mini-action" style="display:none; background:rgba(168,85,247,0.2); border-color:rgba(168,85,247,0.45); color:#c084fc; text-decoration:none;" title="Open the full PDF/EPUB file in a new browser tab">
+                            <i class="fa-solid fa-up-right-from-square"></i> Open Full File
+                        </a>
+                    </div>
+                </div>
+                <div id="modal-mapped-path" class="td-mono" style="font-size:0.84rem; color:#38bdf8; font-weight:600; margin-bottom:0.25rem;"></div>
+                <div style="font-size:0.73rem; color:#64748b;">Container path: <span id="modal-file-path" class="td-mono"></span></div>
+            </div>
+            <div class="conv-modal-field full" id="conv-book-preview-drawer" style="display:none; background:rgba(2,6,23,0.88); border:1px solid rgba(56,189,248,0.45);">
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.55rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.45rem;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                        <strong style="font-size:0.78rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-book-open-reader"></i> Inside Book Preview</strong>
+                        <span id="conv-prev-meta" style="font-size:0.72rem; color:#94a3b8;"></span>
+                        <button type="button" class="btn-mini-action" onclick="convAiReevaluateFromPreview(null, this)" style="background:rgba(168,85,247,0.22); border-color:rgba(168,85,247,0.55); color:#e9d5ff;" title="Have Gemini AI Vision inspect the previewed page/cover images and re-evaluate enrichment">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> AI Re-Evaluate from Image(s)
+                        </button>
+                    </div>
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem;">
+                        <span style="font-size:0.7rem; color:#94a3b8;">Highlight text below &amp; click:</span>
+                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('title')">&rarr; Title</button>
+                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('author')">&rarr; Author</button>
+                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('publisher')">&rarr; Publisher</button>
+                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('description')">&rarr; Synopsis</button>
+                    </div>
+                </div>
+                <div id="conv-prev-isbns" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.55rem; font-size:0.74rem;"></div>
+                <div id="conv-prev-images" style="display:none; gap:0.6rem; overflow-x:auto; padding-bottom:0.5rem; margin-bottom:0.6rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
+                <div id="conv-prev-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.45rem;"></div>
+                <div id="conv-prev-text" style="background:rgba(15,23,42,0.92); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:0.7rem 0.85rem; font-size:0.8rem; line-height:1.6; color:#e2e8f0; max-height:240px; overflow-y:auto; white-space:pre-wrap; font-family:Georgia, 'Times New Roman', serif;"></div>
+            </div>
+            <div class="conv-modal-field">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+                    <label style="margin:0;">Original Metadata (Click any field to keep)</label>
+                    <button type="button" class="btn-mini-action" style="font-size:0.65rem; padding:0.12rem 0.45rem;" onclick="selectAllSide('orig')">Select All Original</button>
+                </div>
+                <div id="modal-orig-meta"></div>
+            </div>
+            <div class="conv-modal-field">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+                    <label style="margin:0;">Enriched Metadata (Click any field to use)</label>
+                    <button type="button" class="btn-mini-action" style="font-size:0.65rem; padding:0.12rem 0.45rem;" onclick="selectAllSide('new')">Select All Enriched</button>
+                </div>
+                <div id="modal-new-meta"></div>
+            </div>
+            <div class="conv-modal-field full" id="modal-merged-editor-wrap">
+                <label style="color:#4ade80;"><i class="fa-solid fa-sliders"></i> Selected Fields to Save (Click fields above to mix &amp; match, or edit text directly)</label>
+                <div class="merged-edit-grid">
+                    <div>
+                        <small style="color:#94a3b8; font-size:0.7rem;">Title</small>
+                        <input type="text" id="merge-input-title" class="merged-input">
+                    </div>
+                    <div>
+                        <small style="color:#94a3b8; font-size:0.7rem;">Author</small>
+                        <input type="text" id="merge-input-author" class="merged-input">
+                    </div>
+                    <div>
+                        <small style="color:#94a3b8; font-size:0.7rem;">Publisher</small>
+                        <input type="text" id="merge-input-publisher" class="merged-input">
+                    </div>
+                    <div>
+                        <small style="color:#94a3b8; font-size:0.7rem;">ISBN</small>
+                        <input type="text" id="merge-input-isbn" class="merged-input td-mono">
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <small style="color:#94a3b8; font-size:0.7rem;">Description / Synopsis</small>
+                        <textarea id="merge-input-description" class="merged-input" rows="2" style="resize:vertical;"></textarea>
+                    </div>
+                </div>
+            </div>
+            <div class="conv-modal-field">
+                <label>Discovered ISBN &amp; Confidence</label>
+                <div id="modal-isbn-conf"></div>
+            </div>
+            <div class="conv-modal-field">
+                <label>Updated Timestamp &amp; Size</label>
+                <div id="modal-updated-size"></div>
+            </div>
+            <div class="conv-modal-field full">
+                <label>Diagnostic / Quarantine / Review Note</label>
+                <div id="modal-error-msg" class="text-amber"></div>
+            </div>
+        </div>
+
+        <div class="conv-modal-actions">
+            <a id="modal-catalog-search-link" href="{% url 'catalog:dashboard' %}" class="btn-mini-action" target="_blank">
+                <i class="fa-solid fa-magnifying-glass"></i> View in Catalog
+            </a>
+            <button type="button" class="btn-mini-action" id="modal-ignore-btn" style="background:rgba(148,163,184,0.18); color:#e2e8f0; border-color:rgba(148,163,184,0.4);" onclick="ignoreModalItem()" title="Keep original file metadata and permanently ignore epubmeta enrichment for this file">
+                <i class="fa-solid fa-shield-halved"></i> Keep Original (Ignore)
+            </button>
+            <button type="button" class="btn-mini-action approve" id="modal-approve-btn" style="display:none;" onclick="approveModalItem()">
+                <i class="fa-solid fa-check"></i> Approve Selected Fields
+            </button>
+            <button type="button" class="btn-mini-action" id="modal-reenrich-btn" style="background:rgba(56,189,248,0.2); color:#38bdf8; border-color:rgba(56,189,248,0.45);" onclick="reEnrichModalItem()" title="Re-run epubmeta enrichment immediately (uses any Title, Author, or ISBN entered in the Selected Metadata boxes above as search hints)">
+                <i class="fa-solid fa-arrows-rotate"></i> Re-Enrich Now
+            </button>
+            <button type="button" class="btn-mini-action" id="modal-requeue-btn" onclick="requeueModalItem()">
+                <i class="fa-solid fa-rotate-right"></i> Re-queue for Next Scan
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Time-Series History Chart Modal -->
+<div class="conv-modal-backdrop" id="history-chart-modal" onclick="if(event.target===this) closeHistoryChartModal();">
+    <div class="conv-modal-card" style="max-width:920px;">
+        <div class="conv-modal-header">
+            <div>
+                <span class="status-pill status-success"><i class="fa-solid fa-chart-line"></i> TIME-SERIES ANALYTICS</span>
+                <h3 id="chart-modal-title" style="margin:0.4rem 0 0 0; font-size:1.1rem;">epubmeta Enrichments Over Time</h3>
+            </div>
+            <button type="button" class="btn-mini-action" onclick="closeHistoryChartModal()"><i class="fa-solid fa-xmark"></i> Close</button>
+        </div>
+
+        <div class="explorer-toolbar" style="border-radius:10px; margin-bottom:1rem; padding:0.65rem 0.9rem;">
+            <div class="status-filter-pills" id="chart-series-pills">
+                <button type="button" class="filter-pill-btn active" data-series="ALL" onclick="setChartSeries('ALL')">All Processed</button>
+                <button type="button" class="filter-pill-btn" data-series="SUCCESS" onclick="setChartSeries('SUCCESS')"><span class="status-dot seg-success"></span> Enriched</button>
+                <button type="button" class="filter-pill-btn" data-series="NEEDS_REVIEW" onclick="setChartSeries('NEEDS_REVIEW')"><span class="status-dot seg-review"></span> Review</button>
+                <button type="button" class="filter-pill-btn" data-series="NO_ISBN" onclick="setChartSeries('NO_ISBN')"><span class="status-dot seg-notfound"></span> No ISBN</button>
+                <button type="button" class="filter-pill-btn" data-series="QUARANTINED" onclick="setChartSeries('QUARANTINED')"><span class="status-dot seg-quarantined"></span> Quarantine</button>
+                <button type="button" class="filter-pill-btn" data-series="CACHE" onclick="setChartSeries('CACHE')"><i class="fa-solid fa-brain" style="font-size:0.7rem; color:#f472b6;"></i> Metadata Cache</button>
+                <button type="button" class="filter-pill-btn" data-series="TRACKED" onclick="setChartSeries('TRACKED')"><i class="fa-solid fa-database" style="font-size:0.7rem; color:#38bdf8;"></i> Tracked Files</button>
+                <button type="button" class="filter-pill-btn" data-series="COMPARE" onclick="setChartSeries('COMPARE')"><i class="fa-solid fa-layer-group" style="font-size:0.7rem; color:#38bdf8;"></i> Compare All</button>
+            </div>
+
+            <div style="display:flex; gap:0.4rem; align-items:center;">
+                <button type="button" class="btn-mini-action" id="chart-mode-cum" onclick="setChartMode('cumulative')" style="background:rgba(56,189,248,0.3); color:#fff;">Cumulative Total</button>
+                <button type="button" class="btn-mini-action" id="chart-mode-rate" onclick="setChartMode('per_period')">Per-Hour / Day Rate</button>
+                <span style="color:#475569;">|</span>
+                <button type="button" class="btn-mini-action" id="chart-gran-hour" onclick="setChartGranularity('hour')" style="background:rgba(56,189,248,0.3); color:#fff;">Hourly</button>
+                <button type="button" class="btn-mini-action" id="chart-gran-day" onclick="setChartGranularity('day')">Daily</button>
+            </div>
+        </div>
+
+        <div style="background:rgba(15,23,42,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:1rem; height:360px; position:relative;">
+            <canvas id="history-trend-canvas"></canvas>
+        </div>
+
+        <div class="conv-modal-actions" style="margin-top:1rem;">
+            <button type="button" class="btn-mini-action approve" id="chart-browse-table-btn" onclick="browseCurrentChartSeriesInTable()">
+                <i class="fa-solid fa-table-list"></i> Browse Matching Files in Table Below &darr;
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Live Scanner & epubmeta Console Log Viewer -->
+<section class="dash-panel full-width-panel log-viewer-panel">
+    <div class="dash-panel-header tabs-header">
+        <div class="dash-tabs">
+            <button type="button" class="dash-tab active" onclick="switchLogTab('log-scanner', this)">
+                <i class="fa-solid fa-terminal cyan"></i> Unified Scanner Log (scanner.log)
+            </button>
+            <button type="button" class="dash-tab" onclick="switchLogTab('log-epubmeta', this)">
+                <i class="fa-solid fa-book-medical purple"></i> Enrichment Detail Log (epubmeta.log)
+            </button>
+        </div>
+        <span class="panel-pill">Last 40 Lines</span>
+    </div>
+
+    <div id="log-scanner" class="log-tab-content active">
+        <pre class="terminal-log-box" id="scanner-log-pre">{% for line in dashboard.scanner.scanner_log_lines %}{{ line }}
+{% empty %}No scanner.log output found yet.{% endfor %}</pre>
+    </div>
+
+    <div id="log-epubmeta" class="log-tab-content">
+        <pre class="terminal-log-box" id="epubmeta-log-pre">{% for line in dashboard.scanner.epubmeta_log_lines %}{{ line }}
+{% empty %}No epubmeta.log output found yet.{% endfor %}</pre>
+    </div>
+</section>
+
+<!-- Help, CLI, REST API & MCP Reference Modal -->
+<div class="conv-modal-backdrop" id="app-help-modal" onclick="if(event.target === this) closeAppHelpModal();">
+    <div class="conv-modal-card" style="max-width: 960px;">
+        <div class="conv-modal-header">
+            <div>
+                <span class="status-pill status-success"><i class="fa-solid fa-book-open"></i> QUICK REFERENCE</span>
+                <h3 style="margin-top:0.5rem; font-size:1.15rem;">MyLibrary Help — Dashboard, CLI, REST API &amp; MCP Server</h3>
+            </div>
+            <button type="button" class="btn-mini-action" onclick="closeAppHelpModal()"><i class="fa-solid fa-xmark"></i> Close</button>
+        </div>
+
+        <div class="conv-modal-grid">
+            <div class="conv-modal-field full">
+                <label><i class="fa-solid fa-gauge-high"></i> 1. Status Dashboard, On-Demand Enrichment, OPDS Server &amp; External Security</label>
+                <div style="font-size:0.82rem; line-height:1.55; color:#cbd5e1;">
+                    • <strong>Time-Series Charts &amp; Mix-and-Match Review:</strong> Click any number on the <strong>epubmeta Enrichments</strong> card or <strong>Local Metadata Cache</strong> to view hourly/daily charts. Click any Explorer row to cherry-pick <strong>Before vs. After</strong> fields (`Approve Selected Fields`, `Keep Original`, or `Re-queue`).<br>
+                    • <strong>On-Demand Enrichment (Web UI &amp; OPDS):</strong> On the Catalog Search page (<code>/mylibrary/</code>), click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> (or check <em>Enrich search results on demand</em> / append <code>+enrich</code> to search) to immediately enrich an EPUB/PDF via <code>POST /mylibrary/api/enrich/</code>.<br>
+                    • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong> (<em>Net Library &rarr; Add new catalog</em>), KOReader, or Calibre Sync. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV `.po`/`.an` bookmarks.<br>
+                    • <strong>External Security (<code>/mylibrary/login/</code>):</strong> Zero friction on your home LAN (`192.168.1.x`). Outside your LAN, web pages redirect to <code>/mylibrary/login/</code> and OPDS/API endpoints require HTTP Basic Auth (`AUTH_USERNAME` / `AUTH_PASSWORD`).
+                </div>
+            </div>
+
+            <div class="conv-modal-field full">
+                <label><i class="fa-solid fa-terminal"></i> 2. CLI (<code>mylibrary_cli.py</code>) &amp; Two-Pass Calibre/Moon+ Sync (<code>calibre_moon_sync.py</code>)</label>
+                <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem; font-size:0.75rem; color:#38bdf8; overflow-x:auto; margin:0.25rem 0 0 0;"># CLI status, search, review &amp; history
+python mylibrary_cli.py status
+python mylibrary_cli.py search "Dune" --type BOOK --format EPUB --limit 10
+python mylibrary_cli.py enrichments --status NEEDS_REVIEW --limit 20
+python mylibrary_cli.py approve "U:\Media\books\...\Book.epub" --title "Custom Title" --isbn "978..."
+
+# Moon+ Reader WebDAV bookmark migration &amp; Two-Pass Calibre Sync
+python calibre_moon_sync.py moon-only --apply   # Update Moon+ WebDAV .po &amp; .an files directly
+python calibre_moon_sync.py pass1 --apply       # Pass 1: Snapshot Moon+ bookmarks &amp; tag books in Calibre
+python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books &amp; write updated Moon+ bookmarks</pre>
+            </div>
+
+            <div class="conv-modal-field">
+                <label><i class="fa-solid fa-plug"></i> 3. MCP Server (<code>mylibrary_mcp.py</code>)</label>
+                <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.65rem; font-size:0.72rem; color:#4ade80; overflow-x:auto; margin:0.25rem 0 0 0;">{
+  "mcpServers": {
+    "mylibrary": {
+      "command": "python",
+      "args": [
+        "c:\\Users\\oscar\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"
+      ],
+      "env": {
+        "MYLIBRARY_URL": "http://192.168.1.43:8080/mylibrary",
+        "MYLIBRARY_PATH_PREFIX": "U:\\Media"
+      }
+    }
+  }
+}</pre>
+            </div>
+
+            <div class="conv-modal-field">
+                <label><i class="fa-solid fa-code"></i> 4. OPDS &amp; REST API Endpoints</label>
+                <div style="font-size:0.75rem; line-height:1.6; color:#cbd5e1; font-family:monospace;">
+                    POST /mylibrary/api/enrich/  (On-Demand Enrich)<br>
+                    POST /mylibrary/api/sync/amazon/<br>
+                    GET  /mylibrary/opds/  (OPDS 1.2 Root)<br>
+                    GET  /mylibrary/opds/amazon/?filter=amazon_only<br>
+                    GET  /mylibrary/opds/search/?q=...+enrich<br>
+                    GET  /mylibrary/opds/download/&lt;id&gt;/&lt;file&gt;<br>
+                    GET  /mylibrary/api/status/<br>
+                    GET  /mylibrary/api/catalog/?q=&amp;type=&amp;format=<br>
+                    POST /mylibrary/api/calibre/check-enriched/
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+    const statusItemsApiUrl = "{% url 'catalog:api_status_items' %}";
+    const statusHistoryApiUrl = "{% url 'catalog:api_status_history' %}";
+    const catalogDashboardUrl = "{% url 'catalog:dashboard' %}";
+    const PATH_PREFIX_STORAGE_KEY = 'mylibrary_nas_path_prefix';
+    let currentExplorerStatus = 'ALL';
+    let currentExplorerOffset = 0;
+    const explorerPageSize = 50;
+    let currentModalItem = null;
+
+    // History Chart State
+    let historyChartInstance = null;
+    let cachedHistoryData = null;
+    let currentChartSeries = 'ALL';
+    let currentChartMode = 'cumulative'; // 'cumulative' or 'per_period'
+    let currentChartGranularity = 'hour'; // 'hour' or 'day'
+
+    const SERIES_META = {
+        ALL: { label: 'All Processed Enrichments', color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.2)' },
+        SUCCESS: { label: 'Enriched (SUCCESS)', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.2)' },
+        NEEDS_REVIEW: { label: 'Needs Review', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.2)' },
+        NO_ISBN: { label: 'No ISBN (Left As-Is)', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.2)' },
+        QUARANTINED: { label: 'Quarantined', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.2)' },
+        FAILED: { label: 'Failed', color: '#f97316', bg: 'rgba(249, 115, 22, 0.2)' },
+        CACHE: { label: 'Local Metadata Cache', color: '#ec4899', bg: 'rgba(236, 72, 153, 0.2)' },
+        TRACKED: { label: 'Tracked File States (SQLite)', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.2)' }
+    };
+
+    async function openHistoryChartModal(seriesKey = 'ALL') {
+        currentChartSeries = seriesKey || 'ALL';
+        const modal = document.getElementById('history-chart-modal');
+        if (modal) modal.classList.add('open');
+        highlightChartControls();
+        await fetchAndRenderHistoryChart();
+    }
+
+    function closeHistoryChartModal() {
+        const modal = document.getElementById('history-chart-modal');
+        if (modal) modal.classList.remove('open');
+    }
+
+    function openAppHelpModal() {
+        const modal = document.getElementById('app-help-modal');
+        if (modal) modal.classList.add('open');
+    }
+
+    function closeAppHelpModal() {
+        const modal = document.getElementById('app-help-modal');
+        if (modal) modal.classList.remove('open');
+    }
+
+    function setChartSeries(seriesKey) {
+        currentChartSeries = seriesKey;
+        highlightChartControls();
+        renderHistoryChartFromCache();
+    }
+
+    function setChartMode(mode) {
+        currentChartMode = mode;
+        highlightChartControls();
+        renderHistoryChartFromCache();
+    }
+
+    async function setChartGranularity(gran) {
+        currentChartGranularity = gran;
+        cachedHistoryData = null;
+        highlightChartControls();
+        await fetchAndRenderHistoryChart();
+    }
+
+    function highlightChartControls() {
+        document.querySelectorAll('#chart-series-pills .filter-pill-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.getAttribute('data-series') === currentChartSeries);
+        });
+        const cumBtn = document.getElementById('chart-mode-cum');
+        const rateBtn = document.getElementById('chart-mode-rate');
+        if (cumBtn) cumBtn.style.background = currentChartMode === 'cumulative' ? 'rgba(56,189,248,0.35)' : '';
+        if (rateBtn) rateBtn.style.background = currentChartMode === 'per_period' ? 'rgba(56,189,248,0.35)' : '';
+
+        const hrBtn = document.getElementById('chart-gran-hour');
+        const dayBtn = document.getElementById('chart-gran-day');
+        if (hrBtn) hrBtn.style.background = currentChartGranularity === 'hour' ? 'rgba(56,189,248,0.35)' : '';
+        if (dayBtn) dayBtn.style.background = currentChartGranularity === 'day' ? 'rgba(56,189,248,0.35)' : '';
+
+        const titleEl = document.getElementById('chart-modal-title');
+        if (titleEl) {
+            const mLabel = currentChartSeries === 'COMPARE' ? 'All Enrichment Categories' : (SERIES_META[currentChartSeries]?.label || currentChartSeries);
+            const modeLabel = currentChartMode === 'cumulative' ? 'Cumulative Growth' : (currentChartGranularity === 'hour' ? 'Hourly Throughput' : 'Daily Throughput');
+            titleEl.textContent = `${mLabel} — ${modeLabel}`;
+        }
+    }
+
+    async function fetchAndRenderHistoryChart() {
+        try {
+            const resp = await fetch(`${statusHistoryApiUrl}?granularity=${currentChartGranularity}`);
+            if (!resp.ok) return;
+            cachedHistoryData = await resp.json();
+            renderHistoryChartFromCache();
+        } catch (err) {
+            console.error('Failed to load history chart:', err);
+        }
+    }
+
+    function renderHistoryChartFromCache() {
+        if (!cachedHistoryData || typeof Chart === 'undefined') return;
+        const canvas = document.getElementById('history-trend-canvas');
+        if (!canvas) return;
+
+        const labels = cachedHistoryData.labels || [];
+        const sourceMap = currentChartMode === 'cumulative' ? (cachedHistoryData.cumulative || {}) : (cachedHistoryData.per_period || {});
+        const isLine = currentChartMode === 'cumulative';
+
+        let datasets = [];
+        if (currentChartSeries === 'COMPARE') {
+            ['SUCCESS', 'NO_ISBN', 'NEEDS_REVIEW', 'QUARANTINED'].forEach(k => {
+                const meta = SERIES_META[k];
+                datasets.push({
+                    label: meta.label,
+                    data: sourceMap[k] || [],
+                    borderColor: meta.color,
+                    backgroundColor: meta.bg,
+                    borderWidth: 2,
+                    fill: isLine,
+                    tension: 0.25
+                });
+            });
+        } else {
+            const meta = SERIES_META[currentChartSeries] || SERIES_META.ALL;
+            datasets.push({
+                label: meta.label,
+                data: sourceMap[currentChartSeries] || [],
+                borderColor: meta.color,
+                backgroundColor: isLine ? meta.bg : meta.color,
+                borderWidth: 2.5,
+                fill: isLine,
+                tension: 0.25
+            });
+        }
+
+        if (historyChartInstance) {
+            historyChartInstance.destroy();
+        }
+
+        historyChartInstance = new Chart(canvas.getContext('2d'), {
+            type: isLine ? 'line' : 'bar',
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { labels: { color: '#cbd5e1' } }
+                },
+                scales: {
+                    x: {
+                        ticks: { color: '#94a3b8', maxRotation: 45 },
+                        grid: { color: 'rgba(255,255,255,0.06)' }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: { color: '#94a3b8' },
+                        grid: { color: 'rgba(255,255,255,0.06)' }
+                    }
+                }
+            }
+        });
+    }
+
+    function browseCurrentChartSeriesInTable() {
+        const targetStatus = (currentChartSeries === 'COMPARE' || currentChartSeries === 'CACHE' || currentChartSeries === 'TRACKED') ? 'ALL' : currentChartSeries;
+        closeHistoryChartModal();
+        filterConversionsByStatus(targetStatus, true);
+    }
+
+    function getPathPrefix() {
+        const saved = localStorage.getItem(PATH_PREFIX_STORAGE_KEY);
+        return (saved !== null && saved !== undefined) ? saved : 'U:\\Media';
+    }
+
+    function formatMappedNasPath(nasPath, folderOnly = false) {
+        if (!nasPath) return '';
+        const prefix = (getPathPrefix() || '').trim();
+        const useBackslash = !prefix || prefix.includes('\\') || /^[a-zA-Z]:/.test(prefix);
+        const sep = useBackslash ? '\\' : '/';
+
+        const cleanPrefix = prefix.replace(/[\\/]+$/, '');
+        let cleanRel = String(nasPath).replace(/^[\\/]+/, '');
+        if (useBackslash) {
+            cleanRel = cleanRel.replace(/\//g, '\\');
+        } else {
+            cleanRel = cleanRel.replace(/\\/g, '/');
+        }
+
+        let fullPath = cleanPrefix ? `${cleanPrefix}${sep}${cleanRel}` : cleanRel;
+        if (folderOnly) {
+            const lastIdx = fullPath.lastIndexOf(sep);
+            if (lastIdx > 0) {
+                fullPath = fullPath.substring(0, lastIdx);
+            }
+        }
+        return fullPath;
+    }
+
+    function updatePathPrefix(newVal) {
+        localStorage.setItem(PATH_PREFIX_STORAGE_KEY, newVal);
+        const tbInput = document.getElementById('toolbar-path-prefix');
+        const mdInput = document.getElementById('modal-path-prefix');
+        if (tbInput && tbInput.value !== newVal) tbInput.value = newVal;
+        if (mdInput && mdInput.value !== newVal) mdInput.value = newVal;
+        if (currentModalItem) {
+            const mappedEl = document.getElementById('modal-mapped-path');
+            if (mappedEl) mappedEl.textContent = formatMappedNasPath(currentModalItem.file_path, false);
+        }
+    }
+
+    async function copyTextToClipboard(text, btnEl) {
+        if (!text) return;
+        const origHtml = btnEl ? btnEl.innerHTML : '';
+        let copied = false;
+        if (navigator.clipboard && window.isSecureContext) {
+            try {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            } catch (e) {
+                copied = false;
+            }
+        }
+        if (!copied) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            ta.style.top = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try {
+                copied = document.execCommand('copy');
+            } catch (e) {
+                copied = false;
+            }
+            document.body.removeChild(ta);
+        }
+        if (btnEl && copied) {
+            btnEl.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+            setTimeout(() => {
+                btnEl.innerHTML = origHtml;
+            }, 1400);
+        }
+    }
+
+    function copyMappedNasPath(nasPath, btnEl) {
+        const mapped = formatMappedNasPath(nasPath, false);
+        copyTextToClipboard(mapped, btnEl);
+    }
+
+    function copyModalPath(folderOnly, btnEl) {
+        if (!currentModalItem) return;
+        const mapped = formatMappedNasPath(currentModalItem.file_path, folderOnly);
+        copyTextToClipboard(mapped, btnEl);
+    }
+
+    function escHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    let fieldChoices = {
+        cover: 'new',
+        title: 'new',
+        author: 'new',
+        publisher: 'new',
+        isbn: 'new',
+        description: 'new'
+    };
+
+    function renderMetaComparisonBlock(side, title, author, publisher, isbn, description, coverUrl) {
+        const noCoverFallback = `<i class="fa-regular fa-image" style="font-size:1.3rem; margin-bottom:4px; opacity:0.5;"></i><span>No Cover</span>`;
+        const onErrScript = side === 'new'
+            ? `this.parentElement.innerHTML='<i class=\\'fa-regular fa-image\\' style=\\'font-size:1.3rem;margin-bottom:4px;opacity:0.5;\\'></i><span>No Cover</span>'; if(currentModalItem && currentModalItem.orig_cover){ pickField('cover', 'orig'); }`
+            : `this.parentElement.innerHTML='<i class=\\'fa-regular fa-image\\' style=\\'font-size:1.3rem;margin-bottom:4px;opacity:0.5;\\'></i><span>No Cover</span>';`;
+
+        const coverHtml = coverUrl
+            ? `<div class="meta-cover-box pickable-cover" id="pick-${side}-cover" onclick="pickField('cover', '${side}', true)" title="Click to use this cover"><img src="${escHtml(coverUrl)}" alt="Cover" onerror="${onErrScript}"></div>`
+            : `<div class="meta-cover-box pickable-cover" id="pick-${side}-cover" onclick="pickField('cover', '${side}', true)" title="Click to use this cover">${noCoverFallback}</div>`;
+
+        const descHtml = description
+            ? `<div class="meta-desc-box pickable-field" id="pick-${side}-description" onclick="pickField('description', '${side}', true)" title="Click to use this description"><span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(description)}</div>`
+            : `<div class="meta-desc-box pickable-field" id="pick-${side}-description" onclick="pickField('description', '${side}', true)" style="color:#64748b; font-style:italic;" title="Click to use empty description"><span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>No description available.</div>`;
+
+        return `
+            <div class="meta-compare-body">
+                ${coverHtml}
+                <div style="min-width:0; flex:1;">
+                    <div class="pickable-field" id="pick-${side}-title" onclick="pickField('title', '${side}', true)" title="Click to use this Title">
+                        <span class="pick-badge"><i class="fa-solid fa-check"></i></span>
+                        <div style="font-weight:700; font-size:0.88rem; color:#f8fafc; word-break:break-word;">${escHtml(title || '—')}</div>
+                    </div>
+                    <div class="pickable-field" id="pick-${side}-author" onclick="pickField('author', '${side}', true)" title="Click to use this Author">
+                        <span class="pick-badge"><i class="fa-solid fa-check"></i></span>
+                        <div style="font-size:0.78rem; color:#94a3b8;">Author: <strong style="color:#cbd5e1;">${escHtml(author || '—')}</strong></div>
+                    </div>
+                    <div class="pickable-field" id="pick-${side}-publisher" onclick="pickField('publisher', '${side}', true)" title="Click to use this Publisher">
+                        <span class="pick-badge"><i class="fa-solid fa-check"></i></span>
+                        <div style="font-size:0.76rem; color:#94a3b8;">Publisher: <span style="color:#cbd5e1;">${escHtml(publisher || '—')}</span></div>
+                    </div>
+                    <div class="pickable-field" id="pick-${side}-isbn" onclick="pickField('isbn', '${side}', true)" title="Click to use this ISBN">
+                        <span class="pick-badge"><i class="fa-solid fa-check"></i></span>
+                        <div style="font-size:0.76rem; color:#94a3b8;">ISBN: <span class="td-mono" style="color:#38bdf8;">${escHtml(isbn || '—')}</span></div>
+                    </div>
+                </div>
+            </div>
+            <label style="margin-top:0.35rem;">Description / Synopsis (Click to select)</label>
+            ${descHtml}
+        `;
+    }
+
+    function pickField(field, side, fromUserClick = false) {
+        fieldChoices[field] = side;
+        ['orig', 'new'].forEach(s => {
+            const el = document.getElementById(`pick-${s}-${field}`);
+            if (el) el.classList.toggle('selected-field', s === side);
+        });
+        if (!currentModalItem) return;
+        const valMap = {
+            title: side === 'orig' ? (currentModalItem.orig_title || '') : (currentModalItem.title || ''),
+            author: side === 'orig' ? (currentModalItem.orig_author || '') : (currentModalItem.author || ''),
+            publisher: side === 'orig' ? (currentModalItem.orig_publisher || '') : (currentModalItem.publisher || ''),
+            isbn: side === 'orig' ? (currentModalItem.orig_isbn || '') : (currentModalItem.isbn || ''),
+            description: side === 'orig' ? (currentModalItem.orig_description || '') : (currentModalItem.description || '')
+        };
+        if (field in valMap) {
+            const inp = document.getElementById(`merge-input-${field}`);
+            if (inp) {
+                inp.value = valMap[field];
+                if (fromUserClick) {
+                    inp.style.borderColor = '#4ade80';
+                    inp.style.boxShadow = '0 0 0 2px rgba(74,222,128,0.35)';
+                    setTimeout(() => {
+                        inp.style.borderColor = '';
+                        inp.style.boxShadow = '';
+                    }, 700);
+                }
+            }
+        }
+    }
+
+    function selectAllSide(side) {
+        if (side === 'new' && currentModalItem) {
+            pickField('cover', currentModalItem.orig_cover ? 'orig' : 'new', true);
+            ['title', 'author', 'publisher', 'isbn', 'description'].forEach(f => {
+                pickField(f, currentModalItem[f] ? 'new' : 'orig', true);
+            });
+        } else {
+            ['cover', 'title', 'author', 'publisher', 'isbn', 'description'].forEach(f => pickField(f, side, true));
+        }
+    }
+
+    function switchDashboardTab(tabId, btnEl) {
+        document.querySelectorAll('.dash-tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.dash-panel:not(.log-viewer-panel) .dash-tab').forEach(el => el.classList.remove('active'));
+        const target = document.getElementById(tabId);
+        if (target) target.classList.add('active');
+        if (btnEl) btnEl.classList.add('active');
+    }
+
+    function switchLogTab(tabId, btnEl) {
+        document.querySelectorAll('.log-tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.log-viewer-panel .dash-tab').forEach(el => el.classList.remove('active'));
+        const target = document.getElementById(tabId);
+        if (target) target.classList.add('active');
+        if (btnEl) btnEl.classList.add('active');
+    }
+
+    function filterConversionsByStatus(status, scrollToSection = true) {
+        currentExplorerStatus = status || 'ALL';
+        currentExplorerOffset = 0;
+
+        // Ensure Explorer tab is active
+        switchDashboardTab('tab-conversions', document.getElementById('tab-btn-conversions'));
+
+        // Highlight matching filter pill
+        document.querySelectorAll('#status-filter-pills .filter-pill-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.getAttribute('data-status') === currentExplorerStatus);
+        });
+
+        if (scrollToSection) {
+            const sec = document.getElementById('conversions-explorer-section');
+            if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        loadExplorerItems(0);
+    }
+
+    function changeExplorerPage(delta) {
+        const nextOffset = Math.max(0, currentExplorerOffset + delta * explorerPageSize);
+        loadExplorerItems(nextOffset);
+    }
+
+    async function loadExplorerItems(offset = 0) {
+        currentExplorerOffset = offset;
+        const tbody = document.getElementById('explorer-table-body');
+        const searchInput = document.getElementById('explorer-search-input');
+        const q = searchInput ? searchInput.value.trim() : '';
+
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="7" class="empty-table-msg"><i class="fa-solid fa-spinner fa-spin"></i> Loading records from scanner_state.db...</td></tr>';
+        }
+
+        try {
+            const params = new URLSearchParams({
+                status: currentExplorerStatus,
+                q: q,
+                limit: explorerPageSize,
+                offset: currentExplorerOffset
+            });
+            const resp = await fetch(`${statusItemsApiUrl}?${params.toString()}`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            renderExplorerRows(data);
+        } catch (err) {
+            if (tbody) {
+                tbody.innerHTML = `<tr><td colspan="7" class="empty-table-msg text-red">Failed to load records: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+    }
+
+    function renderExplorerRows(data) {
+        const tbody = document.getElementById('explorer-table-body');
+        const pageInfo = document.getElementById('explorer-page-info');
+        const prevBtn = document.getElementById('explorer-prev-btn');
+        const nextBtn = document.getElementById('explorer-next-btn');
+
+        const items = data.items || [];
+        const total = data.total || 0;
+
+        if (pageInfo) {
+            const start = total > 0 ? data.offset + 1 : 0;
+            const end = Math.min(data.offset + items.length, total);
+            pageInfo.textContent = `Showing ${start.toLocaleString('en-US')}–${end.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} matching records (Filter: ${data.status})`;
+        }
+        if (prevBtn) prevBtn.disabled = data.offset <= 0;
+        if (nextBtn) nextBtn.disabled = (data.offset + items.length) >= total;
+
+        if (!tbody) return;
+        if (!items.length) {
+            tbody.innerHTML = `<tr><td colspan="7" class="empty-table-msg">No records found for status <strong>${escHtml(data.status)}</strong>.</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = '';
+        items.forEach(item => {
+            const tr = document.createElement('tr');
+            tr.className = 'clickable-row';
+            tr.addEventListener('click', () => openConversionModal(item));
+
+            const stLower = (item.status || 'unknown').toLowerCase();
+            let metaHtml = '';
+            if (item.title || item.author) {
+                metaHtml += '<div class="meta-diff">';
+                if (item.orig_title && item.orig_title !== item.title) {
+                    metaHtml += `<div class="diff-before"><i class="fa-solid fa-minus"></i> ${escHtml(item.orig_title)} <small>by ${escHtml(item.orig_author || 'Unknown')}</small></div>`;
+                }
+                metaHtml += `<div class="diff-after"><i class="fa-solid fa-check"></i> <strong>${escHtml(item.title || item.file_name)}</strong> <small>by ${escHtml(item.author || 'Unknown')}</small></div>`;
+                metaHtml += '</div>';
+            }
+            if (item.error_message) {
+                metaHtml += `<div class="text-amber" style="font-size:0.78rem; margin-top:2px;"><i class="fa-solid fa-circle-info"></i> ${escHtml(item.error_message)}</div>`;
+            } else if (!item.title && !item.author) {
+                metaHtml = '<span class="text-muted">—</span>';
+            }
+
+            let confHtml = '<span class="text-muted">—</span>';
+            if (item.match_confidence !== null && item.match_confidence !== undefined) {
+                const cClass = item.match_confidence >= 85 ? 'conf-high' : (item.match_confidence >= 70 ? 'conf-med' : 'conf-low');
+                confHtml = `<span class="conf-badge ${cClass}">${item.match_confidence}%</span>`;
+            }
+
+            tr.innerHTML = `
+                <td class="td-mono">${escHtml(item.updated_at)}</td>
+                <td><span class="status-pill status-${escHtml(stLower)}">${escHtml(item.status)}</span></td>
+                <td class="td-filename" title="${escHtml(item.file_path)}">
+                    <span class="fmt-mini-badge">${escHtml(item.file_ext || 'FILE')}</span>
+                    <strong>${escHtml(item.file_name)}</strong>
+                    ${item.file_size_mb ? `<small class="text-muted">(${escHtml(item.file_size_mb)} MB)</small>` : ''}
+                </td>
+                <td>${metaHtml}</td>
+                <td class="td-mono">${item.isbn ? `<span class="isbn-pill">${escHtml(item.isbn)}</span>` : '<span class="text-muted">—</span>'}</td>
+                <td>${confHtml}</td>
+                <td class="action-cell"></td>
+            `;
+            const actionCell = tr.querySelector('.action-cell');
+            actionCell.addEventListener('click', e => e.stopPropagation());
+
+            if (item.status === 'NEEDS_REVIEW' && (item.title || item.isbn)) {
+                const appBtn = document.createElement('button');
+                appBtn.type = 'button';
+                appBtn.className = 'btn-mini-action approve';
+                appBtn.style.marginRight = '4px';
+                appBtn.innerHTML = '<i class="fa-solid fa-check"></i> Approve';
+                appBtn.onclick = () => approveConversionItem(item.file_path, appBtn);
+                actionCell.appendChild(appBtn);
+            }
+
+            if (item.status !== 'SUCCESS' && item.status !== 'IGNORED') {
+                const ignBtn = document.createElement('button');
+                ignBtn.type = 'button';
+                ignBtn.className = 'btn-mini-action';
+                ignBtn.style.marginRight = '4px';
+                ignBtn.style.background = 'rgba(148,163,184,0.18)';
+                ignBtn.style.color = '#e2e8f0';
+                ignBtn.style.borderColor = 'rgba(148,163,184,0.4)';
+                ignBtn.title = 'Keep original file metadata and ignore enrichment';
+                ignBtn.innerHTML = '<i class="fa-solid fa-ban"></i> Keep Original';
+                ignBtn.onclick = () => ignoreConversionItem(item.file_path, ignBtn);
+                actionCell.appendChild(ignBtn);
+            }
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'btn-mini-action';
+            copyBtn.style.marginRight = '4px';
+            copyBtn.title = 'Copy mapped path (Prefix + NAS path) to clipboard';
+            copyBtn.innerHTML = '<i class="fa-regular fa-copy"></i> Copy Path';
+            copyBtn.onclick = () => copyMappedNasPath(item.file_path, copyBtn);
+            actionCell.appendChild(copyBtn);
+
+            const reqBtn = document.createElement('button');
+            reqBtn.type = 'button';
+            reqBtn.className = 'btn-mini-action';
+            reqBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i> Re-queue';
+            reqBtn.onclick = () => requeueConversionItem(item.file_path, reqBtn);
+            actionCell.appendChild(reqBtn);
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    function openConversionModal(item) {
+        currentModalItem = item;
+        const modal = document.getElementById('conv-detail-modal');
+        if (!modal) return;
+
+        const pill = document.getElementById('modal-status-pill');
+        if (pill) {
+            pill.className = `status-pill status-${(item.status || 'unknown').toLowerCase()}`;
+            pill.textContent = item.status || 'UNKNOWN';
+        }
+        const pref = getPathPrefix();
+        const mdInput = document.getElementById('modal-path-prefix');
+        if (mdInput) mdInput.value = pref;
+        document.getElementById('modal-file-name').textContent = item.file_name || 'Unknown File';
+        document.getElementById('modal-file-path').textContent = item.file_path || '—';
+        const mappedEl = document.getElementById('modal-mapped-path');
+        if (mappedEl) mappedEl.textContent = formatMappedNasPath(item.file_path, false) || '—';
+        document.getElementById('modal-orig-meta').innerHTML = renderMetaComparisonBlock(
+            'orig',
+            item.orig_title,
+            item.orig_author,
+            item.orig_publisher,
+            item.orig_isbn,
+            item.orig_description,
+            item.orig_cover
+        );
+        document.getElementById('modal-new-meta').innerHTML = renderMetaComparisonBlock(
+            'new',
+            item.title,
+            item.author,
+            item.publisher,
+            item.isbn,
+            item.description,
+            item.new_cover
+        );
+
+        // Smart default field selection: prefer Original Cover unless missing; prefer non-empty enriched text fields
+        pickField('cover', item.orig_cover ? 'orig' : 'new');
+        pickField('title', item.title ? 'new' : 'orig');
+        pickField('author', item.author ? 'new' : 'orig');
+        pickField('publisher', item.publisher ? 'new' : 'orig');
+        pickField('isbn', item.isbn ? 'new' : 'orig');
+        pickField('description', item.description ? 'new' : 'orig');
+        document.getElementById('modal-isbn-conf').innerHTML =
+            `ISBN: <strong>${escHtml(item.isbn || '—')}</strong> &nbsp;|&nbsp; Confidence: <strong>${item.match_confidence !== null && item.match_confidence !== undefined ? item.match_confidence + '%' : '—'}</strong>`;
+        document.getElementById('modal-updated-size').textContent =
+            `${item.updated_at || '—'} (${item.file_size_mb || 0} MB)`;
+        document.getElementById('modal-error-msg').textContent =
+            item.error_message || (item.status === 'SUCCESS' ? 'Enriched and verified cleanly.' : 'No additional diagnostic message recorded.');
+
+        const searchQ = item.isbn || item.title || item.file_name || '';
+        const searchLink = document.getElementById('modal-catalog-search-link');
+        if (searchLink) {
+            searchLink.href = `${catalogDashboardUrl}?q=${encodeURIComponent(searchQ)}`;
+        }
+
+        const approveBtn = document.getElementById('modal-approve-btn');
+        if (approveBtn) {
+            approveBtn.disabled = false;
+            approveBtn.innerHTML = '<i class="fa-solid fa-check"></i> Approve Selected Fields';
+            approveBtn.style.display = 'inline-flex';
+        }
+        const ignoreBtn = document.getElementById('modal-ignore-btn');
+        if (ignoreBtn) {
+            ignoreBtn.disabled = false;
+            ignoreBtn.innerHTML = '<i class="fa-solid fa-shield-halved"></i> Keep Original (Ignore)';
+            ignoreBtn.style.display = (item.status !== 'SUCCESS' && item.status !== 'IGNORED') ? 'inline-flex' : 'none';
+        }
+        const requeueBtn = document.getElementById('modal-requeue-btn');
+        if (requeueBtn) {
+            requeueBtn.disabled = false;
+            requeueBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i> Re-queue for Next Scan';
+        }
+        const reenrichBtn = document.getElementById('modal-reenrich-btn');
+        if (reenrichBtn) {
+            reenrichBtn.disabled = false;
+            reenrichBtn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Re-Enrich Now';
+        }
+        const prevDrawer = document.getElementById('conv-book-preview-drawer');
+        if (prevDrawer) {
+            prevDrawer.style.display = 'none';
+            prevDrawer.dataset.loadedFor = '';
+        }
+        const rawLink = document.getElementById('modal-raw-stream-link');
+        if (rawLink) {
+            if (item.file_path) {
+                rawLink.href = `/mylibrary/api/book-preview/raw/?file_path=${encodeURIComponent(item.file_path)}`;
+                rawLink.style.display = 'inline-flex';
+            } else {
+                rawLink.style.display = 'none';
+            }
+        }
+
+        modal.classList.add('open');
+    }
+
+    let convPreviewPages = [];
+
+    async function toggleConvBookPreview() {
+        const drawer = document.getElementById('conv-book-preview-drawer');
+        if (!drawer || !currentModalItem) return;
+        if (drawer.style.display === 'block') {
+            drawer.style.display = 'none';
+            return;
+        }
+        drawer.style.display = 'block';
+        if (drawer.dataset.loadedFor === currentModalItem.file_path) return;
+
+        const textEl = document.getElementById('conv-prev-text');
+        const imgEl = document.getElementById('conv-prev-images');
+        const tabsEl = document.getElementById('conv-prev-tabs');
+        const isbnsEl = document.getElementById('conv-prev-isbns');
+        const metaEl = document.getElementById('conv-prev-meta');
+
+        if (textEl) textEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reading pages and cover images from book file on NAS...';
+        if (imgEl) { imgEl.style.display = 'none'; imgEl.innerHTML = ''; }
+        if (tabsEl) tabsEl.innerHTML = '';
+        if (isbnsEl) { isbnsEl.style.display = 'none'; isbnsEl.innerHTML = ''; }
+        if (metaEl) metaEl.textContent = '';
+
+        try {
+            const resp = await fetch(`/mylibrary/api/book-preview/?file_path=${encodeURIComponent(currentModalItem.file_path)}`);
+            const res = await resp.json();
+            if (!res.ok) {
+                if (textEl) textEl.textContent = res.error || 'Could not load book preview.';
+                return;
+            }
+            drawer.dataset.loadedFor = currentModalItem.file_path;
+            if (metaEl) metaEl.textContent = `(${res.file_ext} • ${res.file_size_mb} MB • ${res.total_sections || 0} pages/sections)`;
+            if (isbnsEl && Array.isArray(res.detected_isbns) && res.detected_isbns.length > 0) {
+                isbnsEl.style.display = 'flex';
+                isbnsEl.innerHTML = `<span style="color:#94a3b8;"><i class="fa-solid fa-barcode" style="color:#4ade80;"></i> ISBNs found inside book:</span>` +
+                    res.detected_isbns.map(isbn => `<button type="button" class="btn-mini-action approve" onclick="document.getElementById('merge-input-isbn').value='${escHtml(isbn)}'">+ Use ${escHtml(isbn)}</button>`).join('');
+            }
+            if (imgEl && Array.isArray(res.images) && res.images.length > 0) {
+                imgEl.style.display = 'flex';
+                imgEl.innerHTML = res.images.map((img, i) => `
+                    <div style="flex:0 0 auto; width:130px; background:rgba(15,23,42,0.9); border:1px solid rgba(255,255,255,0.14); border-radius:8px; padding:0.35rem; display:flex; flex-direction:column; align-items:center; gap:0.25rem;">
+                        <img src="${img.data_uri}" alt="${escHtml(img.label)}" onclick="window.open().document.write('<body style=\\'margin:0;background:#0f172a;display:flex;justify-content:center;align-items:center;min-height:100vh;\\'><img src=\\'${img.data_uri}\\' style=\\'max-width:95vw;max-height:95vh;\\'></body>')" style="width:100%; height:150px; object-fit:contain; border-radius:5px; cursor:zoom-in; background:#020617;" title="Click to view full size: ${escHtml(img.label)}">
+                        <span style="font-size:0.65rem; color:#94a3b8; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:100%;">${escHtml(img.label)}</span>
+                        <button type="button" onclick="convAiReevaluateFromPreview(${i}, this)" style="width:100%; background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.48); color:#e9d5ff; border-radius:4px; font-size:0.65rem; font-weight:700; padding:0.16rem 0.3rem; cursor:pointer;" title="Have Gemini AI Vision inspect this page image to identify the book and re-evaluate enrichment"><i class="fa-solid fa-wand-magic-sparkles"></i> AI Re-Evaluate</button>
+                    </div>
+                `).join('');
+                drawer._previewImages = res.images;
+            }
+            convPreviewPages = Array.isArray(res.pages) ? res.pages : [];
+            if (!convPreviewPages.length) {
+                if (textEl) textEl.textContent = 'No extractable text found in front matter (scanned image PDF — inspect the page images above or click Open Full File).';
+            } else {
+                if (tabsEl) {
+                    tabsEl.innerHTML = convPreviewPages.map((p, idx) => `<button type="button" class="btn-mini-action conv-prev-tab" data-idx="${idx}" onclick="selectConvPreviewTab(${idx})">${escHtml(p.label)}</button>`).join('');
+                }
+                selectConvPreviewTab(0);
+            }
+        } catch (err) {
+            if (textEl) textEl.textContent = 'Network error loading book preview: ' + err.message;
+        }
+    }
+
+    function selectConvPreviewTab(idx) {
+        const textEl = document.getElementById('conv-prev-text');
+        if (!textEl || !convPreviewPages[idx]) return;
+        textEl.textContent = convPreviewPages[idx].text || '';
+        textEl.scrollTop = 0;
+        document.querySelectorAll('.conv-prev-tab').forEach(btn => {
+            const active = Number(btn.getAttribute('data-idx')) === idx;
+            btn.style.background = active ? 'rgba(56,189,248,0.32)' : '';
+            btn.style.color = active ? '#fff' : '';
+        });
+    }
+
+    function convUseSelectedPreviewText(field) {
+        const sel = (window.getSelection ? window.getSelection().toString() : '').trim();
+        if (!sel) {
+            alert('First highlight any text inside the book preview box below, then click this button to copy it into the field.');
+            return;
+        }
+        const el = document.getElementById(`merge-input-${field}`);
+        if (el) {
+            el.value = field === 'description' ? sel.trim() : sel.replace(/\s+/g, ' ').trim();
+            el.style.borderColor = '#4ade80';
+            setTimeout(() => { el.style.borderColor = ''; }, 900);
+        }
+    }
+
+    async function convAiReevaluateFromPreview(imgIdx = null, triggerBtn = null) {
+        if (!currentModalItem || !currentModalItem.file_path) return;
+        const drawer = document.getElementById('conv-book-preview-drawer');
+        const imgs = drawer && Array.isArray(drawer._previewImages) ? drawer._previewImages : [];
+        const selectedUris = [];
+        if (imgIdx !== null && imgIdx !== undefined && imgs[imgIdx] && imgs[imgIdx].data_uri) {
+            selectedUris.push(imgs[imgIdx].data_uri);
+        } else {
+            imgs.slice(0, 3).forEach(im => {
+                if (im && im.data_uri) selectedUris.push(im.data_uri);
+            });
+        }
+        if (selectedUris.length === 0 && currentModalItem.orig_cover && String(currentModalItem.orig_cover).startsWith('data:image')) {
+            selectedUris.push(currentModalItem.orig_cover);
+        }
+
+        const origBtnHtml = triggerBtn ? triggerBtn.innerHTML : '';
+        if (triggerBtn) {
+            triggerBtn.disabled = true;
+            triggerBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> AI Analyzing...';
+        }
+        const errEl = document.getElementById('modal-error-msg');
+        if (errEl) {
+            errEl.textContent = 'Gemini AI Vision is inspecting the previewed book image(s) to extract Title, Author & ISBN and re-evaluate enrichment...';
+        }
+
+        try {
+            const resp = await fetch('/mylibrary/api/enrich/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_path: currentModalItem.file_path,
+                    re_enrich: true,
+                    force: false,
+                    force_ai_vision: true,
+                    ai_image_data_uris: selectedUris
+                })
+            });
+            const res = await resp.json();
+            if (res.ok) {
+                currentModalItem.status = 'SUCCESS';
+                currentModalItem.title = res.title || currentModalItem.title;
+                currentModalItem.author = res.authors || currentModalItem.author;
+                currentModalItem.publisher = res.publisher || currentModalItem.publisher;
+                currentModalItem.isbn = res.isbn || currentModalItem.isbn;
+                currentModalItem.description = res.description || currentModalItem.description;
+                currentModalItem.new_cover = res.cover_url || currentModalItem.new_cover;
+                currentModalItem.match_confidence = res.confidence ?? 100;
+                currentModalItem.error_message = res.message || 'Enriched and verified cleanly via AI Vision.';
+                openConversionModal(currentModalItem);
+                loadExplorerItems(currentExplorerOffset);
+                if (typeof window.refreshStatusSummary === 'function') window.refreshStatusSummary();
+            } else {
+                currentModalItem.status = res.status || currentModalItem.status;
+                currentModalItem.title = res.candidate_title || currentModalItem.title;
+                currentModalItem.author = res.candidate_authors || currentModalItem.author;
+                currentModalItem.publisher = res.candidate_publisher || currentModalItem.publisher;
+                currentModalItem.isbn = res.candidate_isbn || currentModalItem.isbn;
+                currentModalItem.description = res.candidate_description || currentModalItem.description;
+                currentModalItem.new_cover = res.candidate_cover || currentModalItem.new_cover;
+                if (res.confidence !== undefined && res.confidence !== null) {
+                    currentModalItem.match_confidence = res.confidence;
+                }
+                currentModalItem.error_message = res.message || res.error || currentModalItem.error_message;
+                openConversionModal(currentModalItem);
+                loadExplorerItems(currentExplorerOffset);
+            }
+        } catch (err) {
+            if (errEl) errEl.textContent = 'Network error during AI Vision re-evaluation: ' + err.message;
+        } finally {
+            if (triggerBtn) {
+                triggerBtn.disabled = false;
+                triggerBtn.innerHTML = origBtnHtml;
+            }
+        }
+    }
+
+    function closeConversionModal() {
+        const modal = document.getElementById('conv-detail-modal');
+        if (modal) modal.classList.remove('open');
+    }
+
+    async function ignoreConversionItem(filePath, btnEl) {
+        if (!filePath) return false;
+        const origHtml = btnEl ? btnEl.innerHTML : '';
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
+        try {
+            const resp = await fetch(statusItemsApiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'ignore', file_path: filePath })
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                loadExplorerItems(currentExplorerOffset);
+                if (typeof window.refreshStatusSummary === 'function') window.refreshStatusSummary();
+                return true;
+            }
+            alert('Error ignoring item: ' + (data.error || 'Unknown error'));
+            return false;
+        } catch (err) {
+            alert('Network error ignoring item: ' + err.message);
+            return false;
+        } finally {
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origHtml;
+            }
+        }
+    }
+
+    async function ignoreModalItem() {
+        if (!currentModalItem) return;
+        const ok = await ignoreConversionItem(currentModalItem.file_path, document.getElementById('modal-ignore-btn'));
+        if (ok) closeConversionModal();
+    }
+
+    async function requeueConversionItem(filePath, btnEl) {
+        if (!filePath) return false;
+        const origHtml = btnEl ? btnEl.innerHTML : '';
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        }
+        try {
+            const resp = await fetch(statusItemsApiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'requeue', file_path: filePath })
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                if (btnEl) btnEl.innerHTML = '<i class="fa-solid fa-check"></i> Queued';
+                if (typeof window.refreshStatusSummary === 'function') window.refreshStatusSummary();
+                return true;
+            }
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origHtml;
+            }
+            return false;
+        } catch (err) {
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origHtml;
+            }
+            return false;
+        }
+    }
+
+    async function approveConversionItem(filePath, btnEl, selectedMetadata = null) {
+        if (!filePath) return false;
+        const origHtml = btnEl ? btnEl.innerHTML : '';
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
+        try {
+            const payload = { action: 'approve', file_path: filePath };
+            if (selectedMetadata) payload.selected_metadata = selectedMetadata;
+            const resp = await fetch(statusItemsApiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                loadExplorerItems(currentExplorerOffset);
+                if (typeof window.refreshStatusSummary === 'function') window.refreshStatusSummary();
+                return true;
+            }
+            alert('Error saving approval: ' + (data.error || 'Unknown error'));
+            return false;
+        } catch (err) {
+            alert('Network error saving approval: ' + err.message);
+            return false;
+        } finally {
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origHtml;
+            }
+        }
+    }
+
+    async function requeueModalItem() {
+        if (!currentModalItem) return;
+        const ok = await requeueConversionItem(currentModalItem.file_path, document.getElementById('modal-requeue-btn'));
+        if (ok) {
+            setTimeout(() => {
+                closeConversionModal();
+                loadExplorerItems(currentExplorerOffset);
+            }, 350);
+        }
+    }
+
+    async function reEnrichModalItem() {
+        if (!currentModalItem || !currentModalItem.file_path) return;
+        const btnEl = document.getElementById('modal-reenrich-btn');
+        const errEl = document.getElementById('modal-error-msg');
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Re-Enriching...';
+        }
+        if (errEl) {
+            errEl.textContent = 'Running fresh epubmeta lookup using current Title / Author / ISBN hints...';
+        }
+        const rawTitle = (document.getElementById('merge-input-title')?.value || '').trim();
+        const rawAuthors = (document.getElementById('merge-input-author')?.value || '').trim();
+        const rawIsbn = (document.getElementById('merge-input-isbn')?.value || '').trim();
+        const candTitle = (currentModalItem.title ? String(currentModalItem.title) : '').trim();
+        const candAuthors = (currentModalItem.author ? String(currentModalItem.author) : '').trim();
+        const candIsbn = (currentModalItem.isbn ? String(currentModalItem.isbn) : '').trim();
+        const isInternalCode = /^\d{3}_[A-Za-z0-9_]+$/.test(rawTitle);
+        const hintTitle = (rawTitle && rawTitle !== candTitle && !isInternalCode) ? rawTitle : '';
+        const hintAuthors = (rawAuthors && rawAuthors !== candAuthors && rawAuthors.toLowerCase() !== 'asura01') ? rawAuthors : '';
+        const hintIsbn = (rawIsbn && rawIsbn !== candIsbn) ? rawIsbn : '';
+        try {
+            const resp = await fetch('/mylibrary/api/enrich/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_path: currentModalItem.file_path,
+                    re_enrich: true,
+                    force: false,
+                    hint_title: hintTitle,
+                    hint_authors: hintAuthors,
+                    hint_isbn: hintIsbn
+                })
+            });
+            const res = await resp.json();
+            if (res.ok) {
+                currentModalItem.status = 'SUCCESS';
+                currentModalItem.title = res.title || currentModalItem.title;
+                currentModalItem.author = res.authors || currentModalItem.author;
+                currentModalItem.publisher = res.publisher || currentModalItem.publisher;
+                currentModalItem.isbn = res.isbn || currentModalItem.isbn;
+                currentModalItem.description = res.description || currentModalItem.description;
+                currentModalItem.new_cover = res.cover_url || currentModalItem.new_cover;
+                currentModalItem.match_confidence = res.confidence ?? 100;
+                currentModalItem.error_message = res.message || 'Enriched and verified cleanly.';
+                openConversionModal(currentModalItem);
+                loadExplorerItems(currentExplorerOffset);
+                if (typeof window.refreshStatusSummary === 'function') window.refreshStatusSummary();
+            } else {
+                currentModalItem.status = res.status || currentModalItem.status;
+                currentModalItem.title = res.candidate_title || currentModalItem.title;
+                currentModalItem.author = res.candidate_authors || currentModalItem.author;
+                currentModalItem.publisher = res.candidate_publisher || currentModalItem.publisher;
+                currentModalItem.isbn = res.candidate_isbn || currentModalItem.isbn;
+                currentModalItem.description = res.candidate_description || currentModalItem.description;
+                currentModalItem.new_cover = res.candidate_cover || currentModalItem.new_cover;
+                if (res.confidence !== undefined && res.confidence !== null) {
+                    currentModalItem.match_confidence = res.confidence;
+                }
+                currentModalItem.error_message = res.message || res.error || currentModalItem.error_message;
+                openConversionModal(currentModalItem);
+                loadExplorerItems(currentExplorerOffset);
+            }
+        } catch (err) {
+            if (errEl) errEl.textContent = 'Network error during Re-Enrich: ' + err.message;
+        } finally {
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Re-Enrich Now';
+            }
+        }
+    }
+
+    async function approveModalItem() {
+        if (!currentModalItem) return;
+        const chosenCover = fieldChoices.cover === 'orig'
+            ? (currentModalItem.orig_cover || '')
+            : (currentModalItem.new_cover || currentModalItem.orig_cover || '');
+        const selectedMetadata = {
+            title: (document.getElementById('merge-input-title')?.value || '').trim(),
+            author: (document.getElementById('merge-input-author')?.value || '').trim(),
+            publisher: (document.getElementById('merge-input-publisher')?.value || '').trim(),
+            isbn: (document.getElementById('merge-input-isbn')?.value || '').trim(),
+            description: (document.getElementById('merge-input-description')?.value || '').trim(),
+            cover: chosenCover
+        };
+        const ok = await approveConversionItem(currentModalItem.file_path, document.getElementById('modal-approve-btn'), selectedMetadata);
+        if (ok) closeConversionModal();
+    }
+
+    // Scroll terminal logs to bottom on load and initialize saved path prefix
+    document.addEventListener('DOMContentLoaded', () => {
+        updatePathPrefix(getPathPrefix());
+        ['scanner-log-pre', 'epubmeta-log-pre'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.scrollTop = el.scrollHeight;
+        });
+
+        // 15-second live polling via StatusDashboardAPIView + 1s Next Scan countdown
+        let autoRefresh = true;
+        let secondsLeft = 15;
+        const countdownEl = document.getElementById('countdown-label');
+        const toggleBtn = document.getElementById('toggle-autorefresh-btn');
+        const spinIcon = document.getElementById('refresh-spin-icon');
+        const statusApiUrl = "{% url 'catalog:api_status_dashboard' %}";
+
+        function formatCountdown(remSec) {
+            if (remSec <= 0) return 'Due now (starting momentarily)';
+            const hrs = Math.floor(remSec / 3600);
+            const mins = Math.floor((remSec % 3600) / 60);
+            const secs = remSec % 60;
+            if (hrs > 0) return `in ${hrs}h ${mins}m ${secs}s`;
+            if (mins > 0) return `in ${mins}m ${secs}s`;
+            return `in ${secs}s`;
+        }
+
+        function tickNextScanCountdown() {
+            const pill = document.getElementById('next-scan-pill');
+            if (!pill) return;
+            const nextIso = pill.getAttribute('data-next-iso') || '';
+            const intervalHours = pill.getAttribute('data-interval-hours') || '4';
+            const timeLabel = document.getElementById('next-scan-time-label');
+            const cdLabel = document.getElementById('next-scan-countdown-label');
+            if (!nextIso) return;
+            const targetDt = new Date(nextIso);
+            if (isNaN(targetDt.getTime())) return;
+            if (timeLabel) {
+                const localTimeStr = targetDt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                timeLabel.textContent = localTimeStr;
+            }
+            const remSec = Math.floor((targetDt.getTime() - Date.now()) / 1000);
+            const cdText = formatCountdown(remSec);
+            if (cdLabel) cdLabel.textContent = cdText;
+            const actEl = document.getElementById('live-activity-line');
+            if (actEl && actEl.textContent.includes('All scans finished')) {
+                actEl.textContent = `All scans finished — Next scan ${cdText} (every ${parseFloat(intervalHours)}h)`;
+            }
+        }
+
+        tickNextScanCountdown();
+
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                autoRefresh = !autoRefresh;
+                if (autoRefresh) {
+                    secondsLeft = 15;
+                    countdownEl.textContent = secondsLeft + 's';
+                    toggleBtn.style.opacity = '1';
+                } else {
+                    countdownEl.textContent = 'OFF';
+                    toggleBtn.style.opacity = '0.65';
+                }
+            });
+        }
+
+        async function fetchLiveStatus() {
+            try {
+                if (spinIcon) spinIcon.classList.add('fa-spin');
+                const resp = await fetch(statusApiUrl);
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                // Update live header & KPI counters without losing tab state
+                const setTxt = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el && val !== undefined && val !== null) el.textContent = val;
+                };
+                const setNum = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el && val !== undefined && val !== null) {
+                        const n = Number(val);
+                        el.textContent = !isNaN(n) ? n.toLocaleString('en-US') : val;
+                    }
+                };
+                setTxt('snapshot-time', data.generated_at);
+                if (data.scanner) {
+                    setTxt('live-activity-line', data.scanner.current_activity);
+                    setTxt('last-log-update-label', data.scanner.last_log_update);
+                    const pill = document.getElementById('next-scan-pill');
+                    if (pill) {
+                        pill.setAttribute('data-next-iso', data.scanner.next_scan_iso || '');
+                        if (data.scanner.scan_interval_hours) {
+                            pill.setAttribute('data-interval-hours', data.scanner.scan_interval_hours);
+                        }
+                    }
+                    if (data.scanner.is_scanning) {
+                        setTxt('next-scan-time-label', data.scanner.next_scan_at || 'After current scan');
+                        setTxt('next-scan-countdown-label', 'Scanning now');
+                    } else {
+                        tickNextScanCountdown();
+                    }
+                    const statusPill = document.getElementById('scanner-status-pill');
+                    const stateLbl = document.getElementById('scanner-state-label');
+                    if (statusPill && stateLbl) {
+                        statusPill.className = 'stat-badge scanner-status-pill ' + (data.scanner.is_scanning ? 'status-active' : 'status-idle');
+                        if (data.scanner.is_scanning) {
+                            stateLbl.innerHTML = 'Scanner: <strong>Active</strong>';
+                        } else if (data.scanner.daemon_active) {
+                            stateLbl.innerHTML = 'Scanner: <strong>Standby</strong>';
+                        } else {
+                            stateLbl.innerHTML = 'Scanner: <strong>Idle</strong>';
+                        }
+                    }
+                    if (data.scanner.scanner_log_lines && data.scanner.scanner_log_lines.length) {
+                        const sPre = document.getElementById('scanner-log-pre');
+                        if (sPre) {
+                            sPre.textContent = data.scanner.scanner_log_lines.join('\n');
+                            sPre.scrollTop = sPre.scrollHeight;
+                        }
+                    }
+                    if (data.scanner.epubmeta_log_lines && data.scanner.epubmeta_log_lines.length) {
+                        const ePre = document.getElementById('epubmeta-log-pre');
+                        if (ePre) {
+                            ePre.textContent = data.scanner.epubmeta_log_lines.join('\n');
+                            ePre.scrollTop = ePre.scrollHeight;
+                        }
+                    }
+                }
+                if (data.catalog) {
+                    setNum('kpi-total-items', data.catalog.total_items);
+                    setNum('kpi-total-files', data.catalog.total_files);
+                    setNum('kpi-sub-books', data.catalog.books_count);
+                    setNum('kpi-sub-mags', data.catalog.magazines_count);
+                    setNum('kpi-sub-kindle', data.catalog.kindle_count);
+                    setNum('kpi-sub-audio', data.catalog.audible_count);
+                    setNum('kpi-sub-valid', data.catalog.valid_files);
+                    setNum('kpi-sub-drm', data.catalog.drm_files);
+                    setNum('kpi-sub-invalid', data.catalog.invalid_files);
+                }
+                if (data.conversion) {
+                    setNum('kpi-tracked-files', data.conversion.tracked_files_count);
+                    setNum('kpi-meta-cache', data.conversion.metadata_cache_count);
+                    setNum('kpi-total-processed', data.conversion.total_processed);
+                    setNum('panel-processed-cnt', data.conversion.total_processed);
+                    setNum('explorer-total-count', data.conversion.total_processed);
+                    setNum('pill-cnt-all', data.conversion.total_processed);
+                    setNum('kpi-rem-catalog', data.conversion.remaining_to_catalog);
+                    setTxt('kpi-rem-catalog-chunk', data.conversion.catalog_sync_chunk_info ? `(${data.conversion.catalog_sync_chunk_info})` : '');
+                    setNum('kpi-discovered-total', data.conversion.discovered_files_total);
+                    setNum('kpi-rem-enrich', data.conversion.remaining_to_enrich);
+                    setNum('panel-rem-enrich-cnt', data.conversion.remaining_to_enrich);
+                    const usedFmt = Number(data.conversion.cycle_net_used || 0).toLocaleString('en-US');
+                    const capFmt = Number(data.conversion.cycle_net_cap || 0).toLocaleString('en-US');
+                    setTxt('kpi-cycle-net', `${usedFmt} / ${capFmt}`);
+                    setNum('kpi-cycle-left', data.conversion.cycle_net_remaining);
+                    setNum('kpi-complete-bookdb', data.conversion.skipped_complete_bookdb);
+                    if (data.conversion.status_counts) {
+                        setNum('kpi-sub-enriched', data.conversion.status_counts.SUCCESS);
+                        setNum('kpi-sub-review', data.conversion.status_counts.NEEDS_REVIEW);
+                        setNum('kpi-sub-noisbn', data.conversion.status_counts.NO_ISBN);
+                        setNum('kpi-sub-quarantine', data.conversion.status_counts.QUARANTINED);
+                        setNum('box-cnt-success', data.conversion.status_counts.SUCCESS);
+                        setNum('box-cnt-review', data.conversion.status_counts.NEEDS_REVIEW);
+                        setNum('box-cnt-noisbn', data.conversion.status_counts.NO_ISBN);
+                        setNum('box-cnt-drm', data.conversion.status_counts.HAS_DRM);
+                        setNum('box-cnt-quarantine', data.conversion.status_counts.QUARANTINED);
+                        setNum('box-cnt-failed', data.conversion.status_counts.FAILED);
+                        setNum('pill-cnt-success', data.conversion.status_counts.SUCCESS);
+                        setNum('pill-cnt-review', data.conversion.status_counts.NEEDS_REVIEW);
+                        setNum('pill-cnt-quarantine', data.conversion.status_counts.QUARANTINED);
+                        setNum('pill-cnt-failed', data.conversion.status_counts.FAILED);
+                        setNum('pill-cnt-drm', data.conversion.status_counts.HAS_DRM);
+                        setNum('pill-cnt-noisbn', data.conversion.status_counts.NO_ISBN);
+                        setNum('pill-cnt-ignored', data.conversion.status_counts.IGNORED || 0);
+                    }
+                }
+            } catch (err) {
+                console.error('Status poll error:', err);
+            } finally {
+                if (spinIcon) setTimeout(() => spinIcon.classList.remove('fa-spin'), 400);
+            }
+        }
+
+        window.refreshStatusSummary = fetchLiveStatus;
+
+        setInterval(() => {
+            tickNextScanCountdown();
+            if (!autoRefresh) return;
+            secondsLeft -= 1;
+            if (secondsLeft <= 0) {
+                secondsLeft = 15;
+                fetchLiveStatus();
+            }
+            if (countdownEl) countdownEl.textContent = secondsLeft + 's';
+        }, 1000);
+    });
+</script>
+{% endblock %}
+

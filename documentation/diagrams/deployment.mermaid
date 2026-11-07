@@ -1,0 +1,12 @@
+graph TD
+    subgraph Local NAS (Storage & Scanning)
+        Storage["/ufi/pool-raw/syspool/Books & Audiobooks"] -->|Mounts as Read-Only Volume| Scanner["nas_scanner Container"]
+        Scanner -->|Runs continuous 12-hour loops| Loop[docker_scanner_loop.py]
+    end
+
+    subgraph Central Host (Web UI & Database)
+        Web["web (Django App) Container"] -->|Reads & Writes| DB[(PostgreSQL Database Container)]
+    end
+
+    Scanner -->|POST metadata /api/sync/file/| Web
+    Scanner -->|POST active paths /api/sync/cleanup/| Web

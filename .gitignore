@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database
+db.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Local Config, Credentials & Browser Profiles
+config/
+nas_scanner/config.json
+scanner/config.json
+.sf/
+.amazon_session_profile/
+amazon_library_export.json
+{remote_path}
+
+# Environments
+.env
+venv/
+ENV/
+env/
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Media/Static
+/static_root/
+/media/
+/media_root/
+/staticfiles/
+
+# Python Packages
+dist/
+build/
+*.egg-info/

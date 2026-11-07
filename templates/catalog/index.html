@@ -1,0 +1,1116 @@
+{% extends 'catalog/base.html' %}
+{% load static humanize %}
+
+{% block title %}MyLibrary - Advanced Catalog Search{% endblock %}
+
+{% block content %}
+<!-- Header & Logo -->
+<header>
+    <div class="logo-section">
+        <h1><i class="fa-solid fa-cubes"></i> MyLibrary</h1>
+        <span>Unified Personal Media & File Catalog</span>
+    </div>
+    
+    <!-- Quick Stats Container -->
+    <div class="stats-container">
+        <a href="{% url 'catalog:dashboard' %}?type=BOOK" class="stat-badge" title="Unique Catalog Books ({{ stats.total_items|intcomma }} total catalog items across all media types)" style="text-decoration:none; color:inherit;">
+            <i class="fa-solid fa-book pink"></i>
+            <span>Catalog Books: <strong>{{ stats.books_count|intcomma }}</strong></span>
+        </a>
+        <a href="{% url 'catalog:dashboard' %}" class="stat-badge" title="Total Physical Book &amp; Media Files on NAS ({{ stats.total_items|intcomma }} unified catalog entries)" style="text-decoration:none; color:inherit;">
+            <i class="fa-solid fa-layer-group cyan"></i>
+            <span>Total Books (Files): <strong>{{ stats.total_files|intcomma }}</strong></span>
+        </a>
+        <a href="{% url 'catalog:dashboard' %}?shelf=enriched" class="stat-badge" title="Books Enriched by epubmeta (Click to view Enriched Books shelf)" style="text-decoration:none; color:inherit; border-color:rgba(74,222,128,0.35);">
+            <i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i>
+            <span>Enriched Books: <strong style="color:#4ade80;">{{ shelf_counts.enriched|intcomma }}</strong></span>
+        </a>
+        <a href="{% url 'catalog:dashboard' %}?type=MAGAZINE" class="stat-badge" title="Magazines &amp; Periodicals" style="text-decoration:none; color:inherit;">
+            <i class="fa-solid fa-newspaper green"></i>
+            <span>Magazines: <strong>{{ stats.magazines_count|intcomma }}</strong></span>
+        </a>
+        <a href="{% url 'catalog:duplicates_dashboard' %}" class="stat-badge nav-dashboard-btn" title="Open Enriched Duplicates Manager (Same Format & Book Content)">
+            <i class="fa-solid fa-clone" style="color:#38bdf8;"></i>
+            <span>Duplicates</span>
+        </a>
+        <a href="{% url 'catalog:status_dashboard' %}" class="stat-badge nav-dashboard-btn" title="Open Conversion & Import Status Dashboard">
+            <i class="fa-solid fa-chart-line"></i>
+            <span>Status Dashboard</span>
+        </a>
+        <button type="button" class="stat-badge nav-dashboard-btn" onclick="document.getElementById('index-help-modal').style.display='flex';" title="Open Help, CLI, REST API & MCP Reference" style="cursor:pointer;">
+            <i class="fa-solid fa-circle-question" style="color:#f472b6;"></i>
+            <span>Help &amp; CLI/MCP</span>
+        </button>
+    </div>
+</header>
+
+<!-- Search Section -->
+<div class="search-wrapper">
+    <form method="GET" action="{% url 'catalog:dashboard' %}" id="search-form">
+        <!-- Preserve existing type/format filters in search form submit -->
+        {% for t in selected_types %}
+            <input type="hidden" name="type" value="{{ t }}">
+        {% endfor %}
+        {% for f in selected_formats %}
+            <input type="hidden" name="format" value="{{ f }}">
+        {% endfor %}
+        
+        <div class="search-bar-container">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input 
+                type="text" 
+                name="q" 
+                value="{{ search_query }}" 
+                placeholder="Search books or use keywords: author:Asimov title:Foundation cat:Fiction tag:Sci-Fi format:epub year:2025 is:enriched..." 
+                class="search-input" 
+                id="search-input" 
+                autocomplete="off"
+            >
+            <button type="submit" class="search-btn">Search</button>
+        </div>
+
+        {% if active_search_badges %}
+        <!-- Active Keyword Filter Pills -->
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:0.4rem; margin-top:0.55rem; padding:0.4rem 0.6rem; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25); border-radius:8px; font-size:0.76rem;">
+            <span style="color:#38bdf8; font-weight:700; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em; margin-right:0.2rem;">
+                <i class="fa-solid fa-filter"></i> Active Search Keywords:
+            </span>
+            {% for b in active_search_badges %}
+                <span style="display:inline-flex; align-items:center; gap:0.35rem; padding:0.18rem 0.55rem; border-radius:999px; font-weight:600;
+                    {% if b.type == 'exclude' %}background:rgba(248,113,113,0.16); border:1px solid rgba(248,113,113,0.4); color:#fca5a5;
+                    {% elif b.type == 'status' %}background:rgba(74,222,128,0.14); border:1px solid rgba(74,222,128,0.38); color:#86efac;
+                    {% elif b.type == 'sort' %}background:rgba(192,132,252,0.15); border:1px solid rgba(192,132,252,0.4); color:#d8b4fe;
+                    {% else %}background:rgba(56,189,248,0.15); border:1px solid rgba(56,189,248,0.4); color:#7dd3fc;{% endif %}">
+                    <code>{{ b.label }}</code>
+                    <button type="button" onclick="window.removeSearchKeywordToken('{{ b.token|escapejs }}')" title="Remove {{ b.token }}" style="background:none; border:none; color:inherit; cursor:pointer; padding:0 0.1rem; font-size:0.85rem; line-height:1; opacity:0.85;">&times;</button>
+                </span>
+            {% endfor %}
+            <a href="{% url 'catalog:dashboard' %}" style="margin-left:auto; color:#94a3b8; font-size:0.72rem; text-decoration:none;">Clear all</a>
+        </div>
+        {% endif %}
+
+        <!-- Quick Search Keyword Hints Bar -->
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:0.32rem; margin-top:0.5rem; padding:0 0.25rem; font-size:0.74rem;">
+            <span style="color:#64748b; font-weight:600; margin-right:0.15rem;"><i class="fa-solid fa-terminal" style="color:#38bdf8;"></i> Keywords:</span>
+            <button type="button" onclick="window.insertSearchKeyword('author:', true)" title="Limit to Author name (e.g. author:Asimov or author:&quot;Isaac Asimov&quot;)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">author:</button>
+            <button type="button" onclick="window.insertSearchKeyword('title:', true)" title="Limit to Book Title (e.g. title:Foundation)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">title:</button>
+            <button type="button" onclick="window.insertSearchKeyword('cat:', true)" title="Filter by Category / Folder (type cat: to autocomplete categories)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">cat:</button>
+            <button type="button" onclick="window.insertSearchKeyword('tag:', true)" title="Filter by Enriched Subject / Tag (type tag: to autocomplete tags)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">tag:</button>
+            <button type="button" onclick="window.insertSearchKeyword('pub:', true)" title="Filter by Publisher (e.g. pub:O'Reilly)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">pub:</button>
+            <button type="button" onclick="window.insertSearchKeyword('isbn:', true)" title="Filter by ISBN" style="background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">isbn:</button>
+            <button type="button" onclick="window.insertSearchKeyword('format:epub', false)" title="Only EPUB files (or format:pdf, format:mobi, -format:pdf)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(168,85,247,0.3); color:#d8b4fe; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">format:epub</button>
+            <button type="button" onclick="window.insertSearchKeyword('year:', true)" title="Filter by publication year or range (e.g. year:2025, year:2020..2026, year:>=2024)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(168,85,247,0.3); color:#d8b4fe; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">year:</button>
+            <button type="button" onclick="window.insertSearchKeyword('is:enriched', false)" title="Only books already enriched by epubmeta" style="background:rgba(30,41,59,0.75); border:1px solid rgba(74,222,128,0.32); color:#86efac; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">is:enriched</button>
+            <button type="button" onclick="window.insertSearchKeyword('is:unenriched', false)" title="Only books not yet enriched" style="background:rgba(30,41,59,0.75); border:1px solid rgba(250,204,21,0.32); color:#fde047; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">is:unenriched</button>
+            <button type="button" onclick="window.insertSearchKeyword('is:reading', false)" title="Currently reading in Moon+ Reader" style="background:rgba(30,41,59,0.75); border:1px solid rgba(74,222,128,0.32); color:#86efac; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">is:reading</button>
+            <button type="button" onclick="window.insertSearchKeyword('is:interesting', false)" title="Starred on Interesting Books shelf" style="background:rgba(30,41,59,0.75); border:1px solid rgba(250,204,21,0.32); color:#fde047; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">is:interesting</button>
+            <button type="button" onclick="window.insertSearchKeyword('is:badmeta', false)" title="Flagged on Bad Metadata shelf" style="background:rgba(30,41,59,0.75); border:1px solid rgba(248,113,113,0.32); color:#fca5a5; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">is:badmeta</button>
+            <button type="button" onclick="window.insertSearchKeyword('missing:cover', false)" title="Books missing cover art (or missing:isbn, missing:desc)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(248,113,113,0.32); color:#fca5a5; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">missing:cover</button>
+            <button type="button" onclick="window.insertSearchKeyword('-', true)" title="Exclude term or field (e.g. -format:pdf or -author:Anon)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(248,113,113,0.32); color:#fca5a5; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">-exclude</button>
+            <button type="button" onclick="window.insertSearchKeyword('sort:newest', false)" title="Order results (sort:newest, sort:oldest, sort:added, sort:title, sort:author)" style="background:rgba(30,41,59,0.75); border:1px solid rgba(192,132,252,0.32); color:#d8b4fe; border-radius:5px; padding:0.14rem 0.42rem; font-family:monospace; font-size:0.72rem; cursor:pointer;">sort:newest</button>
+            <button type="button" onclick="var el=document.getElementById('search-keywords-guide'); if(el){el.style.display=(el.style.display==='none'?'block':'none');}" style="margin-left:auto; background:rgba(56,189,248,0.14); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:6px; padding:0.16rem 0.55rem; font-size:0.73rem; font-weight:600; cursor:pointer;">
+                <i class="fa-solid fa-circle-question"></i> Keywords Guide
+            </button>
+        </div>
+
+        <!-- Collapsible Full Search Keywords Reference Guide -->
+        <div id="search-keywords-guide" style="display:none; margin-top:0.65rem; padding:0.9rem 1rem; background:rgba(15,23,42,0.96); border:1px solid rgba(56,189,248,0.35); border-radius:10px; box-shadow:0 10px 25px rgba(0,0,0,0.45); font-size:0.78rem; color:#cbd5e1;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.65rem; padding-bottom:0.45rem; border-bottom:1px solid rgba(255,255,255,0.08);">
+                <div>
+                    <strong style="color:#38bdf8; font-size:0.86rem;"><i class="fa-solid fa-magnifying-glass-plus"></i> Search Keywords &amp; Operators Reference</strong>
+                    <span style="color:#94a3b8; font-size:0.75rem; margin-left:0.5rem;">Works in Web Catalog, OPDS Search (Moon+ Reader), Calibre plugin, and REST API. Click any example to insert!</span>
+                </div>
+                <button type="button" onclick="document.getElementById('search-keywords-guide').style.display='none'" style="background:none; border:none; color:#94a3b8; cursor:pointer; font-size:1rem;">&times;</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:0.75rem;">
+                {% for group in search_keywords_spec %}
+                <div style="background:rgba(30,41,59,0.6); border:1px solid rgba(255,255,255,0.07); border-radius:8px; padding:0.65rem 0.75rem;">
+                    <div style="color:#f8fafc; font-weight:700; font-size:0.76rem; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.45rem;">
+                        <i class="fa-solid {{ group.icon }}" style="color:#38bdf8; margin-right:0.3rem;"></i> {{ group.group }}
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:0.35rem;">
+                        {% for item in group.items %}
+                        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:0.4rem; font-size:0.73rem; line-height:1.35;">
+                            <button type="button" onclick="window.insertSearchKeyword('{{ item.insert|escapejs }}', {% if item.insert|slice:'-1:' == ':' or item.insert == '-' %}true{% else %}false{% endif %})" title="Click to insert {{ item.insert }}" style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.3); color:#38bdf8; border-radius:4px; padding:0.08rem 0.38rem; font-family:monospace; font-size:0.71rem; cursor:pointer; white-space:nowrap; flex-shrink:0;">{{ item.example }}</button>
+                            <span style="color:#94a3b8; text-align:right; font-size:0.71rem;">{{ item.desc }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div style="margin-top:0.65rem; padding-top:0.5rem; border-top:1px solid rgba(255,255,255,0.07); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; font-size:0.73rem; color:#94a3b8;">
+                <span>💡 <strong>Combine freely:</strong> <code>author:"Isaac Asimov" cat:Fiction format:epub year:&gt;=1950 is:enriched sort:oldest</code></span>
+                <span>💡 <strong>Autocomplete hint:</strong> Type <code>cat:</code>, <code>tag:</code>, <code>is:</code>, <code>format:</code>, or <code>missing:</code> in the search box to see live suggestions!</span>
+            </div>
+        </div>
+
+        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin-top:0.55rem; padding:0 0.35rem; font-size:0.8rem; color:#94a3b8;">
+            <label style="display:inline-flex; align-items:center; gap:0.45rem; cursor:pointer; user-select:none;" title="When checked (or when you append +enrich to your search query), MyLibrary automatically runs epubmeta on-demand enrichment on the top unenriched search results!">
+                <input type="checkbox" name="enrich" value="1" {% if enrich_on_search %}checked{% endif %} style="accent-color:#4ade80; width:15px; height:15px; cursor:pointer;">
+                <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enrich search results on demand (or type <code>+enrich</code> in search)</span>
+            </label>
+            <span style="font-size:0.75rem; opacity:0.85;">Tip: Click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> to enrich its EPUB/PDF on demand.</span>
+        </div>
+        <!-- Autocomplete dropdown -->
+        <div id="suggestions-dropdown" class="suggestions-dropdown"></div>
+    </form>
+</div>
+
+<!-- Main Section Grid -->
+<div class="layout-container">
+    <!-- Sidebar Filters -->
+    <aside class="sidebar">
+        <form method="GET" action="{% url 'catalog:dashboard' %}">
+            <!-- Preserve search query in filter form submit -->
+            {% if search_query %}
+                <input type="hidden" name="q" value="{{ search_query }}">
+            {% endif %}
+            {% if selected_shelf %}
+                <input type="hidden" name="shelf" value="{{ selected_shelf }}">
+            {% endif %}
+            {% if selected_tag %}
+                <input type="hidden" name="tag" value="{{ selected_tag }}">
+            {% endif %}
+            {% if selected_folder %}
+                <input type="hidden" name="folder" value="{{ selected_folder }}">
+            {% endif %}
+            {% if selected_author %}
+                <input type="hidden" name="author" value="{{ selected_author }}">
+            {% endif %}
+            {% if selected_sort %}
+                <input type="hidden" name="sort" value="{{ selected_sort }}">
+            {% endif %}
+            {% if selected_read_status %}
+                <input type="hidden" name="read_status" value="{{ selected_read_status }}">
+            {% endif %}
+            {% if selected_enrich_status %}
+                <input type="hidden" name="enrich_status" value="{{ selected_enrich_status }}">
+            {% endif %}
+
+            <!-- Dynamic Virtual Bookshelves -->
+            <div class="filter-section">
+                <h3>Virtual Bookshelves</h3>
+                <div class="filter-options" style="display:flex; flex-direction:column; gap:0.35rem;">
+                    <a href="{% url 'catalog:dashboard' %}" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if not selected_shelf and not selected_tag and not selected_folder and not selected_read_status and not selected_enrich_status %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if not selected_shelf and not selected_tag and not selected_folder and not selected_read_status and not selected_enrich_status %}rgba(56,189,248,0.15){% else %}transparent{% endif %}; border:1px solid {% if not selected_shelf and not selected_tag and not selected_folder and not selected_read_status and not selected_enrich_status %}rgba(56,189,248,0.35){% else %}transparent{% endif %};">
+                        <span><i class="fa-solid fa-layer-group"></i> All Catalog Books</span>
+                        <small style="opacity:0.75;">{{ stats.total_items|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=interesting" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'interesting' %}#facc15{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'interesting' %}rgba(250,204,21,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'interesting' %}rgba(250,204,21,0.45){% else %}transparent{% endif %};" title="Books marked as Interesting to read/download next (automatically resets when downloaded)">
+                        <span><i class="fa-solid fa-star" style="color:#facc15;"></i> Interesting Books</span>
+                        <small id="sidebar-interesting-count" style="color:#facc15; font-weight:700;">{{ interesting_count|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=bad_metadata" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'bad_metadata' %}#fb7185{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'bad_metadata' %}rgba(244,63,94,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'bad_metadata' %}rgba(244,63,94,0.45){% else %}transparent{% endif %};" title="Books flagged as having Bad Metadata from Moon+ Reader or the web catalog (auto-clears when enriched or approved)">
+                        <span><i class="fa-solid fa-flag" style="color:#fb7185;"></i> Bad Metadata</span>
+                        <small id="sidebar-bad-meta-count" style="color:#fb7185; font-weight:700;">{{ bad_metadata_count|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=bookmarked" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'bookmarked' %}#f472b6{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'bookmarked' %}rgba(244,114,182,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'bookmarked' %}rgba(244,114,182,0.38){% else %}transparent{% endif %};" title="Dynamic shelf of books with reading positions (.po) or bookmarks (.an) in Moon+ Reader WebDAV Cache">
+                        <span><i class="fa-solid fa-bookmark" style="color:#f472b6;"></i> Bookmarked &amp; Reading</span>
+                        <small style="color:#f472b6; font-weight:700;">{{ bookmarked_count|intcomma }}</small>
+                    </a>
+                    {% if bookmark_progress_counts.all > 0 %}
+                    <div style="display:flex; flex-wrap:wrap; gap:0.28rem; padding:0.1rem 0.3rem 0.25rem 1.15rem;">
+                        <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=read{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}" style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'read' %}rgba(74,222,128,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'read' %}#4ade80{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'read' %}rgba(74,222,128,0.55){% else %}rgba(255,255,255,0.1){% endif %};" title="Bookmarked books completed (100% read)">
+                            <i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> 100% Read ({{ bookmark_progress_counts.read|intcomma }})
+                        </a>
+                        <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=unread{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}" style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'unread' %}rgba(244,114,182,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'unread' %}#f472b6{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'unread' %}rgba(244,114,182,0.55){% else %}rgba(255,255,255,0.1){% endif %};" title="Bookmarked books not yet finished (< 100% read)">
+                            <i class="fa-regular fa-bookmark" style="color:#f472b6;"></i> Unread &lt;100% ({{ bookmark_progress_counts.unread|intcomma }})
+                        </a>
+                        {% if bookmark_progress_counts.reading > 0 %}
+                        <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=reading{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}" style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'reading' %}rgba(56,189,248,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'reading' %}#38bdf8{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'reading' %}rgba(56,189,248,0.55){% else %}rgba(255,255,255,0.1){% endif %};" title="Bookmarked books currently in progress (1% – 99% read)">
+                            <i class="fa-solid fa-book-open-reader" style="color:#38bdf8;"></i> Reading 1–99% ({{ bookmark_progress_counts.reading|intcomma }})
+                        </a>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    <a href="{% url 'catalog:dashboard' %}?shelf=annotations" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'annotations' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'annotations' %}rgba(251,191,36,0.15){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'annotations' %}rgba(251,191,36,0.35){% else %}transparent{% endif %};" title="Books with saved highlights, notes, or bookmarks (.an) in Moon+ Reader">
+                        <span><i class="fa-solid fa-highlighter" style="color:#fbbf24;"></i> Highlights &amp; Notes (.an)</span>
+                        <small style="color:#fbbf24; font-weight:700;">{{ annotations_count|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=enriched" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'enriched' %}#4ade80{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'enriched' %}rgba(74,222,128,0.15){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'enriched' %}rgba(74,222,128,0.35){% else %}transparent{% endif %};">
+                        <span><i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i> Enriched Books</span>
+                        <small id="sidebar-enriched-count" style="color:#4ade80; font-weight:700;">{{ enrich_status_counts.enriched|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:duplicates_dashboard' %}" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:#38bdf8; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25);" title="Open Enriched Duplicates Manager (same format & verified book content)">
+                        <span><i class="fa-solid fa-clone" style="color:#38bdf8;"></i> Enriched Duplicates</span>
+                        <small style="color:#38bdf8; font-weight:700;"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.7rem;"></i></small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?enrich_status=needs_enriching" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}#c084fc{% else %}#cbd5e1{% endif %}; background:{% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}rgba(192,132,252,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}rgba(192,132,252,0.38){% else %}transparent{% endif %};" title="Books that have not yet been enriched by epubmeta">
+                        <span><i class="fa-solid fa-hourglass-half" style="color:#c084fc;"></i> Needs Enriching</span>
+                        <small id="sidebar-needs-enriching-count" style="color:#c084fc; font-weight:700;">{{ enrich_status_counts.needs_enriching|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books flagged In Review, Low Confidence Match, No Match, or Failed during enrichment">
+                        <span><i class="fa-solid fa-clipboard-question" style="color:#fbbf24;"></i> In Review</span>
+                        <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{ enrich_status_counts.needs_review|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=recent_pub" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'recent_pub' %}#34d399{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.38){% else %}transparent{% endif %};" title="Books published within the past 1 year, ordered newest publication date first">
+                        <span><i class="fa-solid fa-calendar-days" style="color:#34d399;"></i> Recently Published (1 Yr)</span>
+                        <small style="color:#34d399; font-weight:700;">{{ stats.recent_pub_count|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon' %}#fb923c{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon' %}rgba(251,146,60,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon' %}rgba(251,146,60,0.38){% else %}transparent{% endif %};" title="Books purchased on Amazon Kindle (prefer reading in Amazon Kindle App)">
+                        <span><i class="fa-brands fa-amazon" style="color:#fb923c;"></i> Purchased on Amazon</span>
+                        <small style="color:#fb923c; font-weight:700;">{{ amazon_counts.kindle_purchased|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=kindle_plus" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'kindle_plus' %}#2dd4bf{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'kindle_plus' %}rgba(45,212,191,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'kindle_plus' %}rgba(45,212,191,0.38){% else %}transparent{% endif %};" title="Kindle+ books (Kindle Unlimited, Prime Reading, ComiXology)">
+                        <span><i class="fa-solid fa-bolt" style="color:#2dd4bf;"></i> Kindle+ (KU / Prime)</span>
+                        <small style="color:#2dd4bf; font-weight:700;">{{ amazon_counts.kindle_plus|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon_bookmarked" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_bookmarked' %}#f59e0b{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_bookmarked' %}rgba(245,158,11,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_bookmarked' %}rgba(245,158,11,0.38){% else %}transparent{% endif %};" title="Amazon Kindle books with reading progress, bookmarks, or highlights/notes">
+                        <span><i class="fa-solid fa-book-bookmark" style="color:#f59e0b;"></i> Amazon Bookmarked</span>
+                        <small style="color:#f59e0b; font-weight:700;">{{ amazon_counts.kindle_bookmarked|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=audible" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'audible' %}#c084fc{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'audible' %}rgba(192,132,252,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'audible' %}rgba(192,132,252,0.38){% else %}transparent{% endif %};" title="Purchased Audible Audiobooks &amp; Audible+ titles">
+                        <span><i class="fa-solid fa-headphones" style="color:#c084fc;"></i> Purchased on Audible</span>
+                        <small style="color:#c084fc; font-weight:700;">{{ amazon_counts.audible|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon_only" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_only' %}#f87171{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_only' %}rgba(248,113,113,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_only' %}rgba(248,113,113,0.38){% else %}transparent{% endif %};" title="Amazon Kindle, Kindle+, and Audible books that do NOT match any local NAS file">
+                        <span><i class="fa-solid fa-cloud" style="color:#f87171;"></i> Amazon Only (Not on NAS)</span>
+                        <small style="color:#f87171; font-weight:700;">{{ amazon_counts.amazon_only|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon_matched" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_matched' %}#60a5fa{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_matched' %}rgba(96,165,250,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_matched' %}rgba(96,165,250,0.38){% else %}transparent{% endif %};" title="Amazon books that also have a local EPUB/PDF/Audiobook copy on your NAS">
+                        <span><i class="fa-solid fa-link" style="color:#60a5fa;"></i> Matched to NAS Books</span>
+                        <small style="color:#60a5fa; font-weight:700;">{{ amazon_counts.amazon_matched|default:0|intcomma }}</small>
+                    </a>
+                </div>
+            </div>
+
+            {% if enriched_tags %}
+            <div class="filter-section">
+                <h3>Enriched Tags ({{ enriched_tags|length }})</h3>
+                <div style="max-height:210px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:0.32rem; padding-right:2px;">
+                    {% for tag_name, tag_cnt in enriched_tags %}
+                        <a href="{% url 'catalog:dashboard' %}?tag={{ tag_name|urlencode }}" style="text-decoration:none; font-size:0.73rem; padding:0.2rem 0.48rem; border-radius:999px; background:{% if selected_tag == tag_name %}rgba(139,92,246,0.35){% else %}rgba(30,41,59,0.85){% endif %}; color:{% if selected_tag == tag_name %}#fff{% else %}#cbd5e1{% endif %}; border:1px solid {% if selected_tag == tag_name %}rgba(167,139,250,0.65){% else %}rgba(255,255,255,0.1){% endif %};">
+                            {{ tag_name }} <span style="opacity:0.65;">({{ tag_cnt|intcomma }})</span>
+                        </a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if enriched_folders %}
+            <div class="filter-section">
+                <h3>Enriched Collections</h3>
+                <div class="filter-options" style="display:flex; flex-direction:column; gap:0.25rem;">
+                    {% for fld_name, fld_cnt in enriched_folders %}
+                        <a href="{% url 'catalog:dashboard' %}?folder={{ fld_name|urlencode }}" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.28rem 0.5rem; border-radius:6px; font-size:0.8rem; color:{% if selected_folder == fld_name %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if selected_folder == fld_name %}rgba(56,189,248,0.15){% else %}transparent{% endif %};">
+                            <span><i class="fa-regular fa-folder-open" style="opacity:0.75; margin-right:4px;"></i> {{ fld_name }}</span>
+                            <small style="opacity:0.7;">{{ fld_cnt|intcomma }}</small>
+                        </a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="filter-section">
+                <h3>Catalog Type</h3>
+                <div class="filter-options">
+                    {% for val, label in available_types %}
+                        <label class="filter-label">
+                            <input 
+                                type="checkbox" 
+                                name="type" 
+                                value="{{ val }}"
+                                {% if val in selected_types %}checked{% endif %}
+                                onchange="this.form.submit()"
+                            >
+                            <span>
+                                {% if val == 'BOOK' %}<i class="fa-solid fa-book"></i>
+                                {% elif val == 'MAGAZINE' %}<i class="fa-solid fa-newspaper"></i>
+                                {% elif val == 'KINDLE' %}<i class="fa-solid fa-tablet-screen-button"></i>
+                                {% elif val == 'AUDIBLE' %}<i class="fa-solid fa-headphones"></i>
+                                {% endif %}
+                                {{ label }}
+                            </span>
+                        </label>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            {% if available_formats %}
+            <div class="filter-section">
+                <h3>File Format</h3>
+                <div class="filter-options">
+                    {% for format in available_formats %}
+                        <label class="filter-label">
+                            <input 
+                                type="checkbox" 
+                                name="format" 
+                                value="{{ format }}"
+                                {% if format in selected_formats %}checked{% endif %}
+                                onchange="this.form.submit()"
+                            >
+                            <span>{{ format }}</span>
+                        </label>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="filter-actions">
+                <a href="{% url 'catalog:dashboard' %}" class="btn-secondary">Reset Filters</a>
+            </div>
+        </form>
+    </aside>
+
+    <!-- Catalog Items Content -->
+    <main class="catalog-content">
+        <div class="catalog-controls">
+            <span class="results-count">
+                Showing <strong>{{ items|length }}</strong> item(s) on this page
+                {% if paginator.count %}
+                    <span style="opacity:0.75;">(of <strong>{{ paginator.count|intcomma }}</strong>)</span>
+                {% endif %}
+                {% if selected_shelf == 'interesting' %}
+                    &mdash; <span style="color:#facc15; font-weight:600;"><i class="fa-solid fa-star"></i> Interesting Books (Resets When Downloaded)</span>
+                {% elif selected_shelf == 'bookmarked' %}
+                    &mdash; <span style="color:#f472b6; font-weight:600;"><i class="fa-solid fa-bookmark"></i> Bookmarked &amp; Reading in Moon+</span>
+                {% elif selected_shelf == 'annotations' %}
+                    &mdash; <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-highlighter"></i> Books with Highlights &amp; Notes (.an)</span>
+                {% elif selected_shelf == 'enriched' %}
+                    &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enriched EPUBs</span>
+                {% elif selected_shelf == 'recent_pub' %}
+                    &mdash; <span style="color:#34d399; font-weight:600;"><i class="fa-solid fa-calendar-days"></i> Recently Published (Past 1 Year &mdash; Newest First)</span>
+                {% elif selected_shelf == 'amazon' %}
+                    &mdash; <span style="color:#fb923c; font-weight:600;"><i class="fa-brands fa-amazon"></i> Purchased on Amazon (Read in Kindle App)</span>
+                {% elif selected_shelf == 'kindle_plus' %}
+                    &mdash; <span style="color:#2dd4bf; font-weight:600;"><i class="fa-solid fa-bolt"></i> Kindle+ (Kindle Unlimited / Prime Reading)</span>
+                {% elif selected_shelf == 'amazon_bookmarked' %}
+                    &mdash; <span style="color:#f59e0b; font-weight:600;"><i class="fa-solid fa-book-bookmark"></i> Amazon Kindle Bookmarked &amp; Reading</span>
+                {% elif selected_shelf == 'audible' %}
+                    &mdash; <span style="color:#c084fc; font-weight:600;"><i class="fa-solid fa-headphones"></i> Purchased on Audible &amp; Audible+</span>
+                {% elif selected_shelf == 'amazon_only' %}
+                    &mdash; <span style="color:#f87171; font-weight:600;"><i class="fa-solid fa-cloud"></i> Amazon Only &mdash; Not Matched to Local NAS Books ({{ amazon_counts.amazon_only|default:0|intcomma }} Books)</span>
+                {% elif selected_shelf == 'amazon_matched' %}
+                    &mdash; <span style="color:#60a5fa; font-weight:600;"><i class="fa-solid fa-link"></i> Amazon Books Matched to Local NAS Files ({{ amazon_counts.amazon_matched|default:0|intcomma }} Books)</span>
+                {% endif %}
+                {% if selected_read_status == 'read' %}
+                    &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-circle-check"></i> 100% Read ({{ bookmark_progress_counts.read|intcomma }})</span>
+                {% elif selected_read_status == 'unread' %}
+                    &mdash; <span style="color:#f472b6; font-weight:600;"><i class="fa-regular fa-bookmark"></i> Unread &lt;100% ({{ bookmark_progress_counts.unread|intcomma }})</span>
+                {% elif selected_read_status == 'reading' %}
+                    &mdash; <span style="color:#38bdf8; font-weight:600;"><i class="fa-solid fa-book-open-reader"></i> In Progress 1–99% ({{ bookmark_progress_counts.reading|intcomma }})</span>
+                {% elif selected_read_status == 'unstarted' %}
+                    &mdash; <span style="color:#94a3b8; font-weight:600;"><i class="fa-regular fa-circle"></i> Unstarted 0% ({{ bookmark_progress_counts.unstarted|intcomma }})</span>
+                {% endif %}
+                {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}
+                    &mdash; <span style="color:#c084fc; font-weight:600;"><i class="fa-solid fa-hourglass-half"></i> Needs Enriching</span>
+                {% elif selected_enrich_status == 'enriched' %}
+                    &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enriched</span>
+                {% elif selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}
+                    &mdash; <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-clipboard-question"></i> In Review</span>
+                {% endif %}
+                {% if selected_tag %}
+                    &mdash; <span style="color:#a78bfa; font-weight:600;"><i class="fa-solid fa-tag"></i> Tag: {{ selected_tag }}</span>
+                {% endif %}
+                {% if selected_folder %}
+                    &mdash; <span style="color:#38bdf8; font-weight:600;"><i class="fa-regular fa-folder-open"></i> Collection: {{ selected_folder }}</span>
+                {% endif %}
+                {% if selected_author %}
+                    &mdash; <span class="author-active-pill"><i class="fa-solid fa-user-pen"></i> Author: <strong>{{ selected_author }}</strong> <a href="?{% if selected_types %}type={{ selected_types.0 }}&amp;{% endif %}{% if selected_enrich_status %}enrich_status={{ selected_enrich_status }}{% endif %}" class="author-clear-link" title="Clear author filter">&times;</a></span>
+                {% endif %}
+            </span>
+
+            <div class="controls-toolbar">
+                <!-- Filter by Type -->
+                <div class="control-group" title="Filter books list by item type">
+                    <i class="fa-solid fa-filter control-icon"></i>
+                    <select id="top-type-select" class="control-select" aria-label="Filter by Type">
+                        <option value="" {% if not selected_types %}selected{% endif %}>All Types</option>
+                        {% for val, label in available_types %}
+                            <option value="{{ val }}" {% if selected_types|length == 1 and val in selected_types %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Filter by Enrichment Status -->
+                <div class="control-group" title="Filter books by Enrichment status (Needs Enriching vs Enriched)">
+                    <i class="fa-solid fa-wand-magic-sparkles control-icon" style="color:#c084fc;"></i>
+                    <select id="top-enrich-status-select" class="control-select" aria-label="Filter by Enrichment Status">
+                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' %}selected{% endif %}>Enrich: All</option>
+                        <option value="needs_enriching" {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}selected{% endif %}>⏳ Needs Enriching ({{ enrich_status_counts.needs_enriching|default:0|intcomma }})</option>
+                        <option value="enriched" {% if selected_enrich_status == 'enriched' or selected_shelf == 'enriched' %}selected{% endif %}>✨ Enriched ({{ enrich_status_counts.enriched|default:0|intcomma }})</option>
+                        <option value="needs_review" {% if selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}selected{% endif %}>📋 In Review ({{ enrich_status_counts.needs_review|default:0|intcomma }})</option>
+                    </select>
+                </div>
+
+                <!-- Enrich All on Page Button -->
+                <button
+                    type="button"
+                    id="btn-enrich-page-top"
+                    class="btn-enrich-page"
+                    onclick="window.enrichAllOnPage()"
+                    title="Enrich all books on this page that need enrichment (queued 2 at a time)"
+                    style="display:none; align-items:center; gap:0.4rem; padding:0.42rem 0.8rem; border-radius:10px; font-size:0.78rem; font-weight:700; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(168,85,247,0.24), rgba(99,102,241,0.24)); border:1px solid rgba(168,85,247,0.55); color:#e9d5ff; transition:all 0.2s;"
+                >
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> <span class="enrich-page-label">Enrich Page</span>
+                </button>
+
+                <!-- Read / Unread Filter (for Bookmarked Books) -->
+                {% if bookmark_progress_counts.all > 0 or selected_read_status %}
+                <div class="control-group" title="Filter bookmarked books by Read (100%) vs Unread (< 100%)">
+                    <i class="fa-solid fa-bookmark control-icon" style="color:#f472b6;"></i>
+                    <select id="top-read-status-select" class="control-select" aria-label="Filter by Read / Unread Bookmark Status">
+                        <option value="" {% if not selected_read_status %}selected{% endif %}>
+                            {% if selected_shelf in 'bookmarked,annotations,amazon_bookmarked' %}All Bookmarked ({{ bookmark_progress_counts.all|intcomma }}){% else %}Read Status: All{% endif %}
+                        </option>
+                        <option value="read" {% if selected_read_status == 'read' %}selected{% endif %}>✓ Read (100%) ({{ bookmark_progress_counts.read|intcomma }})</option>
+                        <option value="unread" {% if selected_read_status == 'unread' %}selected{% endif %}>🔖 Unread (&lt; 100%) ({{ bookmark_progress_counts.unread|intcomma }})</option>
+                        <option value="reading" {% if selected_read_status == 'reading' %}selected{% endif %}>📖 In Progress (1–99%) ({{ bookmark_progress_counts.reading|intcomma }})</option>
+                        <option value="unstarted" {% if selected_read_status == 'unstarted' %}selected{% endif %}>○ Unstarted (0%) ({{ bookmark_progress_counts.unstarted|intcomma }})</option>
+                    </select>
+                </div>
+                {% endif %}
+
+                <!-- Sort By -->
+                <div class="control-group" title="Sort books list">
+                    <i class="fa-solid fa-arrow-up-wide-short control-icon"></i>
+                    <select id="top-sort-select" class="control-select" aria-label="Sort Books By">
+                        <option value="" {% if not selected_sort %}selected{% endif %}>Sort: Default</option>
+                        <option value="filedate_desc" {% if selected_sort == 'filedate_desc' or selected_sort == 'added_desc' %}selected{% endif %}>File Date / Added (Newest)</option>
+                        <option value="filedate_asc" {% if selected_sort == 'filedate_asc' or selected_sort == 'added_asc' %}selected{% endif %}>File Date / Added (Oldest)</option>
+                        <option value="pubdate_desc" {% if selected_sort == 'pubdate_desc' %}selected{% endif %}>Pub Date (Newest First)</option>
+                        <option value="pubdate_asc" {% if selected_sort == 'pubdate_asc' %}selected{% endif %}>Pub Date (Oldest First)</option>
+                        <option value="title_asc" {% if selected_sort == 'title_asc' %}selected{% endif %}>Title (A &rarr; Z)</option>
+                        <option value="title_desc" {% if selected_sort == 'title_desc' %}selected{% endif %}>Title (Z &rarr; A)</option>
+                        <option value="author_asc" {% if selected_sort == 'author_asc' %}selected{% endif %}>Author (A &rarr; Z)</option>
+                        <option value="author_desc" {% if selected_sort == 'author_desc' %}selected{% endif %}>Author (Z &rarr; A)</option>
+                        {% if bookmark_progress_counts.all > 0 %}
+                        <option value="progress_desc" {% if selected_sort == 'progress_desc' %}selected{% endif %}>Read % (High &rarr; Low)</option>
+                        <option value="progress_asc" {% if selected_sort == 'progress_asc' %}selected{% endif %}>Read % (Low &rarr; High)</option>
+                        {% endif %}
+                        <option value="updated_desc" {% if selected_sort == 'updated_desc' %}selected{% endif %}>Recently Updated</option>
+                    </select>
+                </div>
+
+                <div class="view-toggle">
+                    <button id="view-grid-btn" class="view-btn active" title="Grid View">
+                        <i class="fa-solid fa-table-cells"></i>
+                    </button>
+                    <button id="view-list-btn" class="view-btn" title="List View">
+                        <i class="fa-solid fa-list"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        {% if items %}
+            <div class="catalog-grid">
+                {% for item in items %}
+                    <article class="media-card" id="card-{{ item.id }}">
+                        <!-- Cover Image / Fallback -->
+                        <div class="card-header-image">
+                            {% if item.cover_thumbnail %}
+                                <img src="{{ item.cover_thumbnail }}" alt="{{ item.title }} cover" class="cover-image" loading="lazy">
+                            {% elif item.cover_image_url %}
+                                <img src="{{ item.cover_image_url }}" alt="{{ item.title }} cover" class="cover-image" loading="lazy">
+                            {% else %}
+                                <div class="card-icon-fallback">
+                                    {% if item.item_type == 'BOOK' %}<i class="fa-solid fa-book"></i>
+                                    {% elif item.item_type == 'MAGAZINE' %}<i class="fa-solid fa-newspaper"></i>
+                                    {% elif item.item_type == 'KINDLE' %}<i class="fa-solid fa-tablet-screen-button"></i>
+                                    {% elif item.item_type == 'AUDIBLE' %}<i class="fa-solid fa-headphones"></i>
+                                    {% endif %}
+                                </div>
+                            {% endif %}
+                            
+                            <span class="card-type-badge {% if item.item_type == 'BOOK' %}type-book{% elif item.item_type == 'MAGAZINE' %}type-magazine{% elif item.item_type == 'KINDLE' %}type-kindle{% else %}type-audible{% endif %}">
+                                {{ item.item_type }}
+                            </span>
+                            {% if item.is_enriched %}
+                                <span class="card-enriched-badge" style="position:absolute; bottom:8px; right:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(74,222,128,0.65); color:#4ade80; font-size:0.66rem; font-weight:700; padding:0.15rem 0.45rem; border-radius:999px; backdrop-filter:blur(4px);" title="Enriched &amp; Verified by epubmeta">
+                                    <i class="fa-solid fa-wand-magic-sparkles"></i> Enriched
+                                </span>
+                            {% endif %}
+                            {% if item.amazon_ownership_info %}
+                                {% if item.amazon_ownership_info.item_type == 'AUDIBLE' %}
+                                    <span style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(192,132,252,0.65); color:#c084fc; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);" title="{{ item.amazon_ownership_info.badge_label }} (ASIN: {{ item.amazon_ownership_info.asin }})">
+                                        <i class="fa-solid fa-headphones"></i> {{ item.amazon_ownership_info.short_badge }}
+                                    </span>
+                                {% elif item.amazon_ownership_info.is_kindle_plus %}
+                                    <span style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(45,212,191,0.65); color:#2dd4bf; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);" title="{{ item.amazon_ownership_info.badge_label }} — Read in Amazon Kindle App">
+                                        <i class="fa-solid fa-bolt"></i> {{ item.amazon_ownership_info.short_badge }}
+                                        {% if item.amazon_ownership_info.percentage_read %}<span style="color:#f8fafc; margin-left:3px;">&middot; {{ item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
+                                    </span>
+                                {% else %}
+                                    <span style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(251,146,60,0.65); color:#fb923c; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);" title="Purchased on Amazon (ASIN: {{ item.amazon_ownership_info.asin }}) — Prefer Reading in Amazon Kindle App">
+                                        <i class="fa-brands fa-amazon"></i> Purchased on Amazon
+                                        {% if item.amazon_ownership_info.percentage_read %}<span style="color:#f8fafc; margin-left:3px;">&middot; {{ item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
+                                    </span>
+                                {% endif %}
+                            {% endif %}
+                            {% if item.moon_bookmark_info %}
+                                <span style="position:absolute; bottom:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid {% if item.moon_bookmark_info.pct_val >= 99 %}rgba(74,222,128,0.65){% else %}rgba(244,114,182,0.55){% endif %}; color:{% if item.moon_bookmark_info.pct_val >= 99 %}#4ade80{% else %}#f472b6{% endif %}; font-size:0.7rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);" title="Moon+ Reader Progress (WebDAV File Date: {{ item.moon_bookmark_info.mtime_str }})">
+                                    {% if item.moon_bookmark_info.pct_val >= 99 %}<i class="fa-solid fa-circle-check"></i> 100% Read{% else %}<i class="fa-solid fa-bookmark"></i> {{ item.moon_bookmark_info.pct }}{% endif %}
+                                    {% if item.moon_bookmark_info.date_short %}<span style="color:#cbd5e1; font-weight:500; margin-left:3px;">&middot; {{ item.moon_bookmark_info.date_short }}</span>{% endif %}
+                                    {% if item.moon_bookmark_info.has_an %}<i class="fa-solid fa-highlighter" style="color:#fbbf24; margin-left:3px;" title="Has Highlights/Notes (.an)"></i>{% endif %}
+                                </span>
+                            {% endif %}
+                        </div>
+                        
+                        <!-- Card Details -->
+                        <div class="card-body">
+                            <h2 class="card-title" title="{{ item.title }}">{{ item.title }}</h2>
+                            <p class="card-author" title="by {{ item.authors }}">
+                                by
+                                {% for author_name in item.author_list %}
+                                    <a href="?author={{ author_name|urlencode }}&amp;sort=pubdate_desc" class="author-filter-link" title="Filter by author: {{ author_name }} (Sorted by Newest First)">{{ author_name }}</a>{% if not forloop.last %}, {% endif %}
+                                {% endfor %}
+                            </p>
+                            <div class="card-pubdate">
+                                {% if item.pub_date %}
+                                    <span class="pubdate-pill has-date" title="Published Date: {{ item.pub_date|date:'Y-m-d' }}">
+                                        <i class="fa-regular fa-calendar"></i> {{ item.pub_date|date:"Y-m-d" }}
+                                    </span>
+                                {% else %}
+                                    <span class="pubdate-pill no-date" title="Publication date not set">
+                                        <i class="fa-regular fa-calendar"></i> &mdash;
+                                    </span>
+                                {% endif %}
+                                {% if item.file_date and selected_sort in 'filedate_desc,filedate_asc,added_desc,added_asc' %}
+                                    <span class="pubdate-pill has-date" style="color:#38bdf8; border-color:rgba(56,189,248,0.35); background:rgba(56,189,248,0.12);" title="File Date (Date Added): {{ item.file_date|date:'Y-m-d' }}">
+                                        <i class="fa-regular fa-clock"></i> {{ item.file_date|date:"Y-m-d" }}
+                                    </span>
+                                {% endif %}
+                                {% if item.moon_bookmark_info %}
+                                    {% if item.moon_bookmark_info.pct_val >= 99 %}
+                                        <span class="bm-list-pill bm-read" title="Moon+ Reader: 100% Read ({{ item.moon_bookmark_info.mtime_str }})">
+                                            <i class="fa-solid fa-circle-check"></i> 100% Read
+                                        </span>
+                                    {% else %}
+                                        <span class="bm-list-pill bm-unread" title="Moon+ Reader Progress: {{ item.moon_bookmark_info.pct }} ({{ item.moon_bookmark_info.mtime_str }})">
+                                            <i class="fa-solid fa-bookmark"></i> {{ item.moon_bookmark_info.pct }}
+                                        </span>
+                                    {% endif %}
+                                {% elif item.amazon_ownership_info and item.amazon_ownership_info.percentage_read %}
+                                    {% if item.amazon_ownership_info.percentage_read >= 99 %}
+                                        <span class="bm-list-pill bm-read" title="Kindle Progress: {{ item.amazon_ownership_info.percentage_read }}% Read">
+                                            <i class="fa-solid fa-circle-check"></i> 100% Read
+                                        </span>
+                                    {% else %}
+                                        <span class="bm-list-pill bm-unread" title="Kindle Progress: {{ item.amazon_ownership_info.percentage_read }}% Read">
+                                            <i class="fa-brands fa-amazon"></i> {{ item.amazon_ownership_info.percentage_read }}%
+                                        </span>
+                                    {% endif %}
+                                {% endif %}
+                            </div>
+                            
+                            <p class="card-description">
+                                {% if item.description %}
+                                    {{ item.description|striptags }}
+                                {% else %}
+                                    No description available. Sync or edit this catalog item to add a summary.
+                                {% endif %}
+                            </p>
+                            
+                            <div class="card-meta-info">
+                                {% if item.files.all %}
+                                    <ul class="card-files-list">
+                                        {% for file in item.files.all|slice:":2" %}
+                                            <li class="file-link-item">
+                                                <span class="file-format-tag">
+                                                    {{ file.file_format }}
+                                                    {% if file.has_drm %}
+                                                        <i class="fa-solid fa-lock" style="color: #fbbf24; font-size: 0.65rem; margin-left: 0.25rem;" title="DRM Protected"></i>
+                                                    {% endif %}
+                                                    {% if file.is_invalid %}
+                                                        <i class="fa-solid fa-triangle-exclamation" style="color: #ef4444; font-size: 0.65rem; margin-left: 0.25rem;" title="Corrupted / Invalid File"></i>
+                                                    {% endif %}
+                                                </span>
+                                                <span class="file-size">{{ file.file_size|filesizeformat }}</span>
+                                            </li>
+                                        {% endfor %}
+                                        {% if item.files.all|length > 2 %}
+                                            <li class="text-secondary" style="font-size: 0.75rem; text-align: right; padding-top: 0.2rem;">
+                                                + {{ item.files.all|length|add:"-2" }} more file(s)
+                                            </li>
+                                        {% endif %}
+                                    </ul>
+                                {% else %}
+                                    <div class="text-secondary" style="font-size: 0.8rem; display:flex; align-items:center; gap:0.4rem;">
+                                        {% if item.item_type == 'KINDLE' %}
+                                            <i class="fa-brands fa-amazon text-warning"></i> Kindle Cloud Purchase
+                                        {% elif item.item_type == 'AUDIBLE' %}
+                                            <i class="fa-solid fa-microphone text-warning"></i> Audible Cloud Purchase
+                                        {% else %}
+                                            <i class="fa-solid fa-cloud"></i> Metadata entry only
+                                        {% endif %}
+                                    </div>
+                                {% endif %}
+                                
+                                <div style="display:flex; flex-direction:column; gap:0.38rem; width:100%;">
+                                    <!-- Row 1: View Details + Interesting Toggle -->
+                                    <div style="display:flex; gap:0.42rem; align-items:center; width:100%;">
+                                        <button 
+                                            type="button"
+                                            class="btn-details"
+                                            onclick="if(window.openDetailsModal) window.openDetailsModal(this);"
+                                            style="flex:1; padding:0.42rem 0.6rem; font-size:0.78rem;"
+                                            data-item-id="{{ item.id }}"
+                                            data-is-interesting="{{ item.is_interesting|yesno:'true,false' }}"
+                                            data-is-bad-metadata="{{ item.is_bad_metadata|yesno:'true,false' }}"
+                                            data-is-enriched="{{ item.is_enriched|yesno:'true,false' }}"
+                                            data-has-enrichable="{{ item.has_enrichable_file|yesno:'true,false' }}"
+                                            data-title="{{ item.title }}"
+                                            data-authors="{{ item.authors }}"
+                                            data-desc="{{ item.description|default:'' }}"
+                                            data-type="{{ item.item_type }}"
+                                            data-cover="{{ item.cover_thumbnail|default:item.cover_image_url|default:'' }}"
+                                            data-publisher="{{ item.publisher|default:'' }}"
+                                            data-pubdate="{{ item.pub_date|date:'Y-m-d'|default:'' }}"
+                                            data-filedate="{{ item.file_date|date:'Y-m-d'|default:'' }}"
+                                            data-isbn="{{ item.isbn|default:'' }}"
+                                            data-enrich-status="{{ item.enrich_diag.status|default:'' }}"
+                                            data-enrich-error="{{ item.enrich_diag.error|default:'' }}"
+                                            {% if item.amazon_ownership_info %}
+                                            data-asin="{{ item.asin|default:item.amazon_ownership_info.asin|default:'' }}"
+                                            data-amazon-badge="{{ item.amazon_ownership_info.badge_label|default:'' }}"
+                                            data-amazon-plus="{{ item.amazon_ownership_info.is_kindle_plus|yesno:'true,false' }}"
+                                            data-amazon-type="{{ item.amazon_ownership_info.item_type|default:'' }}"
+                                            data-amazon-pct="{{ item.amazon_ownership_info.percentage_read|default:0 }}"
+                                            data-amazon-date="{{ item.amazon_ownership_info.last_annotated_date|default:'' }}"
+                                            data-amazon-url="{{ item.amazon_ownership_info.web_reader_url|default:'' }}"
+                                            {% else %}
+                                            data-asin="{{ item.asin|default:'' }}"
+                                            {% endif %}
+                                            data-files="{{ item.files_json }}"
+                                        >
+                                            View Details
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn-interesting-card"
+                                            onclick="event.stopPropagation(); if(window.toggleBookInteresting) window.toggleBookInteresting('{{ item.id }}', this);"
+                                            data-item-id="{{ item.id }}"
+                                            data-interesting="{{ item.is_interesting|yesno:'true,false' }}"
+                                            title="{% if item.is_interesting %}Marked as Interesting (in Interesting Books category) — click to unmark, or download the book to auto-reset{% else %}Mark this book as Interesting so it appears in the Interesting Books category (auto-resets when downloaded){% endif %}"
+                                            style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; transition:all 0.2s; {% if item.is_interesting %}background:rgba(250,204,21,0.22); border:1px solid rgba(250,204,21,0.6); color:#facc15;{% else %}background:rgba(148,163,184,0.12); border:1px solid rgba(148,163,184,0.32); color:#cbd5e1;{% endif %}"
+                                        >
+                                            <i class="{% if item.is_interesting %}fa-solid{% else %}fa-regular{% endif %} fa-star"></i> Interesting
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn-bad-meta-card"
+                                            onclick="event.stopPropagation(); if(window.toggleBookBadMetadata) window.toggleBookBadMetadata('{{ item.id }}', this);"
+                                            data-item-id="{{ item.id }}"
+                                            data-bad-metadata="{{ item.is_bad_metadata|yesno:'true,false' }}"
+                                            title="{% if item.is_bad_metadata %}Flagged as Bad Metadata — click to unflag (also clears automatically when enriched/approved){% else %}Flag this book as having Bad Metadata (adds it to the Bad Metadata shelf){% endif %}"
+                                            style="display:inline-flex; align-items:center; justify-content:center; gap:0.22rem; padding:0.42rem 0.5rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; transition:all 0.2s; {% if item.is_bad_metadata %}background:rgba(244,63,94,0.24); border:1px solid rgba(244,63,94,0.65); color:#fda4af;{% else %}background:rgba(148,163,184,0.12); border:1px solid rgba(148,163,184,0.32); color:#cbd5e1;{% endif %}"
+                                        >
+                                            <i class="{% if item.is_bad_metadata %}fa-solid{% else %}fa-regular{% endif %} fa-flag"></i>
+                                        </button>
+                                    </div>
+
+                                    <!-- Row 2: Enrichment & Magazine Actions -->
+                                    {% if item.has_enrichable_file %}
+                                    <div style="display:flex; gap:0.4rem; align-items:center; width:100%;">
+                                        <button
+                                            type="button"
+                                            class="btn-enrich-card"
+                                            onclick="event.stopPropagation(); if(window.enrichCardNow) window.enrichCardNow(this);"
+                                            data-item-id="{{ item.id }}"
+                                            data-force="{% if item.is_enriched %}true{% else %}false{% endif %}"
+                                            data-enrich-status="{{ item.enrich_diag.status|default:'' }}"
+                                            data-review-json="{{ item.enrich_diag_json|default:'' }}"
+                                            title="{% if item.is_enriched %}Already enriched — click to Force Re-Enrich on demand{% elif item.enrich_diag %}{{ item.enrich_diag.error|default:item.enrich_diag.status }} — Click to open Review &amp; Mix-and-Match Modal{% else %}Run epubmeta on-demand enrichment now (updates EPUB/PDF metadata, cover, ISBN &amp; synopsis; auto-moves magazines to toMags){% endif %}"
+                                            style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.3rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.75rem; font-weight:600; cursor:pointer; white-space:nowrap; transition:all 0.2s; {% if item.is_enriched %}background:rgba(74,222,128,0.14); border:1px solid rgba(74,222,128,0.4); color:#4ade80;{% elif item.enrich_diag.status == 'FAILED' %}background:rgba(239,68,68,0.18); border:1px solid rgba(239,68,68,0.5); color:#f87171;{% elif item.enrich_diag %}background:rgba(251,191,36,0.18); border:1px solid rgba(251,191,36,0.5); color:#fbbf24;{% else %}background:rgba(168,85,247,0.18); border:1px solid rgba(168,85,247,0.45); color:#c084fc;{% endif %}"
+                                        >
+                                            {% if item.is_enriched %}
+                                                <i class="fa-solid fa-wand-magic-sparkles"></i> Re-Enrich
+                                            {% elif item.enrich_diag.status == 'FAILED' %}
+                                                <i class="fa-solid fa-triangle-exclamation"></i> Failed
+                                            {% elif item.enrich_diag.status == 'NEEDS_REVIEW' %}
+                                                <i class="fa-solid fa-clipboard-question"></i> In Review
+                                            {% elif item.enrich_diag %}
+                                                <i class="fa-solid fa-magnifying-glass-minus"></i> No Match
+                                            {% else %}
+                                                <i class="fa-solid fa-wand-magic-sparkles"></i> Enrich Now
+                                            {% endif %}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn-reenrich-card"
+                                            data-item-id="{{ item.id }}"
+                                            onclick="event.stopPropagation(); if(window.reEnrichCardNow) window.reEnrichCardNow(this);"
+                                            title="Re-run epubmeta enrichment on this In Review item now"
+                                            style="display:{% if item.enrich_diag and not item.is_enriched %}inline-flex{% else %}none{% endif %}; align-items:center; justify-content:center; gap:0.28rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.48); color:#38bdf8; transition:all 0.2s;"
+                                        >
+                                            <i class="fa-solid fa-arrows-rotate"></i> Re-Enrich
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn-move-tomag"
+                                            onclick="event.stopPropagation(); if(window.moveToMagNow) window.moveToMagNow(this);"
+                                            data-item-id="{{ item.id }}"
+                                            title="Move this item's physical file(s) to /toMags for OrgPeriodicals magazine processing"
+                                            style="display:inline-flex; align-items:center; justify-content:center; gap:0.28rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.14); border:1px solid rgba(56,189,248,0.38); color:#38bdf8;"
+                                        >
+                                            <i class="fa-solid fa-newspaper"></i> toMag
+                                        </button>
+                                    </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+            
+            <!-- Pagination Controls -->
+            {% if is_paginated %}
+                <nav class="pagination">
+                    {% if page_obj.has_previous %}
+                        <a href="?page={{ page_obj.previous_page_number }}{% if query_params %}&{{ query_params }}{% endif %}" class="page-link">&laquo; Previous</a>
+                    {% endif %}
+                    
+                    <span class="page-info">
+                        Page <strong>{{ page_obj.number|intcomma }}</strong> of <strong>{{ paginator.num_pages|intcomma }}</strong>
+                    </span>
+
+                    <button
+                        type="button"
+                        id="btn-enrich-page-bottom"
+                        class="btn-enrich-page"
+                        onclick="window.enrichAllOnPage()"
+                        title="Enrich all books on this page that need enrichment (queued 2 at a time)"
+                        style="display:none; align-items:center; gap:0.4rem; padding:0.45rem 0.9rem; border-radius:10px; font-size:0.8rem; font-weight:700; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(168,85,247,0.24), rgba(99,102,241,0.24)); border:1px solid rgba(168,85,247,0.55); color:#e9d5ff; transition:all 0.2s;"
+                    >
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> <span class="enrich-page-label">Enrich Page</span>
+                    </button>
+                    
+                    {% if page_obj.has_next %}
+                        <a href="?page={{ page_obj.next_page_number }}{% if query_params %}&{{ query_params }}{% endif %}" class="page-link">Next &raquo;</a>
+                    {% endif %}
+                </nav>
+            {% endif %}
+            
+        {% else %}
+            <!-- Empty State -->
+            <div class="empty-state">
+                <i class="fa-solid fa-circle-question"></i>
+                <h2>No items found</h2>
+                <p>We couldn't find any books, magazines, Kindle, or Audible entries matching your criteria.</p>
+                <p style="font-size: 0.85rem; margin-top: 1rem; color: var(--text-muted);">
+                    Tip: Try clearing your filters or running the off-webpage scanners to sync new files.
+                </p>
+            </div>
+        {% endif %}
+    </main>
+</div>
+
+<!-- Details Modal Overlay -->
+<style>
+    #modal-overlay .modal-content {
+        max-width: 780px;
+        width: 92%;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    #modal-overlay .modal-body {
+        padding: 2.1rem;
+        overflow-y: auto;
+        max-height: 90vh;
+    }
+    .cover-finder-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(115px, 1fr));
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+        max-height: 340px;
+        overflow-y: auto;
+        padding-right: 0.25rem;
+    }
+    .cover-cand-card {
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 8px;
+        overflow: hidden;
+        cursor: pointer;
+        transition: transform 0.15s ease, border-color 0.15s ease;
+        display: flex;
+        flex-direction: column;
+    }
+    .cover-cand-card:hover {
+        transform: translateY(-2px);
+        border-color: #38bdf8;
+    }
+    .cover-cand-card img {
+        width: 100%;
+        height: 155px;
+        object-fit: cover;
+        background: #020617;
+    }
+    .cover-cand-meta {
+        padding: 0.35rem 0.45rem;
+        font-size: 0.68rem;
+        line-height: 1.25;
+        color: #cbd5e1;
+    }
+</style>
+<div id="modal-overlay" class="modal-overlay">
+    <div class="modal-content">
+        <button id="modal-close" class="modal-close" aria-label="Close modal"><i class="fa-solid fa-xmark"></i></button>
+        <div class="modal-body">
+            <div class="modal-header-section">
+                <div style="display:flex; flex-direction:column; align-items:center; gap:0.5rem;">
+                    <div class="modal-cover-wrap">
+                        <img id="modal-cover" src="" alt="Cover thumbnail" style="display: none;">
+                        <i id="modal-cover-fallback" class="fa-solid fa-book card-icon-fallback" style="font-size: 4rem; display: none;"></i>
+                    </div>
+                    <button type="button" id="btn-find-cover" onclick="toggleCoverFinder()" style="width:140px; background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; border-radius:7px; padding:0.35rem 0.5rem; font-size:0.76rem; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.35rem;" title="Search the web for book covers (like Moon+ Reader)">
+                        <i class="fa-solid fa-images"></i> Find Cover
+                    </button>
+                </div>
+                <div class="modal-title-info">
+                    <h2 id="modal-title" class="modal-title">Book Title</h2>
+                    <div id="modal-authors" class="modal-authors">by Authors</div>
+                    <div id="modal-badges-container" class="modal-badges"></div>
+                </div>
+            </div>
+
+            <!-- Enrichment Error / Diagnostic Details Banner -->
+            <div id="modal-enrich-error-banner" style="display:none; background:rgba(239,68,68,0.14); border:1px solid rgba(239,68,68,0.48); border-radius:10px; padding:0.75rem 0.95rem; margin-bottom:1.1rem; color:#fecaca; font-size:0.82rem;"></div>
+
+            <!-- Moon+ Reader Style Web Cover Finder Drawer -->
+            <div id="modal-cover-finder" style="display:none; background:rgba(15,23,42,0.82); border:1px solid rgba(56,189,248,0.35); border-radius:12px; padding:0.9rem 1rem; margin-bottom:1.4rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.55rem; gap:0.5rem; flex-wrap:wrap;">
+                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-globe"></i> Web Cover Search (Apple Books · Google Books · Open Library)</strong>
+                    <button type="button" onclick="document.getElementById('modal-cover-finder').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem;">✕ Hide</button>
+                </div>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <input type="text" id="cover-search-input" placeholder="Search title, author, or ISBN..." onkeydown="if(event.key==='Enter'){event.preventDefault(); runWebCoverSearch();}" style="flex:1; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.42rem 0.7rem; color:#f8fafc; font-size:0.83rem;">
+                    <button type="button" id="btn-run-cover-search" onclick="runWebCoverSearch()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.42rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer; white-space:nowrap;">
+                        <i class="fa-solid fa-magnifying-glass"></i> Search Web
+                    </button>
+                </div>
+                <div id="cover-finder-status" style="font-size:0.76rem; color:#94a3b8; margin-top:0.45rem;"></div>
+                <div id="cover-finder-results" class="cover-finder-grid"></div>
+            </div>
+
+            <!-- Inline Peek Inside Book Drawer in Book Details Modal -->
+            <div id="modal-book-peek-drawer" style="display:none; background:rgba(2,6,23,0.88); border:1px solid rgba(56,189,248,0.42); border-radius:12px; padding:0.9rem 1rem; margin-bottom:1.4rem;">
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.6rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.5rem;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                        <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-book-open-reader"></i> Peek Inside Book</strong>
+                        <span id="modal-peek-meta-info" style="font-size:0.74rem; color:#94a3b8;"></span>
+                        <button type="button" id="modal-peek-ai-all-btn" onclick="window.modalPeekAiReevaluate(null, this)" style="background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.55); color:#e9d5ff; border-radius:6px; font-size:0.72rem; font-weight:700; padding:0.2rem 0.6rem; cursor:pointer; display:inline-flex; align-items:center; gap:0.3rem;" title="Have Gemini AI Vision inspect the previewed page/cover images and re-evaluate enrichment">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> AI Re-Evaluate from Image(s)
+                        </button>
+                        <a id="modal-peek-raw-link" href="#" target="_blank" style="display:none; background:rgba(168,85,247,0.18); border:1px solid rgba(168,85,247,0.45); color:#c084fc; font-size:0.72rem; font-weight:700; padding:0.2rem 0.6rem; border-radius:6px; text-decoration:none; align-items:center; gap:0.3rem;" title="Open the full PDF/EPUB file in a new browser tab">
+                            <i class="fa-solid fa-up-right-from-square"></i> Open Full File
+                        </a>
+                    </div>
+                    <button type="button" onclick="document.getElementById('modal-book-peek-drawer').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem;">✕ Hide</button>
+                </div>
+                <div id="modal-peek-isbns-bar" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.6rem; font-size:0.74rem;"></div>
+                <div id="modal-peek-images-strip" style="display:none; gap:0.65rem; overflow-x:auto; padding-bottom:0.55rem; margin-bottom:0.65rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
+                <div id="modal-peek-section-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.5rem;"></div>
+                <div id="modal-peek-text-body" style="background:rgba(15,23,42,0.92); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:0.75rem 0.9rem; font-size:0.81rem; line-height:1.6; color:#e2e8f0; max-height:260px; overflow-y:auto; white-space:pre-wrap; font-family:Georgia, 'Times New Roman', serif;"></div>
+            </div>
+            
+            <div class="modal-section-title">Synopsis</div>
+            <div id="modal-desc" class="modal-desc">Book description...</div>
+            
+            <div class="modal-section-title">Physical & Digital Files</div>
+            <ul id="modal-files-list" class="modal-files-list"></ul>
+        </div>
+    </div>
+</div>
+
+<!-- On-Demand Enrichment Review & Mix-and-Match Modal -->
+<div id="enrich-review-modal" onclick="if(event.target === this) closeEnrichReviewModal();" style="display:none; position:fixed; inset:0; background:rgba(2,6,23,0.82); backdrop-filter:blur(6px); z-index:9998; align-items:center; justify-content:center; padding:1.25rem;">
+    <div style="background:#0f172a; border:1px solid rgba(251,191,36,0.35); border-radius:14px; max-width:900px; max-height:92vh; overflow-y:auto; width:100%; padding:1.35rem 1.5rem; color:#f8fafc; box-shadow:0 24px 60px rgba(0,0,0,0.75);">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:0.75rem; margin-bottom:0.9rem; gap:1rem;">
+            <div>
+                <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    <span id="er-status-badge" style="background:rgba(251,191,36,0.2); border:1px solid rgba(251,191,36,0.5); color:#fbbf24; font-size:0.72rem; font-weight:700; padding:0.15rem 0.55rem; border-radius:999px;">NEEDS REVIEW</span>
+                    <button type="button" id="er-conf-badge" onclick="window.erFocusManualEdit()" style="background:rgba(56,189,248,0.15); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; font-size:0.72rem; font-weight:600; padding:0.18rem 0.6rem; border-radius:999px; cursor:pointer;" title="Click to jump to the Custom Edit metadata fields below">Confidence: —</button>
+                    <button type="button" id="er-btn-toggle-preview" onclick="window.toggleBookPreviewInReview()" style="background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.5); color:#38bdf8; font-size:0.74rem; font-weight:700; padding:0.2rem 0.65rem; border-radius:999px; cursor:pointer; display:inline-flex; align-items:center; gap:0.35rem;" title="Inspect the actual pages, cover, title page, and copyright text inside this EPUB/PDF file">
+                        <i class="fa-solid fa-book-open-reader"></i> Preview Inside Book
+                    </button>
+                    <a id="er-raw-stream-link" href="#" target="_blank" style="display:none; background:rgba(168,85,247,0.18); border:1px solid rgba(168,85,247,0.45); color:#c084fc; font-size:0.73rem; font-weight:700; padding:0.2rem 0.6rem; border-radius:999px; text-decoration:none; align-items:center; gap:0.35rem;" title="Open the full PDF/EPUB file in a new browser tab">
+                        <i class="fa-solid fa-up-right-from-square"></i> Open Full File
+                    </a>
+                </div>
+                <h3 id="er-file-name" style="margin:0.45rem 0 0.15rem 0; font-size:1.08rem; color:#f8fafc;">File Name</h3>
+                <div id="er-file-path" style="font-family:monospace; font-size:0.74rem; color:#94a3b8; word-break:break-all;"></div>
+            </div>
+            <button type="button" onclick="closeEnrichReviewModal()" style="background:rgba(148,163,184,0.15); color:#cbd5e1; border:1px solid rgba(148,163,184,0.35); border-radius:6px; padding:0.3rem 0.7rem; cursor:pointer; font-weight:600; white-space:nowrap;">✕ Leave in Queue</button>
+        </div>
+
+        <div id="er-diag-msg" style="background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.3); border-radius:8px; padding:0.55rem 0.8rem; font-size:0.8rem; color:#fde68a; margin-bottom:0.9rem;"></div>
+
+        <!-- Expandable Inside-Book Preview Drawer (Pages, Cover Images, Front-Matter Text & Highlight-to-Field) -->
+        <div id="er-book-preview-drawer" style="display:none; background:rgba(2,6,23,0.85); border:1px solid rgba(56,189,248,0.4); border-radius:10px; padding:0.85rem 1rem; margin-bottom:0.95rem;">
+            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.6rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.5rem;">
+                <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-book-open-reader"></i> Inside Book Preview</strong>
+                    <span id="er-preview-meta-info" style="font-size:0.73rem; color:#94a3b8;"></span>
+                    <button type="button" id="er-btn-ai-vision-all" onclick="window.erAiReevaluateFromPreview(null, this)" style="background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.55); color:#e9d5ff; border-radius:6px; font-size:0.72rem; font-weight:700; padding:0.2rem 0.6rem; cursor:pointer; display:inline-flex; align-items:center; gap:0.3rem;" title="Have Gemini AI Vision inspect the previewed page/cover images and re-evaluate enrichment">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> AI Re-Evaluate from Image(s)
+                    </button>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem;">
+                    <span style="font-size:0.7rem; color:#94a3b8;">Highlight any text below &amp; click:</span>
+                    <button type="button" onclick="window.erUseSelectedPreviewText('title')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Title">&rarr; Title</button>
+                    <button type="button" onclick="window.erUseSelectedPreviewText('author')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Author">&rarr; Author</button>
+                    <button type="button" onclick="window.erUseSelectedPreviewText('publisher')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Publisher">&rarr; Publisher</button>
+                    <button type="button" onclick="window.erUseSelectedPreviewText('desc')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Description">&rarr; Synopsis</button>
+                </div>
+            </div>
+            <div id="er-preview-isbns-bar" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.6rem; font-size:0.74rem;"></div>
+            <div id="er-preview-images-strip" style="display:none; gap:0.65rem; overflow-x:auto; padding-bottom:0.55rem; margin-bottom:0.65rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
+            <div id="er-preview-section-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.5rem;"></div>
+            <div id="er-preview-text-body" style="background:rgba(15,23,42,0.92); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:0.75rem 0.9rem; font-size:0.81rem; line-height:1.6; color:#e2e8f0; max-height:260px; overflow-y:auto; white-space:pre-wrap; font-family:Georgia, 'Times New Roman', serif;"></div>
+        </div>
+
+        <!-- Side-by-Side Original vs Candidate Comparison -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.85rem; margin-bottom:0.95rem;">
+            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:0.75rem 0.9rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.45rem;">
+                    <strong style="font-size:0.75rem; text-transform:uppercase; color:#94a3b8;"><i class="fa-solid fa-file-lines"></i> Original Metadata (Click field to use)</strong>
+                    <button type="button" onclick="erSelectAllSide('orig')" style="background:rgba(148,163,184,0.18); color:#e2e8f0; border:1px solid rgba(148,163,184,0.35); border-radius:5px; font-size:0.68rem; padding:0.15rem 0.5rem; cursor:pointer;">Use All Original</button>
+                </div>
+                <div id="er-orig-box" style="font-size:0.8rem; line-height:1.5; display:flex; flex-direction:column; gap:0.35rem;"></div>
+            </div>
+
+            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(56,189,248,0.28); border-radius:10px; padding:0.75rem 0.9rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.45rem;">
+                    <strong style="font-size:0.75rem; text-transform:uppercase; color:#38bdf8;"><i class="fa-solid fa-wand-magic-sparkles"></i> Candidate Match (Click field to use)</strong>
+                    <button type="button" onclick="erSelectAllSide('cand')" style="background:rgba(56,189,248,0.18); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); border-radius:5px; font-size:0.68rem; padding:0.15rem 0.5rem; cursor:pointer;">Use All Candidate</button>
+                </div>
+                <div id="er-cand-box" style="font-size:0.8rem; line-height:1.5; display:flex; flex-direction:column; gap:0.35rem;"></div>
+            </div>
+        </div>
+
+        <!-- Editable Merged Fields to Save -->
+        <div id="er-custom-edit-box" style="background:rgba(15,23,42,0.9); border:1px solid rgba(74,222,128,0.35); border-radius:10px; padding:0.8rem 0.95rem; margin-bottom:1rem; transition:box-shadow 0.25s, border-color 0.25s;">
+            <div style="font-size:0.76rem; font-weight:700; text-transform:uppercase; color:#4ade80; margin-bottom:0.55rem;">
+                <i class="fa-solid fa-sliders"></i> Selected Metadata to Save (Click fields above to mix &amp; match, or edit directly)
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.65rem;">
+                <div>
+                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Title</label>
+                    <input type="text" id="er-input-title" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.83rem;">
+                </div>
+                <div>
+                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Author(s)</label>
+                    <input type="text" id="er-input-author" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.83rem;">
+                </div>
+                <div>
+                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Publisher</label>
+                    <input type="text" id="er-input-publisher" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.83rem;">
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+                    <div>
+                        <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Published Date</label>
+                        <input type="text" id="er-input-pubdate" placeholder="YYYY-MM-DD" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.83rem;">
+                    </div>
+                    <div>
+                        <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">ISBN</label>
+                        <input type="text" id="er-input-isbn" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-family:monospace; font-size:0.83rem;">
+                    </div>
+                </div>
+                <div style="grid-column:1 / -1;">
+                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Description / Synopsis</label>
+                    <textarea id="er-input-desc" rows="2" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.8rem; resize:vertical;"></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- All Resolution Options -->
+        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.55rem; border-top:1px solid rgba(255,255,255,0.1); padding-top:0.85rem;">
+            <div style="display:flex; flex-wrap:wrap; gap:0.5rem;">
+                <button type="button" id="er-btn-approve" onclick="erApproveSelected()" style="background:rgba(74,222,128,0.2); border:1px solid rgba(74,222,128,0.55); color:#4ade80; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;">
+                    <i class="fa-solid fa-check"></i> Approve Selected Fields
+                </button>
+                <button type="button" id="er-btn-reenrich" onclick="erReEnrichFromModal()" style="background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;" title="Re-run epubmeta enrichment now (uses any Title, Author, or ISBN entered in the Selected Metadata boxes above as search hints)">
+                    <i class="fa-solid fa-arrows-rotate"></i> Re-Enrich
+                </button>
+                <button type="button" id="er-btn-force" onclick="erForceWriteCandidate()" style="background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.55); color:#c084fc; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;" title="Write the candidate metadata directly into the physical EPUB/PDF file on disk">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Force Write Candidate to File
+                </button>
+                <button type="button" id="er-btn-ignore" onclick="erKeepOriginalIgnore()" style="background:rgba(148,163,184,0.18); border:1px solid rgba(148,163,184,0.45); color:#e2e8f0; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;" title="Keep original file metadata and permanently ignore enrichment for this file">
+                    <i class="fa-solid fa-shield-halved"></i> Keep Original (Ignore)
+                </button>
+                <button type="button" id="er-btn-revert" onclick="erRevertToOriginal()" style="background:rgba(244,63,94,0.18); border:1px solid rgba(244,63,94,0.5); color:#fb7185; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;" title="Revert this book back to its original pre-enrichment metadata and clear enrichment state">
+                    <i class="fa-solid fa-rotate-left"></i> Revert to Original
+                </button>
+                <button type="button" id="er-btn-tomag" onclick="erMoveToMag()" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; border-radius:7px; padding:0.45rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer;" title="Move this file to /toMags so OrgPeriodicals organizes it as a magazine">
+                    <i class="fa-solid fa-newspaper"></i> Move to toMags
+                </button>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <a href="{% url 'catalog:status_dashboard' %}#explorer" target="_blank" style="background:rgba(30,41,59,0.9); border:1px solid rgba(255,255,255,0.18); color:#94a3b8; border-radius:7px; padding:0.45rem 0.75rem; font-size:0.78rem; text-decoration:none;">
+                    <i class="fa-solid fa-table-list"></i> Open Full Review Queue
+                </a>
+                <button type="button" onclick="closeEnrichReviewModal()" style="background:rgba(251,191,36,0.15); border:1px solid rgba(251,191,36,0.45); color:#fbbf24; border-radius:7px; padding:0.45rem 0.8rem; font-size:0.8rem; font-weight:600; cursor:pointer;">
+                    <i class="fa-solid fa-clock"></i> Leave in Review List
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Help, CLI, REST API & MCP Modal -->
+<div id="index-help-modal" onclick="if(event.target === this) this.style.display='none';" style="display:none; position:fixed; inset:0; background:rgba(2,6,23,0.8); backdrop-filter:blur(6px); z-index:9999; align-items:center; justify-content:center; padding:1.5rem;">
+    <div style="background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:14px; max-width:920px; max-height:90vh; overflow-y:auto; width:100%; padding:1.5rem; color:#f8fafc; box-shadow:0 20px 50px rgba(0,0,0,0.65);">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:0.85rem; margin-bottom:1rem;">
+            <div>
+                <h2 style="margin:0; font-size:1.2rem;"><i class="fa-solid fa-circle-question" style="color:#f472b6;"></i> MyLibrary Help — Search, Status Dashboard, CLI, API &amp; MCP</h2>
+            </div>
+            <button type="button" onclick="document.getElementById('index-help-modal').style.display='none';" style="background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.35); border-radius:6px; padding:0.3rem 0.7rem; cursor:pointer; font-weight:600;">✕ Close</button>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.85rem; font-size:0.83rem; line-height:1.55;">
+            <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">1. Web Catalog, On-Demand Enrichment, OPDS Server &amp; External Security</strong>
+                • <strong>Full-Catalog Search &amp; On-Demand Enrichment (<code>/mylibrary/</code>):</strong> Search across all 1.15M+ books (by title, author, ISBN, ASIN, publisher, or filename). Click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> (or check <em>Enrich search results on demand</em> / append <code>+enrich</code> to your search query) to immediately run <code>epubmeta</code> on the physical EPUB/PDF, rewrite its embedded OPF metadata on the NAS, and update its cover, ISBN, and synopsis in BookDB.<br>
+                • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong> (<em>Net Library &rarr; Add new catalog</em>), KOReader, or Calibre Sync. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV bookmarks (<code>.po</code> / <code>.an</code>). You can also append <code>+enrich</code> to any OPDS search query.<br>
+                • <strong>External Security (<code>/mylibrary/login/</code>):</strong> Zero friction on your home LAN (`192.168.1.x`). Outside your LAN, web pages require login at <code>/mylibrary/login/</code> and OPDS/API endpoints require HTTP Basic Auth (`AUTH_USERNAME` / `AUTH_PASSWORD`).
+            </div>
+            <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">2. CLI (<code>mylibrary_cli.py</code>), Amazon Sync (<code>sync_amazon.py</code>) &amp; Calibre/Moon+ Sync</strong>
+                <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.65rem; font-size:0.75rem; color:#38bdf8; overflow-x:auto; margin:0.2rem 0 0 0;">python scanner/sync_amazon.py               # Automated Chrome sync for Amazon Kindle, Kindle+, Bookmarks &amp; Audible
+python mylibrary_cli.py status
+python mylibrary_cli.py search "Dune" --type BOOK --format EPUB --limit 10
+python mylibrary_cli.py enrichments --status NEEDS_REVIEW --limit 20
+python calibre_moon_sync.py moon-only --apply
+python calibre_moon_sync.py pass1 --apply   # Snapshot Moon+ bookmarks &amp; tag books in Calibre
+python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write updated Moon+ bookmarks</pre>
+            </div>
+            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
+                <strong style="color:#4ade80; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">3. MCP Server (<code>mylibrary_mcp.py</code>)</strong>
+                <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.55rem; font-size:0.71rem; color:#4ade80; overflow-x:auto; margin:0.2rem 0 0 0;">{
+  "mcpServers": {
+    "mylibrary": {
+      "command": "python",
+      "args": ["c:\\Users\\oscar\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"],
+      "env": {
+        "MYLIBRARY_URL": "http://192.168.1.43:8080/mylibrary",
+        "MYLIBRARY_PATH_PREFIX": "U:\\Media"
+      }
+    }
+  }
+}</pre>
+            </div>
+            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem; font-family:monospace; font-size:0.74rem;">
+                <strong style="color:#f472b6; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem; font-family:sans-serif;">4. OPDS &amp; REST API Endpoints</strong>
+                POST /mylibrary/api/enrich/ (On-Demand Enrich)<br>
+                POST /mylibrary/api/sync/amazon/<br>
+                GET  /mylibrary/opds/  (OPDS 1.2 Root)<br>
+                GET  /mylibrary/opds/amazon/?filter=amazon_only<br>
+                GET  /mylibrary/opds/search/?q=...+enrich<br>
+                GET  /mylibrary/opds/download/&lt;id&gt;/&lt;file&gt;<br>
+                GET  /mylibrary/api/status/<br>
+                GET  /mylibrary/api/catalog/?q=&amp;type=&amp;format=<br>
+                POST /mylibrary/api/calibre/check-enriched/
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/search.js' %}?v=20261107i"></script>
+{% endblock %}

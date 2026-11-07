@@ -1,0 +1,805 @@
+{% extends 'catalog/base.html' %}
+{% load static humanize %}
+
+{% block title %}Duplicates Manager (Enriched Books) - MyLibrary{% endblock %}
+
+{% block extra_css %}
+<style>
+    .dup-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+        gap: 0.9rem;
+        margin-bottom: 1.25rem;
+    }
+    .dup-stat-card {
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        padding: 0.95rem 1.1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        text-decoration: none;
+        color: inherit;
+        transition: all 0.18s ease;
+    }
+    .dup-stat-card:hover {
+        transform: translateY(-2px);
+        border-color: rgba(56, 189, 248, 0.55);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+    }
+    .dup-stat-card.active-card {
+        border-color: rgba(56, 189, 248, 0.8);
+        background: rgba(56, 189, 248, 0.12);
+    }
+    .dup-stat-label {
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #94a3b8;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .dup-stat-val {
+        font-size: 1.55rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
+    .dup-stat-sub {
+        font-size: 0.76rem;
+        color: #cbd5e1;
+        opacity: 0.85;
+    }
+    .dup-toolbar {
+        background: rgba(15, 23, 42, 0.78);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        padding: 1rem 1.2rem;
+        margin-bottom: 1.1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+    }
+    .dup-toolbar-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+    }
+    .dup-pill-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+    }
+    .dup-pill {
+        background: rgba(30, 41, 59, 0.85);
+        color: #cbd5e1;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 999px;
+        padding: 0.38rem 0.85rem;
+        font-size: 0.79rem;
+        font-weight: 600;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .dup-pill:hover {
+        background: rgba(51, 65, 85, 0.92);
+        color: #fff;
+    }
+    .dup-pill.active {
+        background: linear-gradient(135deg, #0ea5e9, #6366f1);
+        color: #fff;
+        border-color: transparent;
+        box-shadow: 0 2px 10px rgba(56, 189, 248, 0.35);
+    }
+    .dup-bulk-bar {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.14), rgba(56, 189, 248, 0.12));
+        border: 1px solid rgba(52, 211, 153, 0.38);
+        border-radius: 12px;
+        padding: 0.75rem 1.1rem;
+        margin-bottom: 1.1rem;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+    }
+    .dup-group-card {
+        background: rgba(15, 23, 42, 0.78);
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 14px;
+        padding: 1.1rem 1.25rem;
+        margin-bottom: 1rem;
+        transition: all 0.2s ease;
+    }
+    .dup-group-card:hover {
+        border-color: rgba(56, 189, 248, 0.38);
+    }
+    .dup-group-card.resolved-card {
+        opacity: 0.42;
+        pointer-events: none;
+        border-color: rgba(34, 197, 94, 0.5);
+    }
+    .dup-group-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.9rem;
+        padding-bottom: 0.8rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .dup-book-meta {
+        display: flex;
+        gap: 0.95rem;
+        align-items: flex-start;
+        flex: 1;
+        min-width: 0;
+    }
+    .dup-cover-thumb {
+        width: 58px;
+        height: 84px;
+        border-radius: 8px;
+        object-fit: cover;
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        flex-shrink: 0;
+    }
+    .dup-file-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.85rem;
+        padding: 0.75rem 0.95rem;
+        border-radius: 10px;
+        margin-bottom: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(30, 41, 59, 0.55);
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .dup-file-row:last-child {
+        margin-bottom: 0;
+    }
+    .dup-file-row.keep-selected {
+        background: rgba(16, 185, 129, 0.13);
+        border-color: rgba(52, 211, 153, 0.58);
+        box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.22);
+    }
+    .dup-file-row.remove-selected {
+        background: rgba(244, 63, 94, 0.08);
+        border-color: rgba(244, 63, 94, 0.32);
+    }
+    .dup-role-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.24rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    .dup-role-keep {
+        background: rgba(16, 185, 129, 0.25);
+        border: 1px solid rgba(52, 211, 153, 0.7);
+        color: #6ee7b7;
+    }
+    .dup-role-remove {
+        background: rgba(244, 63, 94, 0.22);
+        border: 1px solid rgba(251, 113, 133, 0.6);
+        color: #fda4af;
+    }
+    .reason-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.28rem;
+        padding: 0.18rem 0.52rem;
+        border-radius: 999px;
+        font-size: 0.71rem;
+        font-weight: 600;
+    }
+    .reason-good {
+        background: rgba(34, 197, 94, 0.16);
+        border: 1px solid rgba(74, 222, 128, 0.42);
+        color: #86efac;
+    }
+    .reason-warn {
+        background: rgba(245, 158, 11, 0.18);
+        border: 1px solid rgba(251, 191, 36, 0.48);
+        color: #fde68a;
+    }
+    .reason-info {
+        background: rgba(56, 189, 248, 0.15);
+        border: 1px solid rgba(56, 189, 248, 0.38);
+        color: #7dd3fc;
+    }
+    .path-code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 0.77rem;
+        color: #cbd5e1;
+        background: rgba(2, 6, 23, 0.55);
+        padding: 0.28rem 0.55rem;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        word-break: break-all;
+        display: inline-block;
+        margin-top: 0.25rem;
+    }
+    .btn-resolve-group {
+        background: linear-gradient(135deg, #10b981, #059669);
+        color: #fff;
+        border: 1px solid rgba(110, 231, 183, 0.5);
+        border-radius: 9px;
+        padding: 0.5rem 0.95rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        white-space: nowrap;
+        transition: all 0.16s ease;
+    }
+    .btn-resolve-group:hover {
+        filter: brightness(1.1);
+        transform: translateY(-1px);
+    }
+    .btn-resolve-group:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<header class="dashboard-header" style="margin-bottom:1.25rem;">
+    <div class="logo-section">
+        <h1><i class="fa-solid fa-clone" style="color:#38bdf8;"></i> Enriched Duplicates Manager</h1>
+        <span>Same Format &amp; Verified Book Content • Auto-Selects Best Category Dir (Above 3-Letter Dir), Oldest Date &amp; No <code>(#)</code> Suffix</span>
+    </div>
+
+    <div class="stats-container">
+        <a href="{% url 'catalog:duplicates_dashboard' %}?refresh=1&mode={{ dup_data.filter_mode }}&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}" class="stat-badge action-badge" title="Re-scan enriched books for duplicates now">
+            <i class="fa-solid fa-arrows-rotate cyan"></i>
+            <span>Rescan Duplicates</span>
+        </a>
+        <a href="{% url 'catalog:status_dashboard' %}" class="stat-badge nav-dashboard-btn" title="Open Conversion & Import Status Dashboard">
+            <i class="fa-solid fa-chart-line"></i>
+            <span>Status Dashboard</span>
+        </a>
+        <a href="{% url 'catalog:dashboard' %}" class="stat-badge nav-dashboard-btn" title="Return to Book Catalog Search">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <span>Book Catalog</span>
+        </a>
+    </div>
+</header>
+
+<!-- Summary Cards -->
+<section class="dup-summary-grid">
+    <a href="?mode=all&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}" class="dup-stat-card {% if dup_data.filter_mode == 'all' %}active-card{% endif %}">
+        <div class="dup-stat-label"><i class="fa-solid fa-layer-group" style="color:#38bdf8;"></i> Enriched Duplicate Groups</div>
+        <div class="dup-stat-val" id="stat-total-groups">{{ summary.total_groups|default:0|intcomma }}</div>
+        <div class="dup-stat-sub"><strong id="stat-total-redundant">{{ summary.total_redundant_files|default:0|intcomma }}</strong> redundant copies to remove</div>
+    </a>
+
+    <div class="dup-stat-card">
+        <div class="dup-stat-label"><i class="fa-solid fa-hard-drive" style="color:#4ade80;"></i> Reclaimable Storage</div>
+        <div class="dup-stat-val" style="color:#4ade80;" id="stat-reclaim-mb">
+            {% if summary.reclaimable_gb >= 1 %}{{ summary.reclaimable_gb }} GB{% else %}{{ summary.reclaimable_mb|default:0 }} MB{% endif %}
+        </div>
+        <div class="dup-stat-sub">Quarantined safely to <code>/books_bad/duplicates/</code></div>
+    </div>
+
+    <a href="?mode=exact&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}" class="dup-stat-card {% if dup_data.filter_mode == 'exact' %}active-card{% endif %}">
+        <div class="dup-stat-label"><i class="fa-solid fa-fingerprint" style="color:#a855f7;"></i> 100% Exact Hash / Size</div>
+        <div class="dup-stat-val">{{ summary.exact_match_groups|default:0|intcomma }}</div>
+        <div class="dup-stat-sub">Byte-for-byte or SHA-256 identical</div>
+    </a>
+
+    <a href="?mode=suffix&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}" class="dup-stat-card {% if dup_data.filter_mode == 'suffix' %}active-card{% endif %}">
+        <div class="dup-stat-label"><i class="fa-solid fa-copy" style="color:#f59e0b;"></i> Has <code>(#)</code> Splitfiles Suffix</div>
+        <div class="dup-stat-val" style="color:#fbbf24;">{{ summary.splitfiles_suffix_groups|default:0|intcomma }}</div>
+        <div class="dup-stat-sub">Contains <code>(1)</code>, <code>(2)</code>, etc. duplicate suffix</div>
+    </a>
+
+    <a href="?mode=dir_fit&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}" class="dup-stat-card {% if dup_data.filter_mode == 'dir_fit' %}active-card{% endif %}">
+        <div class="dup-stat-label"><i class="fa-solid fa-folder-tree" style="color:#22d3ee;"></i> Best Category Winner</div>
+        <div class="dup-stat-val">{{ summary.dir_diff_groups|default:0|intcomma }}</div>
+        <div class="dup-stat-sub">Copies across different category dirs (above 3-letter dir)</div>
+    </a>
+
+    <div class="dup-stat-card" title="Books with an active unfinished Moon+ Reader bookmark (<100% read) are automatically excluded so your reading progress is never interrupted.">
+        <div class="dup-stat-label"><i class="fa-solid fa-bookmark" style="color:#f472b6;"></i> Unfinished Bookmarks Protected</div>
+        <div class="dup-stat-val" style="color:#f472b6;">{{ summary.excluded_unfinished_bookmarks|default:0|intcomma }}</div>
+        <div class="dup-stat-sub">Auto-excluded (&lt;100% read in Moon+)</div>
+    </div>
+</section>
+
+<!-- Filter & Search Toolbar -->
+<section class="dup-toolbar">
+    <form method="GET" action="{% url 'catalog:duplicates_dashboard' %}" id="dup-filter-form">
+        <input type="hidden" name="mode" id="dup-mode-input" value="{{ dup_data.filter_mode }}">
+        <div class="dup-toolbar-row">
+            <div class="dup-pill-group">
+                <a href="?mode=all&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}" class="dup-pill {% if dup_data.filter_mode == 'all' %}active{% endif %}">
+                    <i class="fa-solid fa-check-double"></i> All Verified Content ({{ summary.total_groups|default:0 }})
+                </a>
+                <a href="?mode=exact&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}" class="dup-pill {% if dup_data.filter_mode == 'exact' %}active{% endif %}">
+                    <i class="fa-solid fa-fingerprint"></i> Exact SHA-256 / Size ({{ summary.exact_match_groups|default:0 }})
+                </a>
+                <a href="?mode=suffix&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}" class="dup-pill {% if dup_data.filter_mode == 'suffix' %}active{% endif %}">
+                    <i class="fa-solid fa-hashtag"></i> Has (#) Suffix ({{ summary.splitfiles_suffix_groups|default:0 }})
+                </a>
+                <a href="?mode=dir_fit&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}" class="dup-pill {% if dup_data.filter_mode == 'dir_fit' %}active{% endif %}">
+                    <i class="fa-solid fa-folder-check"></i> Different Category Dirs ({{ summary.dir_diff_groups|default:0 }})
+                </a>
+            </div>
+
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.55rem;">
+                <select name="format" onchange="document.getElementById('dup-filter-form').submit();" style="background:rgba(15,23,42,0.9); color:#f8fafc; border:1px solid rgba(255,255,255,0.18); border-radius:8px; padding:0.42rem 0.7rem; font-size:0.82rem;">
+                    <option value="" {% if not dup_data.format_filter %}selected{% endif %}>All Formats</option>
+                    <option value="EPUB" {% if dup_data.format_filter == 'EPUB' %}selected{% endif %}>EPUB Only</option>
+                    <option value="PDF" {% if dup_data.format_filter == 'PDF' %}selected{% endif %}>PDF Only</option>
+                    <option value="MOBI" {% if dup_data.format_filter == 'MOBI' %}selected{% endif %}>MOBI Only</option>
+                    <option value="AZW3" {% if dup_data.format_filter == 'AZW3' %}selected{% endif %}>AZW3 Only</option>
+                </select>
+
+                <input type="text" name="q" value="{{ dup_data.search_q }}" placeholder="Filter by title, author, ISBN, path..." style="background:rgba(15,23,42,0.9); color:#f8fafc; border:1px solid rgba(255,255,255,0.18); border-radius:8px; padding:0.42rem 0.8rem; font-size:0.82rem; min-width:240px;">
+                <button type="submit" class="dup-pill active" style="border-radius:8px; padding:0.42rem 0.9rem;">
+                    <i class="fa-solid fa-magnifying-glass"></i> Filter
+                </button>
+            </div>
+        </div>
+
+        <div class="dup-toolbar-row" style="padding-top:0.55rem; border-top:1px solid rgba(255,255,255,0.07); font-size:0.8rem; color:#cbd5e1;">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:1.25rem;">
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; cursor:pointer;">
+                    <input type="checkbox" name="exclude_bm" value="1" {% if dup_data.exclude_unfinished_bookmarks %}checked{% endif %} onchange="if(!this.checked){const h=document.createElement('input');h.type='hidden';h.name='exclude_bm';h.value='0';this.form.appendChild(h);} this.form.submit();" style="accent-color:#f472b6;">
+                    <span><i class="fa-solid fa-bookmark" style="color:#f472b6;"></i> Exclude books with unfinished Moon+ Reader bookmarks (&lt;100% read)</span>
+                </label>
+
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; cursor:pointer;">
+                    <input type="checkbox" name="all_enr" value="1" {% if dup_data.require_all_files_enriched %}checked{% endif %} onchange="this.form.submit();" style="accent-color:#4ade80;">
+                    <span><i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i> Strictly require every copy in group to have its own <code>SUCCESS</code> row ({{ summary.all_files_enriched_groups|default:0 }})</span>
+                </label>
+            </div>
+
+            <div>
+                Showing <strong>{{ groups|length }}</strong> of <strong>{{ dup_data.filtered_groups_count|default:0|intcomma }}</strong> matching groups
+                (<strong>{{ dup_data.filtered_redundant_files|default:0|intcomma }}</strong> redundant files • <strong>{{ dup_data.filtered_reclaimable_mb|default:0 }} MB</strong>)
+            </div>
+        </div>
+    </form>
+</section>
+
+<!-- Bulk Resolution Action Bar -->
+{% if groups %}
+<section class="dup-bulk-bar">
+    <div style="display:flex; align-items:center; gap:0.85rem; flex-wrap:wrap;">
+        <label style="display:inline-flex; align-items:center; gap:0.45rem; cursor:pointer; font-weight:700; color:#f8fafc; font-size:0.86rem;">
+            <input type="checkbox" id="select-all-groups-cb" checked onchange="toggleSelectAllGroups(this.checked);" style="width:16px; height:16px; accent-color:#10b981; cursor:pointer;">
+            <span>Select All {{ groups|length }} Groups on This Page</span>
+        </label>
+        <span id="bulk-status-msg" style="font-size:0.82rem; color:#a7f3d0;"></span>
+    </div>
+
+    <div style="display:flex; align-items:center; gap:0.65rem; flex-wrap:wrap;">
+        <button type="button" class="btn-resolve-group" id="btn-resolve-selected" onclick="resolveSelectedGroupsOnPage();">
+            <i class="fa-solid fa-broom"></i> Keep Selected Winners &amp; Quarantine Redundant Copies (<span id="selected-groups-count">{{ groups|length }}</span>)
+        </button>
+    </div>
+</section>
+{% endif %}
+
+<!-- Duplicate Groups List -->
+<section id="dup-groups-container">
+    {% for grp in groups %}
+    <div class="dup-group-card" id="group-card-{{ grp.group_key }}" data-group-key="{{ grp.group_key }}">
+        <div class="dup-group-header">
+            <div class="dup-book-meta">
+                <input type="checkbox" class="group-select-cb" data-group-key="{{ grp.group_key }}" checked onchange="updateSelectedGroupsCount();" style="width:17px; height:17px; margin-top:0.35rem; accent-color:#10b981; cursor:pointer; flex-shrink:0;">
+                <img src="{{ grp.cover_url }}" alt="{{ grp.title }}" class="dup-cover-thumb" onerror="this.src='https://via.placeholder.com/58x84/1e293b/94a3b8?text=Book';">
+                <div style="min-width:0; flex:1;">
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.45rem; margin-bottom:0.25rem;">
+                        <span style="background:rgba(99,102,241,0.25); border:1px solid rgba(129,140,248,0.55); color:#c7d2fe; font-size:0.7rem; font-weight:800; padding:0.15rem 0.5rem; border-radius:6px;">{{ grp.file_format }}</span>
+                        <span style="background:rgba(16,185,129,0.18); border:1px solid rgba(52,211,153,0.45); color:#6ee7b7; font-size:0.71rem; font-weight:700; padding:0.15rem 0.55rem; border-radius:6px;">
+                            <i class="fa-solid fa-check-circle"></i> {{ grp.content_match_label }}
+                        </span>
+                        <span style="background:rgba(56,189,248,0.15); border:1px solid rgba(56,189,248,0.38); color:#7dd3fc; font-size:0.71rem; font-weight:700; padding:0.15rem 0.55rem; border-radius:6px;">
+                            {{ grp.copies_count }} Copies • Reclaim {{ grp.reclaimable_mb }} MB
+                        </span>
+                        {% if grp.isbn %}
+                        <span style="font-size:0.72rem; color:#94a3b8; background:rgba(30,41,59,0.8); padding:0.15rem 0.5rem; border-radius:6px;">ISBN: {{ grp.isbn }}</span>
+                        {% endif %}
+                    </div>
+                    <h3 style="margin:0; font-size:1.05rem; color:#f8fafc; font-weight:700;">{{ grp.title }}</h3>
+                    <div style="font-size:0.83rem; color:#94a3b8; margin-top:0.15rem;">
+                        by <strong style="color:#cbd5e1;">{{ grp.authors }}</strong>
+                        {% if grp.publisher %} • {{ grp.publisher }}{% endif %}
+                        {% if grp.pub_date %} ({{ grp.pub_date }}){% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:0.4rem; flex-shrink:0;">
+                <button type="button" class="btn-resolve-group" id="btn-resolve-{{ grp.group_key }}" onclick="resolveSingleGroup('{{ grp.group_key }}');">
+                    <i class="fa-solid fa-check"></i> Keep Winner &amp; Remove {{ grp.redundant_count }} Duplicate{{ grp.redundant_count|pluralize }}
+                </button>
+                <span class="group-resolve-feedback" id="feedback-{{ grp.group_key }}" style="font-size:0.75rem; color:#4ade80;"></span>
+            </div>
+        </div>
+
+        <!-- File Copies in Group -->
+        <div class="dup-files-list" data-group-key="{{ grp.group_key }}">
+            {% for f in grp.files %}
+            <div class="dup-file-row {% if f.recommended_keep %}keep-selected{% else %}remove-selected{% endif %}"
+                 id="file-row-{{ f.file_id }}"
+                 data-file-id="{{ f.file_id }}"
+                 data-group-key="{{ grp.group_key }}"
+                 onclick="selectKeepFile('{{ grp.group_key }}', '{{ f.file_id }}');">
+                <div style="display:flex; align-items:flex-start; gap:0.75rem; flex:1; min-width:0;">
+                    <input type="radio"
+                           name="keep_{{ grp.group_key }}"
+                           value="{{ f.file_id }}"
+                           {% if f.recommended_keep %}checked{% endif %}
+                           onclick="event.stopPropagation(); selectKeepFile('{{ grp.group_key }}', '{{ f.file_id }}');"
+                           style="margin-top:0.3rem; width:16px; height:16px; accent-color:#10b981; cursor:pointer; flex-shrink:0;">
+
+                    <div style="min-width:0; flex:1;">
+                        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.45rem;">
+                            <span class="dup-role-badge {% if f.recommended_keep %}dup-role-keep{% else %}dup-role-remove{% endif %}" id="role-badge-{{ f.file_id }}">
+                                {% if f.recommended_keep %}
+                                    <i class="fa-solid fa-star"></i> KEEP (Recommended)
+                                {% else %}
+                                    <i class="fa-solid fa-trash-can"></i> REMOVE DUPLICATE
+                                {% endif %}
+                            </span>
+
+                            <strong style="font-size:0.9rem; color:#f8fafc; word-break:break-all;">{{ f.file_name }}</strong>
+
+                            <span style="font-size:0.74rem; color:#94a3b8;">
+                                • <strong>{{ f.file_size_mb }} MB</strong> ({{ f.file_size|intcomma }} bytes)
+                                • Date: <strong>{{ f.date_str }}</strong>
+                                {% if f.file_hash_short %} • SHA256: <code>{{ f.file_hash_short }}…</code>{% endif %}
+                                • Score: <strong>{{ f.score }}</strong>
+                            </span>
+                        </div>
+
+                        <div class="path-code">
+                            <i class="fa-regular fa-folder-open" style="color:#38bdf8; margin-right:0.3rem;"></i>{{ f.file_path }}
+                        </div>
+
+                        <div style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-top:0.42rem;">
+                            {% for r in f.reasons %}
+                            <span class="reason-pill reason-{{ r.type }}">
+                                <i class="fa-solid {{ r.icon }}"></i> {{ r.text }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display:flex; align-items:center; gap:0.4rem; flex-shrink:0;" onclick="event.stopPropagation();">
+                    <button type="button"
+                            class="dup-pill"
+                            style="padding:0.3rem 0.65rem; font-size:0.74rem; border-radius:7px;"
+                            onclick="openDuplicatePeekModal('{{ f.file_id }}', '{{ f.file_name|escapejs }}');"
+                            title="Peek inside this file copy (cover, pages, ISBNs)">
+                        <i class="fa-solid fa-book-open-reader" style="color:#38bdf8;"></i> Peek
+                    </button>
+                    <a href="{% url 'catalog:opds_download_short' f.file_id %}"
+                       class="dup-pill"
+                       style="padding:0.3rem 0.65rem; font-size:0.74rem; border-radius:7px;"
+                       title="Download this specific file copy">
+                        <i class="fa-solid fa-download" style="color:#4ade80;"></i> Download
+                    </a>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% empty %}
+    <div style="background:rgba(15,23,42,0.75); border:1px solid rgba(255,255,255,0.1); border-radius:14px; padding:2.5rem; text-align:center; color:#94a3b8;">
+        <i class="fa-solid fa-circle-check" style="font-size:2.4rem; color:#4ade80; margin-bottom:0.75rem;"></i>
+        <h3 style="color:#f8fafc; margin:0 0 0.35rem 0;">No Matching Enriched Duplicates Found!</h3>
+        <p style="margin:0; font-size:0.88rem;">All enriched books matching the current filter have clean, non-duplicate format copies.</p>
+    </div>
+    {% endfor %}
+</section>
+
+<!-- Pagination -->
+{% if dup_data.total_pages > 1 %}
+<div style="display:flex; justify-content:center; align-items:center; gap:0.65rem; margin:1.5rem 0;">
+    {% if dup_data.page > 1 %}
+    <a href="?mode={{ dup_data.filter_mode }}&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}&page={{ dup_data.page|add:'-1' }}" class="dup-pill">
+        <i class="fa-solid fa-chevron-left"></i> Previous
+    </a>
+    {% endif %}
+    <span style="font-size:0.85rem; color:#cbd5e1;">Page <strong>{{ dup_data.page }}</strong> of <strong>{{ dup_data.total_pages }}</strong></span>
+    {% if dup_data.page < dup_data.total_pages %}
+    <a href="?mode={{ dup_data.filter_mode }}&format={{ dup_data.format_filter }}&q={{ dup_data.search_q|urlencode }}&exclude_bm={{ dup_data.exclude_unfinished_bookmarks|yesno:'1,0' }}&all_enr={{ dup_data.require_all_files_enriched|yesno:'1,0' }}&page={{ dup_data.page|add:'1' }}" class="dup-pill">
+        Next <i class="fa-solid fa-chevron-right"></i>
+    </a>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Peek Inside Modal -->
+<div id="dup-peek-modal" style="display:none; position:fixed; inset:0; background:rgba(2,6,23,0.82); z-index:9999; align-items:center; justify-content:center; padding:1.25rem;">
+    <div style="background:#0f172a; border:1px solid rgba(56,189,248,0.4); border-radius:14px; max-width:960px; width:100%; max-height:88vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 20px 50px rgba(0,0,0,0.6);">
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:0.9rem 1.2rem; border-bottom:1px solid rgba(255,255,255,0.1);">
+            <h3 id="dup-peek-title" style="margin:0; font-size:0.98rem; color:#f8fafc;"><i class="fa-solid fa-book-open-reader" style="color:#38bdf8;"></i> Peek Inside File</h3>
+            <button type="button" onclick="document.getElementById('dup-peek-modal').style.display='none';" style="background:transparent; border:none; color:#94a3b8; font-size:1.2rem; cursor:pointer;">&times;</button>
+        </div>
+        <div id="dup-peek-body" style="padding:1.1rem; overflow-y:auto; color:#cbd5e1; font-size:0.84rem;">
+            Loading preview...
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const BASE_PREFIX = window.location.pathname.startsWith('/mylibrary') ? '/mylibrary' : '';
+
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
+function selectKeepFile(groupKey, keepFileId) {
+    const card = document.getElementById(`group-card-${groupKey}`);
+    if (!card) return;
+    const rows = card.querySelectorAll('.dup-file-row');
+    rows.forEach(row => {
+        const fid = row.getAttribute('data-file-id');
+        const radio = row.querySelector('input[type="radio"]');
+        const badge = document.getElementById(`role-badge-${fid}`);
+        if (fid === keepFileId) {
+            row.classList.add('keep-selected');
+            row.classList.remove('remove-selected');
+            if (radio) radio.checked = true;
+            if (badge) {
+                badge.className = 'dup-role-badge dup-role-keep';
+                badge.innerHTML = '<i class="fa-solid fa-star"></i> KEEP SELECTED';
+            }
+        } else {
+            row.classList.remove('keep-selected');
+            row.classList.add('remove-selected');
+            if (radio) radio.checked = false;
+            if (badge) {
+                badge.className = 'dup-role-badge dup-role-remove';
+                badge.innerHTML = '<i class="fa-solid fa-trash-can"></i> REMOVE DUPLICATE';
+            }
+        }
+    });
+}
+
+function getGroupSelection(groupKey) {
+    const card = document.getElementById(`group-card-${groupKey}`);
+    if (!card || card.classList.contains('resolved-card')) return null;
+    const rows = card.querySelectorAll('.dup-file-row');
+    let keepFileId = '';
+    const removeFileIds = [];
+    rows.forEach(row => {
+        const fid = row.getAttribute('data-file-id');
+        const radio = row.querySelector('input[type="radio"]');
+        if (radio && radio.checked) {
+            keepFileId = fid;
+        } else if (fid) {
+            removeFileIds.push(fid);
+        }
+    });
+    if (!keepFileId || removeFileIds.length === 0) return null;
+    return { keep_file_id: keepFileId, remove_file_ids: removeFileIds };
+}
+
+function toggleSelectAllGroups(checked) {
+    document.querySelectorAll('.group-select-cb').forEach(cb => {
+        const card = cb.closest('.dup-group-card');
+        if (card && !card.classList.contains('resolved-card')) {
+            cb.checked = checked;
+        }
+    });
+    updateSelectedGroupsCount();
+}
+
+function updateSelectedGroupsCount() {
+    let cnt = 0;
+    document.querySelectorAll('.group-select-cb').forEach(cb => {
+        const card = cb.closest('.dup-group-card');
+        if (cb.checked && card && !card.classList.contains('resolved-card')) {
+            cnt++;
+        }
+    });
+    const el = document.getElementById('selected-groups-count');
+    if (el) el.textContent = String(cnt);
+}
+
+function resolveSingleGroup(groupKey) {
+    const sel = getGroupSelection(groupKey);
+    if (!sel) return;
+    const btn = document.getElementById(`btn-resolve-${groupKey}`);
+    const fb = document.getElementById(`feedback-${groupKey}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resolving...';
+    }
+    fetch(`${BASE_PREFIX}/api/duplicates/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({
+            action: 'resolve_one',
+            keep_file_id: sel.keep_file_id,
+            remove_file_ids: sel.remove_file_ids
+        })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (!res || !res.ok) {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Retry';
+            }
+            if (fb) {
+                fb.style.color = '#fb7185';
+                fb.textContent = (res && res.error) || 'Failed to resolve duplicate.';
+            }
+            return;
+        }
+        const card = document.getElementById(`group-card-${groupKey}`);
+        if (card) card.classList.add('resolved-card');
+        if (btn) {
+            btn.innerHTML = `<i class="fa-solid fa-check-double"></i> Resolved (-${res.reclaimed_mb} MB)`;
+        }
+        if (fb) {
+            fb.style.color = '#4ade80';
+            fb.textContent = `Kept ${res.kept_file_name} • Quarantined ${res.removed_count} duplicate(s)`;
+        }
+        updateSelectedGroupsCount();
+    })
+    .catch(err => {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = 'Retry';
+        }
+        if (fb) {
+            fb.style.color = '#fb7185';
+            fb.textContent = 'Network error: ' + err.message;
+        }
+    });
+}
+
+function resolveSelectedGroupsOnPage() {
+    const resolutions = [];
+    const targetKeys = [];
+    document.querySelectorAll('.group-select-cb').forEach(cb => {
+        if (!cb.checked) return;
+        const gk = cb.getAttribute('data-group-key');
+        const sel = getGroupSelection(gk);
+        if (sel) {
+            resolutions.push(sel);
+            targetKeys.push(gk);
+        }
+    });
+    if (resolutions.length === 0) {
+        alert('No unresolved duplicate groups are selected.');
+        return;
+    }
+    const bulkBtn = document.getElementById('btn-resolve-selected');
+    const statusMsg = document.getElementById('bulk-status-msg');
+    if (bulkBtn) {
+        bulkBtn.disabled = true;
+        bulkBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Resolving ${resolutions.length} Groups...`;
+    }
+    fetch(`${BASE_PREFIX}/api/duplicates/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({
+            action: 'resolve_batch',
+            resolutions: resolutions
+        })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (bulkBtn) {
+            bulkBtn.disabled = false;
+            bulkBtn.innerHTML = `<i class="fa-solid fa-check-double"></i> Resolved ${res.resolved_groups || 0} Groups`;
+        }
+        if (statusMsg) {
+            statusMsg.textContent = `✓ Quarantined ${res.removed_files_total || 0} duplicate files (${res.reclaimed_mb_total || 0} MB reclaimed)!`;
+        }
+        targetKeys.forEach(gk => {
+            const card = document.getElementById(`group-card-${gk}`);
+            if (card) card.classList.add('resolved-card');
+            const b = document.getElementById(`btn-resolve-${gk}`);
+            if (b) {
+                b.disabled = true;
+                b.innerHTML = '<i class="fa-solid fa-check-double"></i> Resolved';
+            }
+        });
+        updateSelectedGroupsCount();
+    })
+    .catch(err => {
+        if (bulkBtn) {
+            bulkBtn.disabled = false;
+            bulkBtn.innerHTML = 'Retry Selected';
+        }
+        alert('Network error resolving duplicates: ' + err.message);
+    });
+}
+
+function openDuplicatePeekModal(fileId, fileName) {
+    const modal = document.getElementById('dup-peek-modal');
+    const titleEl = document.getElementById('dup-peek-title');
+    const bodyEl = document.getElementById('dup-peek-body');
+    if (!modal || !bodyEl) return;
+    titleEl.textContent = `Peek Inside: ${fileName}`;
+    bodyEl.innerHTML = '<div style="padding:1.5rem; text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Extracting pages &amp; cover images...</div>';
+    modal.style.display = 'flex';
+
+    fetch(`${BASE_PREFIX}/api/book-preview/?file_id=${encodeURIComponent(fileId)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (!data || !data.ok) {
+                bodyEl.innerHTML = `<div style="color:#fb7185;">${(data && data.error) || 'Preview unavailable.'}</div>`;
+                return;
+            }
+            let html = `<div style="margin-bottom:0.75rem; font-size:0.8rem; color:#94a3b8;">
+                <strong>${data.file_ext}</strong> • ${data.file_size_mb} MB • ${data.total_sections || 0} sections/pages
+                ${data.detected_isbns && data.detected_isbns.length ? ' • Detected ISBNs: <code>' + data.detected_isbns.join(', ') + '</code>' : ''}
+            </div>`;
+            if (data.images && data.images.length) {
+                html += '<div style="display:flex; gap:0.75rem; overflow-x:auto; padding-bottom:0.75rem; margin-bottom:0.85rem;">';
+                data.images.forEach(img => {
+                    html += `<div style="flex-shrink:0; text-align:center; background:rgba(30,41,59,0.7); padding:0.4rem; border-radius:8px;">
+                        <img src="${img.data_uri}" style="height:170px; border-radius:6px; object-fit:contain;">
+                        <div style="font-size:0.7rem; color:#94a3b8; margin-top:0.25rem;">${img.label || ''}</div>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+            if (data.pages && data.pages.length) {
+                data.pages.slice(0, 4).forEach(p => {
+                    html += `<div style="margin-bottom:0.65rem; background:rgba(2,6,23,0.6); border:1px solid rgba(255,255,255,0.07); border-radius:8px; padding:0.65rem 0.85rem;">
+                        <div style="font-size:0.73rem; font-weight:700; color:#38bdf8; margin-bottom:0.3rem;">${p.label || 'Section'}</div>
+                        <div style="white-space:pre-wrap; font-size:0.79rem; max-height:150px; overflow-y:auto;">${(p.text || '').replace(/</g, '&lt;')}</div>
+                    </div>`;
+                });
+            }
+            bodyEl.innerHTML = html;
+        })
+        .catch(err => {
+            bodyEl.innerHTML = `<div style="color:#fb7185;">Error loading preview: ${err.message}</div>`;
+        });
+}
+</script>
+{% endblock %}
+

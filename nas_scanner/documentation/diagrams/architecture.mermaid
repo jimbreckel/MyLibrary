@@ -1,0 +1,24 @@
+graph TD
+    subgraph Host NAS Environment
+        A["/ufi/pool-raw/syspool/Books"] -->|Mounts to /books| B(mylibrary_scanner Container)
+        C["/ufi/pool-raw/syspool/audiobooks"] -->|Mounts to /audiobooks| B
+        D["./nas_scanner/config.json"] -->|Mounts to /config/config.json| B
+        E["./nas_scanner/scanner_state.db"] -->|Mounts to /app/scanner_state.db| B
+    end
+
+    subgraph Container Execution Loop
+        B -->|1. Start Loop| F{docker_scanner_loop.py}
+        F -->|Runs| G[sync_files.py]
+        F -->|Runs| H[sync_audiobooks.py]
+        F -->|Runs| I[sync_calibre.py]
+    end
+
+    subgraph Central Application
+        G -->|1. POST sync to /api/sync/file/| J(mylibrary_web Container)
+        G -.->|2. POST cleanup to /api/sync/cleanup/| J
+        H -->|1. POST sync to /api/sync/file/| J
+        H -.->|2. POST cleanup to /api/sync/cleanup/| J
+        I -->|1. POST sync to /api/sync/file/| J
+        I -.->|2. POST cleanup to /api/sync/cleanup/| J
+        J -->|Database Inserts & Deletions| K[(PostgreSQL / SQLite Database)]
+    end

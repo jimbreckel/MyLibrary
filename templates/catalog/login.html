@@ -1,0 +1,128 @@
+{% extends 'catalog/base.html' %}
+{% load static %}
+
+{% block title %}Sign In - MyLibrary{% endblock %}
+
+{% block extra_css %}
+<style>
+    .login-shell {
+        min-height: 78vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+    }
+    .login-card {
+        width: 100%;
+        max-width: 420px;
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 16px;
+        padding: 2rem;
+        box-shadow: 0 25px 60px rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(12px);
+    }
+    .login-header {
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+    .login-header i {
+        font-size: 2.2rem;
+        color: #38bdf8;
+        margin-bottom: 0.65rem;
+    }
+    .login-header h2 {
+        margin: 0;
+        font-size: 1.4rem;
+        color: #f8fafc;
+    }
+    .login-header p {
+        margin: 0.35rem 0 0 0;
+        font-size: 0.84rem;
+        color: #94a3b8;
+    }
+    .login-field {
+        margin-bottom: 1.1rem;
+    }
+    .login-field label {
+        display: block;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #cbd5e1;
+        margin-bottom: 0.38rem;
+        font-weight: 600;
+    }
+    .login-field input {
+        width: 100%;
+        padding: 0.7rem 0.9rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(2, 6, 23, 0.7);
+        color: #f8fafc;
+        font-size: 0.95rem;
+        outline: none;
+        box-sizing: border-box;
+    }
+    .login-field input:focus {
+        border-color: #38bdf8;
+        box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+    }
+    .login-submit-btn {
+        width: 100%;
+        padding: 0.78rem 1rem;
+        border-radius: 10px;
+        border: none;
+        background: linear-gradient(135deg, #38bdf8, #8b5cf6);
+        color: #fff;
+        font-weight: 700;
+        font-size: 0.95rem;
+        cursor: pointer;
+        margin-top: 0.35rem;
+    }
+    .login-error {
+        background: rgba(239, 68, 68, 0.16);
+        border: 1px solid rgba(239, 68, 68, 0.45);
+        color: #fca5a5;
+        border-radius: 10px;
+        padding: 0.65rem 0.85rem;
+        font-size: 0.84rem;
+        margin-bottom: 1rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="login-shell">
+    <div class="login-card">
+        <div class="login-header">
+            <i class="fa-solid fa-shield-halved"></i>
+            <h2>MyLibrary Secure Access</h2>
+            <p>Sign in to access your catalog, status dashboard, and OPDS server</p>
+        </div>
+
+        {% if error_message %}
+        <div class="login-error">
+            <i class="fa-solid fa-triangle-exclamation"></i> {{ error_message }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="{% url 'catalog:login' %}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next_url|default:'/mylibrary/' }}">
+            <div class="login-field">
+                <label for="id_username">Username</label>
+                <input type="text" id="id_username" name="username" required autofocus autocomplete="username" value="{{ username|default:'' }}">
+            </div>
+            <div class="login-field">
+                <label for="id_password">Password</label>
+                <input type="password" id="id_password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="login-submit-btn">
+                <i class="fa-solid fa-right-to-bracket"></i> Sign In
+            </button>
+        </form>
+    </div>
+</div>
+{% endblock %}
+

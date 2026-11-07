@@ -1,0 +1,53 @@
+{
+  "server_url": "http://mylibrary-web:8000",
+  "api_token": "replace-with-scanner-api-token",
+  "database_url": "postgres://admin:replace-with-db-password@postgres:5432/BookDB",
+  "state_db": "scanner_state.db",
+  "scan_interval_hours": 4,
+  "scan_folders": [
+    {
+      "path": "/books",
+      "type": "BOOK"
+    },
+    {
+      "path": "/audiobooks",
+      "type": "AUDIOBOOK",
+      "recursive": false
+    }
+  ],
+  "calibre_libraries": [],
+  "epubmeta": {
+    "enabled": true,
+    "target": "/books",
+    "state_db": "scanner_state.db",
+    "backup": true,
+    "backup_dir": "/books_bad/bak",
+    "quarantine_dir": "/books_bad/quarantine",
+    "ignore_pdfs": true,
+    "pdf_only": false,
+    "pdf_require_isbn": true,
+    "skip_complete": true,
+    "retry_failed": false,
+    "max_files": 4000,
+    "delay": 0.5,
+    "ai_delay": 2.0,
+    "batch_size": 20,
+    "batch_pause": 5.0,
+    "exclude_dirs": [
+      "Computer Book Code",
+      "File Formats"
+    ],
+    "max_daily_cost_usd": 3.00,
+    "ai_batch_mode": true,
+    "gemini_model": "gemini-3.5-flash-lite",
+    "gemini_api_key": "your_gemini_api_key_here"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "smtp_user": "your_email@example.com",
+    "smtp_password": "your_smtp_password_here",
+    "to_email": "your_email@example.com"
+  }
+}

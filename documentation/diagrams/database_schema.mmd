@@ -1,0 +1,35 @@
+erDiagram
+    CatalogItem {
+        uuid id PK "default: uuid4"
+        string title "max: 512, Indexed"
+        string authors "max: 512, Indexed"
+        string publisher "max: 256, Optional"
+        date pub_date "Optional"
+        string isbn "max: 32, Indexed, Optional"
+        string asin "max: 32, Indexed, Optional"
+        string item_type "BOOK | MAGAZINE | KINDLE | AUDIBLE"
+        text description "Optional"
+        string cover_image_url "max: 1024, Optional"
+        string cover_thumbnail "Base64 string data URI, Optional"
+        datetime created_at "auto_now_add"
+        datetime updated_at "auto_now"
+    }
+
+    FileLocation {
+        uuid id PK "default: uuid4"
+        uuid catalog_item_id FK "Cascade Delete"
+        text file_path "Absolute path on scanner PC"
+        string file_name "max: 512"
+        bigint file_size "Size in Bytes"
+        string file_format "max: 16, Indexed"
+        datetime file_created_at "Optional"
+        datetime file_modified_at "Optional"
+        string file_hash "max: 64, SHA-256, Indexed"
+        boolean is_invalid "Default: False, Indexed"
+        boolean has_drm "Default: False, Indexed"
+        string library_name "max: 256, Indexed, Optional"
+        text library_path "Absolute library root path, Optional"
+        datetime scanned_at "auto_now"
+    }
+
+    CatalogItem ||--o{ FileLocation : "has physical files"
