@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MyLibrary — Book Sites & Anna's Archive Checker</title>
+  <style>
+    body {
+      width: 390px;
+      margin: 0;
+      padding: 14px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 12.5px;
+    }
+    h2 {
+      margin: 0 0 8px 0;
+      font-size: 15px;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .section-title {
+      margin: 12px 0 6px 0;
+      padding-top: 8px;
+      border-top: 1px solid rgba(148, 163, 184, 0.2);
+      font-size: 12px;
+      font-weight: 800;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: #94a3b8;
+      margin: 7px 0 3px 0;
+    }
+    input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: #1e293b;
+      color: #f8fafc;
+      font-size: 12px;
+    }
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 5px;
+    }
+    .preset-chip {
+      padding: 3px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      background: rgba(30, 41, 59, 0.9);
+      color: #bae6fd;
+      font-size: 10.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .preset-chip:hover,
+    .preset-chip.active {
+      background: rgba(56, 189, 248, 0.28);
+      color: #ffffff;
+      border-color: #38bdf8;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 11.5px;
+      color: #cbd5e1;
+    }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button.primary-btn {
+      flex: 1;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(56, 189, 248, 0.5);
+      background: rgba(56, 189, 248, 0.22);
+      color: #e0f2fe;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button.primary-btn:hover {
+      background: rgba(56, 189, 248, 0.35);
+    }
+    .status-box {
+      margin-top: 9px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      background: #1e293b;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      font-size: 11.5px;
+      color: #cbd5e1;
+    }
+    .sites-pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 4px;
+    }
+    .site-badge {
+      padding: 3px 8px;
+      border-radius: 5px;
+      background: rgba(34, 197, 94, 0.16);
+      border: 1px solid rgba(74, 222, 128, 0.45);
+      color: #86efac;
+      font-size: 10.5px;
+      font-weight: 600;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .site-badge:hover {
+      background: rgba(34, 197, 94, 0.3);
+      border-color: #4ade80;
+      color: #ffffff;
+    }
+    .custom-site-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 8px;
+      margin-top: 4px;
+      border-radius: 6px;
+      background: #1e293b;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      font-size: 11px;
+    }
+    .custom-site-del {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid rgba(248, 113, 113, 0.5);
+      color: #fca5a5;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 10.5px;
+      cursor: pointer;
+    }
+    details {
+      margin-top: 8px;
+      background: rgba(30, 41, 59, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 6px;
+      padding: 6px 8px;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 11.5px;
+      color: #38bdf8;
+    }
+    .quick-links {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(148, 163, 184, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .quick-links a {
+      color: #38bdf8;
+      text-decoration: none;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+    .quick-links a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h2>📚 MyLibrary + Anna's Archive</h2>
+
+  <label for="mylibrary-url">MyLibrary Base URL</label>
+  <input type="text" id="mylibrary-url" value="http://192.168.1.43:8080/mylibrary" />
+
+  <label for="annas-url">Anna's Archive URL (click a mirror or type any URL)</label>
+  <input type="text" id="annas-url" value="https://annas-archive.pk" />
+  <div class="preset-row" id="annas-presets">
+    <button type="button" class="preset-chip" data-url="https://annas-archive.pk">.pk</button>
+    <button type="button" class="preset-chip" data-url="https://annas-archive.gl">.gl</button>
+    <button type="button" class="preset-chip" data-url="https://annas-archive.li">.li</button>
+    <button type="button" class="preset-chip" data-url="https://annas-archive.se">.se</button>
+    <button type="button" class="preset-chip" data-url="https://annas-archive.org">.org</button>
+  </div>
+
+  <div class="checkbox-row">
+    <input type="checkbox" id="show-zlib" />
+    <label for="show-zlib" style="margin:0; cursor:pointer; color:#e2e8f0;">Also show "Open in Z-Library" button on book pages</label>
+  </div>
+  <div id="zlib-url-wrap" style="display:none;">
+    <label for="zlib-url">Z-Library Base URL</label>
+    <input type="text" id="zlib-url" value="https://singlelogin.re" />
+  </div>
+
+  <div class="btn-row">
+    <button type="button" class="primary-btn" id="btn-save">💾 Save Settings</button>
+    <button type="button" class="primary-btn" id="btn-test">🔌 Test MyLibrary</button>
+  </div>
+
+  <div id="status-msg" class="status-box">
+    Ready. Automatically checks MyLibrary &amp; adds Anna's Archive buttons on book pages and wishlists.
+  </div>
+
+  <div class="section-title">
+    <span>🌐 Active Book Sites</span>
+  </div>
+  <div class="sites-pill-list">
+    <a href="https://www.amazon.com/hz/wishlist/ls" target="_blank" rel="noopener" class="site-badge" title="Open Amazon Wishlists &amp; Books in a new tab">✓ Amazon Books &amp; Wishlists ↗</a>
+    <a href="https://annas-archive.pk/" target="_blank" rel="noopener" class="site-badge" id="badge-annas-site" title="Open Anna's Archive (/md5/ &amp; /search pages checked against MyLibrary)">✓ Anna's Archive ↗</a>
+    <a href="https://www.barnesandnoble.com/b/books/_/N-29Z8q8" target="_blank" rel="noopener" class="site-badge" title="Open Barnes &amp; Noble Books in a new tab">✓ Barnes &amp; Noble ↗</a>
+    <a href="https://link.springer.com/books" target="_blank" rel="noopener" class="site-badge" title="Open Springer Link Books in a new tab">✓ Springer Link ↗</a>
+    <a href="https://www.goodreads.com/" target="_blank" rel="noopener" class="site-badge" title="Open Goodreads in a new tab">✓ Goodreads ↗</a>
+    <a href="https://www.oreilly.com/" target="_blank" rel="noopener" class="site-badge" title="Open O'Reilly in a new tab">✓ O'Reilly ↗</a>
+    <a href="https://nostarch.com/" target="_blank" rel="noopener" class="site-badge" title="Open No Starch Press in a new tab">✓ No Starch ↗</a>
+    <a href="https://www.pearson.com/en-us/pearsonplus/search.html" target="_blank" rel="noopener" class="site-badge" title="Open Pearson+ Search in a new tab">✓ Pearson ↗</a>
+    <a href="https://www.mheducation.com/" target="_blank" rel="noopener" class="site-badge" title="Open McGraw-Hill in a new tab">✓ McGraw-Hill ↗</a>
+    <a href="https://www.cengage.com/s?q=" target="_blank" rel="noopener" class="site-badge" title="Open Cengage Search in a new tab">✓ Cengage ↗</a>
+    <a href="https://onlinelibrary.wiley.com/" target="_blank" rel="noopener" class="site-badge" title="Open Wiley Online Library in a new tab">✓ Wiley ↗</a>
+    <a href="https://www.manning.com/catalog" target="_blank" rel="noopener" class="site-badge" title="Open Manning Catalog in a new tab">✓ Manning ↗</a>
+  </div>
+
+  <div id="custom-sites-list"></div>
+
+  <details id="add-site-details">
+    <summary>➕ Add Another Book Site</summary>
+    <label for="cs-name">Site Name (e.g. Packt, Manning, Wiley)</label>
+    <input type="text" id="cs-name" placeholder="Manning Publications" />
+
+    <label for="cs-host">Domain / Host (e.g. manning.com)</label>
+    <input type="text" id="cs-host" placeholder="manning.com" />
+
+    <label for="cs-path">URL Path Filter (optional, e.g. /books/ or /product/)</label>
+    <input type="text" id="cs-path" placeholder="/books/" />
+
+    <label for="cs-image">Insert Buttons After Selector (CSS)</label>
+    <input type="text" id="cs-image" placeholder=".product-image, h1" value="h1" />
+
+    <label for="cs-title">Book Title Selector (CSS)</label>
+    <input type="text" id="cs-title" placeholder="h1" value="h1" />
+
+    <label for="cs-isbn-sel">ISBN Selector or URL Param (optional; auto-detects JSON-LD/meta ISBN)</label>
+    <input type="text" id="cs-isbn-sel" placeholder=".isbn or ?ean=" />
+
+    <div class="btn-row">
+      <button type="button" class="primary-btn" id="btn-add-site">➕ Add Custom Site</button>
+    </div>
+  </details>
+
+  <div class="quick-links">
+    <a href="https://www.amazon.com/hz/wishlist/ls" target="_blank" rel="noopener">↗ Open Amazon Wishlists (Books (Kindle) / Print Books)</a>
+    <a href="https://annas-archive.pk/" id="quick-annas-link" target="_blank" rel="noopener">↗ Open Anna's Archive</a>
+    <a href="http://192.168.1.43:8080/mylibrary/" id="quick-mylib-link" target="_blank" rel="noopener">↗ Open MyLibrary Dashboard</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

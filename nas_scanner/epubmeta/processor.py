@@ -16,6 +16,61 @@ from .state import StateTracker, compute_file_quick_hash, normalize_cache_stem, 
 logger = logging.getLogger(__name__)
 
 
+def _is_text_only_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
+    """Return True if `raw_bytes` decodes to a plain white/monochrome text-only title page."""
+    if not raw_bytes or len(raw_bytes) < 900:
+        return True
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        w, h = im.size
+        if w < 24 or h < 24:
+            return True
+        im_crop = im.crop((int(w * 0.08), int(h * 0.08), max(int(w * 0.08) + 1, int(w * 0.92)), max(int(h * 0.08) + 1, int(h * 0.92))))
+        im_small = im_crop.resize((80, 112))
+        px = list(im_small.get_flattened_data() if hasattr(im_small, "get_flattened_data") else im_small.getdata())
+        n = len(px)
+        if not n:
+            return True
+        white_bg = 0
+        colored = 0
+        dark_ink = 0
+        mid_gray = 0
+        buckets: Dict[Tuple[int, int, int], int] = {}
+        for r, g, b in px:
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            sat_diff = mx - mn
+            if mn >= 210 and sat_diff < 20:
+                white_bg += 1
+            if sat_diff >= 26:
+                colored += 1
+            if mx <= 95:
+                dark_ink += 1
+            elif mx < 210 and sat_diff < 26:
+                mid_gray += 1
+            b_key = (r // 28, g // 28, b // 28)
+            buckets[b_key] = buckets.get(b_key, 0) + 1
+        white_ratio = white_bg / n
+        color_ratio = colored / n
+        dark_ratio = dark_ink / n
+        mid_ratio = mid_gray / n
+        if white_ratio >= 0.78 and color_ratio <= 0.025 and mid_ratio <= 0.16:
+            return True
+        if white_ratio >= 0.93 or dark_ratio >= 0.96:
+            return True
+        sorted_b = sorted(buckets.values(), reverse=True)
+        top1_ratio = sorted_b[0] / n if sorted_b else 0.0
+        top2_ratio = (sorted_b[0] + (sorted_b[1] if len(sorted_b) > 1 else 0)) / n if sorted_b else 0.0
+        if top1_ratio >= 0.87 and top2_ratio >= 0.95 and len(buckets) <= 14:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 class BookProcessor:
     """Orchestrates end-to-end processing for a single ebook or PDF file."""
 
@@ -908,7 +963,10 @@ class BookProcessor:
                     except Exception:
                         orig_cover_bytes = None
                     if orig_cover_bytes and len(orig_cover_bytes) >= 1000:
-                        cover_bytes = orig_cover_bytes
+                        if target_meta.cover_bytes and len(target_meta.cover_bytes) >= 1000 and _is_text_only_cover_bytes(orig_cover_bytes) and not _is_text_only_cover_bytes(target_meta.cover_bytes):
+                            cover_bytes = target_meta.cover_bytes
+                        else:
+                            cover_bytes = orig_cover_bytes
                     else:
                         cover_bytes = target_meta.cover_bytes or orig_cover_bytes
                     cover_thumbnail = generate_cover_thumbnail(cover_bytes)

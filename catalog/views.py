@@ -32,6 +32,19 @@ _MAIN_DASHBOARD_CACHE: dict = {
 }
 
 
+def _get_dashboard_meta_disk_paths() -> list[Path]:
+    paths: list[Path] = []
+    for d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if d.exists() and d.is_dir():
+                paths.append(d / '.dashboard_meta_cache.json')
+                break
+        except Exception:
+            continue
+    paths.append(Path('/tmp/mylibrary_dashboard_meta_cache.json'))
+    return paths
+
+
 def _get_cached_dashboard_meta() -> tuple[dict, list[str]]:
     """Return (stats_dict, available_formats_list) cached for 1800s with stale-while-revalidate."""
     import time as _time
@@ -42,6 +55,19 @@ def _get_cached_dashboard_meta() -> tuple[dict, list[str]]:
         and now_mono < _MAIN_DASHBOARD_CACHE['expires_at']
     ):
         return _MAIN_DASHBOARD_CACHE['stats'], _MAIN_DASHBOARD_CACHE['available_formats']
+
+    if _MAIN_DASHBOARD_CACHE['stats'] is None or _MAIN_DASHBOARD_CACHE['available_formats'] is None:
+        for p in _get_dashboard_meta_disk_paths():
+            try:
+                if p.exists():
+                    data = json.loads(p.read_text(encoding='utf-8'))
+                    if isinstance(data.get('stats'), dict) and isinstance(data.get('available_formats'), list):
+                        _MAIN_DASHBOARD_CACHE['stats'] = data['stats']
+                        _MAIN_DASHBOARD_CACHE['available_formats'] = data['available_formats']
+                        _MAIN_DASHBOARD_CACHE['expires_at'] = now_mono + 1800.0
+                        return _MAIN_DASHBOARD_CACHE['stats'], _MAIN_DASHBOARD_CACHE['available_formats']
+            except Exception:
+                continue
 
     if (
         _MAIN_DASHBOARD_CACHE['stats'] is not None
@@ -73,7 +99,7 @@ def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
     )
     total_files = FileLocation.objects.count()
     available_formats = list(
-        FileLocation.objects.values_list('file_format', flat=True).distinct().order_by('file_format')
+        FileLocation.objects.order_by().values_list('file_format', flat=True).distinct().order_by('file_format')
     )
     stats = {
         'total_items': catalog_agg['total_items'] or 0,
@@ -102,6 +128,15 @@ def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
     _MAIN_DASHBOARD_CACHE['expires_at'] = _time.monotonic() + 1800.0
     _MAIN_DASHBOARD_CACHE['_refreshing'] = False
     try:
+        disk_payload = json.dumps({'stats': stats, 'available_formats': available_formats})
+        for p in _get_dashboard_meta_disk_paths():
+            try:
+                p.write_text(disk_payload, encoding='utf-8')
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
         summary_file = Path('/tmp/mylibrary_summary_counts.json')
         existing = {}
         if summary_file.exists():
@@ -121,21 +156,88 @@ def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
     return stats, available_formats
 
 
+def adjust_cached_books_count(delta: int) -> None:
+    """Adjust in-memory and disk cached `books_count` and `total_items` when items are split or merged."""
+    if not delta:
+        return
+    try:
+        stats = _MAIN_DASHBOARD_CACHE.get('stats')
+        if isinstance(stats, dict):
+            if 'books_count' in stats:
+                stats['books_count'] = max(0, int(stats['books_count'] or 0) + int(delta))
+            if 'total_items' in stats:
+                stats['total_items'] = max(0, int(stats['total_items'] or 0) + int(delta))
+            disk_payload = json.dumps({
+                'stats': stats,
+                'available_formats': _MAIN_DASHBOARD_CACHE.get('available_formats') or [],
+            })
+            for p in _get_dashboard_meta_disk_paths():
+                try:
+                    p.write_text(disk_payload, encoding='utf-8')
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
 class _PrecomputedCountPaginator(Paginator):
     """Paginator that uses a precomputed total count when available to skip full-table COUNT(*)."""
 
     def __init__(self, object_list, per_page, precomputed_count=None, **kwargs):
         super().__init__(object_list, per_page, **kwargs)
         self._precomputed_count = precomputed_count
+        self._fast_exclude_ids_set = getattr(object_list, '_fast_exclude_ids_set', None)
 
     @cached_property
     def count(self):
         if self._precomputed_count is not None:
             return self._precomputed_count
         try:
+            excl_set = self._fast_exclude_ids_set
+            if excl_set:
+                cands = list(self.object_list.values_list('id', flat=True)[:2500])
+                return len([cid for cid in cands if cid not in excl_set and str(cid) not in excl_set][:1200])
             return len(list(self.object_list.values_list('id', flat=True)[:1200]))
         except Exception:
             return super().count
+
+    def page(self, number):
+        excl_set = self._fast_exclude_ids_set
+        if not excl_set:
+            return super().page(number)
+        number = self.validate_number(number)
+        bottom = (number - 1) * self.per_page
+        top = bottom + self.per_page
+        if top + self.orphans >= self.count:
+            top = self.count
+        matched_ids = []
+        cursor = 0
+        batch_sz = max(top + 80, 200)
+        try:
+            while len(matched_ids) < top:
+                cand_batch = list(self.object_list.values_list('id', flat=True)[cursor:cursor + batch_sz])
+                if not cand_batch:
+                    break
+                for cid in cand_batch:
+                    if cid not in excl_set and str(cid) not in excl_set:
+                        matched_ids.append(cid)
+                        if len(matched_ids) >= top:
+                            break
+                if len(cand_batch) < batch_sz:
+                    break
+                cursor += batch_sz
+                batch_sz = min(batch_sz * 2, 2000)
+            page_ids = matched_ids[bottom:top]
+            if not page_ids:
+                return self._get_page([], number, self)
+            items_by_id = {
+                it.id: it
+                for it in CatalogItem.objects.filter(id__in=page_ids).prefetch_related('files')
+            }
+            page_items = [items_by_id[pid] for pid in page_ids if pid in items_by_id]
+            return self._get_page(page_items, number, self)
+        except Exception:
+            return super().page(number)
 
     def validate_number(self, number):
         """
@@ -245,6 +347,8 @@ class DashboardView(ListView):
             get_enriched_item_ids_index,
             get_enriched_tags_and_folders_index,
             get_interesting_item_ids,
+            get_needs_cover_enriched_shelf,
+            get_tomags_item_ids,
         )
 
         raw_query = self.request.GET.get('q', '').strip()
@@ -271,6 +375,7 @@ class DashboardView(ListView):
 
         # Run Postgres full-text or similarity search
         qs = perform_search(query, filters)
+        fast_exclude_ids_set = getattr(qs, '_fast_exclude_ids_set', None)
         if selected_author:
             qs = qs.filter(authors__icontains=selected_author)
 
@@ -335,7 +440,8 @@ class DashboardView(ListView):
             if not item_types:
                 qs = qs.filter(item_type='BOOK')
             excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
-            qs = qs.exclude(id__in=excl_ids)
+            tm_excl = set(get_tomags_item_ids())
+            fast_exclude_ids_set = (enr_idx.get('excluded_from_needs_enriching_ids_set') or set(excl_ids)) | tm_excl
         elif shelf == 'interesting':
             int_ids = get_interesting_item_ids()
             qs = qs.filter(id__in=int_ids)
@@ -356,6 +462,32 @@ class DashboardView(ListView):
                     output_field=IntegerField(),
                 )
                 qs = qs.annotate(_bad_order=order_expr).order_by('_bad_order')
+        elif shelf in ('tomags', 'to_mags'):
+            tm_ids = get_tomags_item_ids(sync_disk=True)
+            qs = qs.filter(id__in=tm_ids)
+            if tm_ids and not query and not sort_by:
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(tm_ids)],
+                    default=len(tm_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_tm_order=order_expr).order_by('_tm_order')
+        elif shelf in ('missing_cover', 'missing_covers', 'needs_cover'):
+            nc_data = get_needs_cover_enriched_shelf()
+            cov_issue_filter = self.request.GET.get('cover_issue', '').strip().lower()
+            issue_map = nc_data.get('issue_by_id') or {}
+            if cov_issue_filter in ('missing', 'text_only'):
+                nc_ids = [cid for cid in nc_data.get('item_ids', []) if issue_map.get(cid) == cov_issue_filter]
+            else:
+                nc_ids = nc_data.get('item_ids', [])
+            qs = qs.filter(id__in=nc_ids)
+            if nc_ids and not query and not sort_by:
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(nc_ids[:1500])],
+                    default=len(nc_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_nc_order=order_expr).order_by('_nc_order')
         elif shelf == 'recent_pub':
             import datetime as _dt
             today_dt = _dt.date.today()
@@ -364,8 +496,14 @@ class DashboardView(ListView):
             if not sort_by:
                 qs = qs.order_by('-pub_date', 'title')
 
-        # Apply Enrichment Status filter (Needs Enriching / Enriched / Needs Review)
-        if enrich_status in ('needs_enriching', 'enriched', 'needs_review'):
+        # Apply Enrichment Status filter (Needs Enriching / Enriched / Needs Review / Moved to toMags / Missing Cover)
+        if enrich_status in ('tomags', 'to_mags'):
+            tm_ids = get_tomags_item_ids(sync_disk=True)
+            qs = qs.filter(id__in=tm_ids)
+        elif enrich_status in ('missing_cover', 'missing_covers', 'needs_cover'):
+            nc_data = get_needs_cover_enriched_shelf()
+            qs = qs.filter(id__in=nc_data.get('item_ids', []))
+        elif enrich_status in ('needs_enriching', 'enriched', 'needs_review'):
             enr_idx = get_enriched_item_ids_index()
             if enrich_status == 'enriched':
                 qs = qs.filter(id__in=enr_idx['enriched_ids'])
@@ -382,8 +520,9 @@ class DashboardView(ListView):
                     ).order_by('_rev_prio', 'title')
             elif enrich_status == 'needs_enriching':
                 if not item_types and shelf not in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_all'):
-                    qs = qs.exclude(item_type__in=['KINDLE', 'AUDIBLE', 'AUDIOBOOK'])
+                    qs = qs.filter(item_type='BOOK')
                 excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
+                tm_excl = set(get_tomags_item_ids())
                 if shelf == 'recent_pub':
                     import datetime as _dt
                     today_dt = _dt.date.today()
@@ -392,13 +531,13 @@ class DashboardView(ListView):
                         CatalogItem.objects.filter(
                             pub_date__gte=cutoff_1yr,
                             pub_date__lte=today_dt,
-                            id__in=excl_ids,
+                            id__in=list(set(excl_ids) | tm_excl),
                         ).values_list('id', flat=True)
                     )
                     if recent_enr_ids:
                         qs = qs.exclude(id__in=recent_enr_ids)
                 else:
-                    qs = qs.exclude(id__in=excl_ids)
+                    fast_exclude_ids_set = (enr_idx.get('excluded_from_needs_enriching_ids_set') or set(excl_ids)) | tm_excl
 
         # Apply Read / Unread bookmark progress filter when requested
         if read_status in ('read', 'unread', 'reading', 'unstarted', 'bookmarked_all'):
@@ -481,10 +620,13 @@ class DashboardView(ListView):
                 )
                 qs = qs.annotate(_prog_order=order_expr).order_by('_prog_order', 'title')
 
-        return qs.prefetch_related('files')
+        final_qs = qs.prefetch_related('files')
+        if fast_exclude_ids_set is not None:
+            final_qs._fast_exclude_ids_set = fast_exclude_ids_set
+        return final_qs
 
     def get_paginator(self, queryset, per_page, orphans=0, allow_empty_first_page=True, **kwargs):
-        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids
+        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids, get_needs_cover_enriched_shelf, get_tomags_item_ids
 
         query = self.request.GET.get('q', '').strip()
         shelf = self.request.GET.get('shelf', '').strip().lower()
@@ -527,6 +669,17 @@ class DashboardView(ListView):
                 precomputed_count = len(get_interesting_item_ids())
             elif shelf == 'bad_metadata' and not item_types and not enrich_status:
                 precomputed_count = len(get_bad_metadata_item_ids())
+            elif (shelf in ('tomags', 'to_mags') or (not shelf and enrich_status in ('tomags', 'to_mags'))) and not item_types:
+                precomputed_count = len(get_tomags_item_ids(sync_disk=True))
+            elif (shelf in ('missing_cover', 'missing_covers', 'needs_cover') or (not shelf and enrich_status in ('missing_cover', 'missing_covers', 'needs_cover'))) and not item_types:
+                nc_d = get_needs_cover_enriched_shelf()
+                cov_f = self.request.GET.get('cover_issue', '').strip().lower()
+                if cov_f == 'missing':
+                    precomputed_count = int(nc_d.get('missing_count') or 0)
+                elif cov_f == 'text_only':
+                    precomputed_count = int(nc_d.get('text_only_count') or 0)
+                else:
+                    precomputed_count = int(nc_d.get('count') or 0)
             elif shelf == 'recent_pub' and not item_types and not enrich_status:
                 stats, _ = _get_cached_dashboard_meta()
                 precomputed_count = stats.get('recent_pub_count')
@@ -542,7 +695,9 @@ class DashboardView(ListView):
 
     def get_context_data(self, **kwargs):
         from .opds import (
+            classify_cover_image,
             enrich_catalog_item_on_demand,
+            evaluate_and_record_item_cover_status,
             get_bad_metadata_item_ids,
             get_dynamic_amazon_shelf,
             get_dynamic_bookmarked_shelf,
@@ -550,6 +705,8 @@ class DashboardView(ListView):
             get_enriched_tags_and_folders_index,
             get_file_enrich_diagnostic,
             get_interesting_item_ids,
+            get_needs_cover_enriched_shelf,
+            get_tomags_item_ids,
             is_file_enriched,
             ENRICHABLE_FORMATS,
             lookup_amazon_info_for_item,
@@ -586,6 +743,7 @@ class DashboardView(ListView):
         context['selected_sort'] = raw_sort
         context['selected_read_status'] = self.request.GET.get('read_status', '').strip().lower()
         context['selected_enrich_status'] = self.request.GET.get('enrich_status', '').strip().lower()
+        context['selected_cover_issue'] = self.request.GET.get('cover_issue', '').strip().lower()
 
         stats, available_formats = _get_cached_dashboard_meta()
         context['available_formats'] = available_formats
@@ -597,10 +755,21 @@ class DashboardView(ListView):
         rev_cnt = len(enr_idx.get('needs_review_ids') or [])
         excl_cnt = len(enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx.get('enriched_ids') or [])
         needs_enr_cnt = max(0, (stats.get('books_count') or 0) - excl_cnt)
+        tm_ids = get_tomags_item_ids(sync_disk=(context['selected_shelf'] in ('tomags', 'to_mags') or context['selected_enrich_status'] in ('tomags', 'to_mags')))
+        tm_cnt = len(tm_ids)
+        context['tomags_count'] = tm_cnt
+        nc_shelf = get_needs_cover_enriched_shelf()
+        nc_cnt = int(nc_shelf.get('count') or 0)
+        nc_issue_map = nc_shelf.get('issue_by_id') or {}
+        context['missing_cover_count'] = nc_cnt
+        context['missing_cover_only_count'] = int(nc_shelf.get('missing_count') or 0)
+        context['text_only_cover_count'] = int(nc_shelf.get('text_only_count') or 0)
         context['enrich_status_counts'] = {
             'enriched': enr_cnt,
             'needs_enriching': needs_enr_cnt,
             'needs_review': rev_cnt,
+            'tomags': tm_cnt,
+            'missing_cover': nc_cnt,
         }
 
         # Virtual Bookshelves & Enriched Tags data
@@ -648,6 +817,7 @@ class DashboardView(ListView):
                         pass
 
         # Attach Moon+ reading progress badge, Amazon ownership/bookmark info, Interesting flag, and Enrichment flags
+        enr_excl_set = enr_idx.get('excluded_from_needs_enriching_ids_set') or set()
         for it in page_items:
             it.is_interesting = str(it.id) in interesting_ids_set
             it.is_bad_metadata = str(it.id) in bad_metadata_ids_set
@@ -656,14 +826,18 @@ class DashboardView(ListView):
             amz_info = lookup_amazon_info_for_item(it)
             it.amazon_ownership_info = amz_info if amz_info else None
             f_list = list(it.files.all())
+            it.has_tomags_file = any(str(f.file_path or '').startswith('/toMags/') for f in f_list)
             it.is_enriched = any(is_file_enriched(f.file_path) for f in f_list if f.file_path)
+            it.cover_issue = nc_issue_map.get(str(it.id), '')
+            if it.is_enriched and not it.cover_issue and str(it.id) not in (nc_shelf.get('dismissed_set') or set()):
+                it.cover_issue = classify_cover_image(it.cover_thumbnail, it.cover_image_url) or ''
             it.has_enrichable_file = any(
                 (f.file_format or '').upper().lstrip('.') in ENRICHABLE_FORMATS
                 for f in f_list
             )
             it.enrich_diag = None
             it.enrich_diag_json = ''
-            if not it.is_enriched:
+            if not it.is_enriched and (not enr_excl_set or it.id in enr_excl_set):
                 for f in f_list:
                     diag = get_file_enrich_diagnostic(f.file_path) if f.file_path else None
                     if diag:
@@ -710,6 +884,14 @@ class SuggestAPIView(APIView):
             except Exception:
                 pass
             return Response({'reloaded': True})
+        if request.GET.get('repair_covers') in ('start', 'status'):
+            from .opds import start_or_get_cover_repair_status
+            return Response(start_or_get_cover_repair_status(start=(request.GET.get('repair_covers') == 'start')))
+        if request.GET.get('split_bundles') == 'run':
+            import threading
+            from .opds import split_all_multi_book_catalog_items
+            threading.Thread(target=split_all_multi_book_catalog_items, daemon=True).start()
+            return Response({'ok': True, 'started_background_split': True})
         from django.db.models import Case, IntegerField, Value, When
 
         raw_query = request.GET.get('q', '')
@@ -733,9 +915,12 @@ class SuggestAPIView(APIView):
         if has_search_criteria:
             try:
                 qs = perform_search(query)
-                suggestions = qs.values('title', 'authors', 'item_type')[:10]
+                excl_set = getattr(qs, '_fast_exclude_ids_set', None)
+                suggestions = qs.values('id', 'title', 'authors', 'item_type')[:60 if excl_set else 15]
                 seen = set()
                 for item in suggestions:
+                    if excl_set and (item['id'] in excl_set or str(item['id']) in excl_set):
+                        continue
                     key = (item['title'], item['authors'], item['item_type'])
                     if key in seen:
                         continue
@@ -931,6 +1116,104 @@ _DASHBOARD_HEAVY_CACHE: dict = {
     'catalog_summary': None,
     'sqlite_heavy': None,
 }
+_LAST_SCANNER_AUTO_LAUNCH_TS: float = 0.0
+
+
+def _is_posix_lock_held(lock_path: Path) -> bool:
+    """Return True if a POSIX fcntl flock is currently held on `lock_path`."""
+    if not lock_path.exists() or os.name == 'nt':
+        return False
+    fd = None
+    try:
+        import fcntl
+        fd = os.open(str(lock_path), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            return True
+        else:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            return False
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
+def _ensure_scanner_daemon_or_trigger(scanner_dir: Path, force_trigger: bool = False) -> dict:
+    """
+    Ensure the NAS scanner loop is actively running (or trigger an immediate scan pass).
+    If `nas_scanner_loop.lock` is held, writes `logs/trigger_scan.flag` to wake a sleeping loop.
+    If `nas_scanner_loop.lock` is not held, spawns a detached `docker_scanner_loop.py` daemon.
+    """
+    global _LAST_SCANNER_AUTO_LAUNCH_TS
+    import subprocess
+    import sys
+    import time as _time
+
+    loop_script = scanner_dir / 'docker_scanner_loop.py'
+    if not loop_script.exists():
+        return {'ok': False, 'error': f'{loop_script} not found'}
+
+    loop_lock = scanner_dir / 'nas_scanner_loop.lock'
+    scan_lock = scanner_dir / 'nas_scanner.lock'
+    logs_dir = scanner_dir / 'logs'
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    trigger_flag = logs_dir / 'trigger_scan.flag'
+
+    loop_held = _is_posix_lock_held(loop_lock)
+    scan_held = _is_posix_lock_held(scan_lock)
+
+    if loop_held or scan_held:
+        if force_trigger and not scan_held:
+            try:
+                trigger_flag.write_text(str(_time.time()), encoding='utf-8')
+                _time.sleep(0.6)
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+            return {'ok': True, 'mode': 'woke_sleeping_loop'}
+        return {'ok': True, 'mode': 'already_running'}
+
+    now_mono = _time.monotonic()
+    if not force_trigger and (now_mono - _LAST_SCANNER_AUTO_LAUNCH_TS) < 60.0:
+        return {'ok': False, 'mode': 'cooldown'}
+    _LAST_SCANNER_AUTO_LAUNCH_TS = now_mono
+
+    # Clean up any unlocked stale lockfiles before spawning
+    for stale_lk in (loop_lock, scan_lock):
+        if stale_lk.exists() and not _is_posix_lock_held(stale_lk):
+            try:
+                stale_lk.unlink()
+            except Exception:
+                pass
+
+    try:
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        popen_kwargs = {
+            'cwd': str(scanner_dir),
+            'stdout': subprocess.DEVNULL,
+            'stderr': subprocess.DEVNULL,
+            'env': env,
+            'close_fds': True,
+        }
+        if os.name != 'nt':
+            popen_kwargs['start_new_session'] = True
+        proc = subprocess.Popen(
+            [sys.executable, '-u', str(loop_script)],
+            **popen_kwargs,
+        )
+        _time.sleep(1.2)
+        return {'ok': True, 'mode': 'spawned_daemon', 'pid': proc.pid}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
 
 
 def get_conversion_and_import_status() -> dict:
@@ -1278,6 +1561,31 @@ def get_conversion_and_import_status() -> dict:
         or (seconds_since_log is not None and seconds_since_log < max_standby_age)
     )
 
+    # Automatic self-healing: if a scan cycle is overdue and no active scan is running, launch/wake the scanner loop
+    overdue_threshold = int(scan_interval_hours * 3600 + 180)
+    if not is_scanning and seconds_since_log is not None and seconds_since_log > overdue_threshold:
+        launch_res = _ensure_scanner_daemon_or_trigger(scanner_dir, force_trigger=False)
+        if launch_res.get('ok') and launch_res.get('mode') in ('spawned_daemon', 'woke_sleeping_loop'):
+            scanner_lines = _tail_log_file(scanner_log_path, max_lines=40)
+            lock_exists = (scanner_dir / 'nas_scanner.lock').exists() or (scanner_dir / 'scanner.lock').exists()
+            loop_lock_exists = (scanner_dir / 'nas_scanner_loop.lock').exists()
+            is_scanning = True
+            is_sleeping = False
+            daemon_active = True
+            current_activity = scanner_lines[-1] if scanner_lines else 'Starting MyLibrary Scanner Loop...'
+            next_scan_at = f'After current scan (+{scan_interval_hours:g}h interval)'
+            next_scan_iso = ''
+            next_scan_in_seconds = None
+            next_scan_countdown = 'Scanning now'
+            if scanner_log_path.exists():
+                try:
+                    mtime = scanner_log_path.stat().st_mtime
+                    log_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                    seconds_since_log = max(0, int((now_dt - log_dt).total_seconds()))
+                    log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                except Exception:
+                    pass
+
     # 4. Remaining to Catalog & Remaining to Enrich Queue Metrics
     remaining_to_catalog = 0
     catalog_sync_chunk_info = ''
@@ -1462,10 +1770,32 @@ class StatusDashboardView(TemplateView):
 
 class StatusDashboardAPIView(APIView):
     """
-    JSON API endpoint for live auto-refresh on the Conversion & Import Status Dashboard.
+    JSON API endpoint for live auto-refresh and manual scan triggering on the Conversion & Import Status Dashboard.
     """
+    authentication_classes = []
+    permission_classes = []
+
     def get(self, request):
         return Response(get_conversion_and_import_status())
+
+    def post(self, request):
+        action = (request.data.get('action') or 'start_scan').strip().lower()
+        if action not in ('start_scan', 'trigger_scan'):
+            return Response({'ok': False, 'error': f'Unsupported action: {action}'}, status=400)
+        base_dir = Path(settings.BASE_DIR)
+        nas_scanner_dir = base_dir / 'nas_scanner'
+        scanner_dir = (
+            base_dir / 'scanner'
+            if not (nas_scanner_dir / 'scanner_state.db').exists() and (base_dir / 'scanner' / 'scanner_state.db').exists()
+            else nas_scanner_dir
+        )
+        res = _ensure_scanner_daemon_or_trigger(scanner_dir, force_trigger=True)
+        status_payload = get_conversion_and_import_status()
+        return Response({
+            'ok': bool(res.get('ok', True)),
+            'trigger': res,
+            'dashboard': status_payload,
+        })
 
 
 def _get_scanner_db_path() -> Path:
@@ -1481,6 +1811,8 @@ class ConversionItemsAPIView(APIView):
     Interactive API endpoint to browse, filter, search, and re-queue epubmeta conversion
     and quarantine records from scanner_state.db (`processed_files`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def get(self, request):
         status_filter = (request.GET.get('status') or 'ALL').strip().upper()
@@ -1713,7 +2045,8 @@ class ConversionItemsAPIView(APIView):
 
                 # Also update the matching CatalogItem in PostgreSQL BookDB
                 try:
-                    from .opds import _ENRICHED_PATHS_CACHE
+                    from .opds import _ENRICHED_PATHS_CACHE, _save_enriched_cache_to_disk, get_enriched_paths_set
+                    get_enriched_paths_set()
                     if _ENRICHED_PATHS_CACHE.get('paths_set') is not None and file_path:
                         for pv in path_variants:
                             _ENRICHED_PATHS_CACHE['paths_set'].add(str(pv))
@@ -1726,8 +2059,14 @@ class ConversionItemsAPIView(APIView):
 
                     cat_item = None
                     req_item_id = (request.data.get('item_id') or '').strip()
-                    if req_item_id:
-                        cat_item = CatalogItem.objects.filter(id=req_item_id).first()
+                    from .opds import resolve_catalog_item_by_id_or_fallback
+                    cat_item = resolve_catalog_item_by_id_or_fallback(
+                        item_or_id=req_item_id,
+                        file_path=file_path,
+                        isbn=final_isbn,
+                        title=final_title,
+                        authors=final_author,
+                    )
                     if not cat_item and row:
                         shas = [s for s in (row['file_sha256'], row['orig_sha256']) if s]
                         if shas:
@@ -1764,18 +2103,29 @@ class ConversionItemsAPIView(APIView):
                             cat_item.description = final_desc
                         if final_cover:
                             if final_cover.startswith('data:'):
-                                cat_item.cover_thumbnail = final_cover
-                            elif 'cover' in sel and final_cover != (orig_meta.get('cover_url') or ''):
+                                try:
+                                    from .opds import apply_book_cover_to_item
+                                    cov_res = apply_book_cover_to_item(cat_item, final_cover)
+                                    if cov_res.get('ok') and cov_res.get('cover_url'):
+                                        final_cover = cov_res['cover_url']
+                                    else:
+                                        cat_item.cover_thumbnail = final_cover
+                                except Exception:
+                                    cat_item.cover_thumbnail = final_cover
+                            elif 'cover' in sel or not cat_item.cover_thumbnail:
                                 cat_item.cover_image_url = final_cover
-                                if not cat_item.cover_thumbnail:
-                                    try:
-                                        from .opds import apply_book_cover_to_item
-                                        apply_book_cover_to_item(cat_item, final_cover)
-                                    except Exception:
-                                        pass
-                            elif not cat_item.cover_thumbnail and not cat_item.cover_image_url:
-                                cat_item.cover_image_url = final_cover
+                                try:
+                                    from .opds import apply_book_cover_to_item
+                                    cov_res = apply_book_cover_to_item(cat_item, final_cover)
+                                    if cov_res.get('ok') and cov_res.get('cover_url'):
+                                        final_cover = cov_res['cover_url']
+                                except Exception:
+                                    pass
                         cat_item.save()
+                        from .opds import clear_book_bad_metadata, evaluate_and_record_item_cover_status, merge_duplicate_catalog_items_for_item
+                        clear_book_bad_metadata(cat_item.id)
+                        evaluate_and_record_item_cover_status(cat_item)
+                        merged_item_ids = merge_duplicate_catalog_items_for_item(cat_item)
                         if isinstance(_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set'), set):
                             if cat_item.id not in _ENRICHED_PATHS_CACHE['enriched_item_ids_set']:
                                 _ENRICHED_PATHS_CACHE['enriched_item_ids_set'].add(cat_item.id)
@@ -1805,22 +2155,21 @@ class ConversionItemsAPIView(APIView):
                                 _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'].add(cat_item.id)
                                 if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids'), list):
                                     _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'].append(cat_item.id)
-                        from .opds import clear_book_bad_metadata, merge_duplicate_catalog_items_for_item
-                        clear_book_bad_metadata(cat_item.id)
-                        merged_item_ids = merge_duplicate_catalog_items_for_item(cat_item)
+                        _save_enriched_cache_to_disk()
                 except Exception:
                     merged_item_ids = []
 
                 return Response({
                     'ok': True,
                     'action': 'approve',
+                    'item_id': str(cat_item.id) if 'cat_item' in locals() and cat_item else (request.data.get('item_id') or ''),
                     'file_path': file_path,
                     'title': final_title,
                     'authors': final_author,
                     'publisher': final_pub,
                     'isbn': final_isbn,
                     'description': final_desc,
-                    'cover_url': final_cover,
+                    'cover_url': (cat_item.cover_thumbnail or final_cover) if 'cat_item' in locals() and cat_item else final_cover,
                     'merged_item_ids': merged_item_ids if 'merged_item_ids' in locals() else [],
                 })
             elif action == 'ignore':
@@ -2552,6 +2901,8 @@ class OnDemandEnrichAPIView(APIView):
     invokes `epubmeta` on the physical `.epub` / `.pdf` file on the NAS, updates the embedded OPF/XMP
     metadata on disk, updates `scanner_state.db`, and updates `CatalogItem` & `FileLocation` in BookDB.
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
         from .opds import enrich_catalog_item_on_demand, enrich_file_location_on_demand
@@ -2614,22 +2965,15 @@ class OnDemandEnrichAPIView(APIView):
                 return Response(res, status=200 if res.get('ok') else 422)
 
         if item_id:
-            item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
-            if not item:
-                fb_file_id = (body.get('fallback_file_id') or '').strip()
-                if fb_file_id:
-                    fb_loc = FileLocation.objects.select_related('catalog_item').filter(id=fb_file_id).first()
-                    if fb_loc and fb_loc.catalog_item:
-                        item = fb_loc.catalog_item
-                if not item:
-                    fb_title = (body.get('title') or '').strip()
-                    fb_authors = (body.get('authors') or '').strip()
-                    if fb_title and fb_authors:
-                        item = CatalogItem.objects.prefetch_related('files').filter(
-                            title__iexact=fb_title, authors__iexact=fb_authors
-                        ).first()
-                    elif fb_title:
-                        item = CatalogItem.objects.prefetch_related('files').filter(title__iexact=fb_title).first()
+            from .opds import resolve_catalog_item_by_id_or_fallback
+            item = resolve_catalog_item_by_id_or_fallback(
+                item_id,
+                file_id=(body.get('fallback_file_id') or '').strip(),
+                file_path=file_path,
+                isbn=hint_isbn or (body.get('isbn') or '').strip(),
+                title=(body.get('title') or '').strip() or hint_title,
+                authors=(body.get('authors') or '').strip() or hint_authors,
+            )
             if not item:
                 return Response({'ok': False, 'error': f'CatalogItem not found: {item_id}'}, status=404)
             res = enrich_catalog_item_on_demand(
@@ -2654,9 +2998,11 @@ class RevertEnrichAPIView(APIView):
     Revert an enriched or in-review `CatalogItem` / `FileLocation` back to its original
     pre-enrichment metadata (`POST /mylibrary/api/revert-enrich/`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
-        from .opds import revert_catalog_item_enrichment
+        from .opds import resolve_catalog_item_by_id_or_fallback, revert_catalog_item_enrichment
 
         body = request.data or {}
         item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
@@ -2670,7 +3016,7 @@ class RevertEnrichAPIView(APIView):
             if loc:
                 item = loc.catalog_item
         if not item and item_id:
-            item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
+            item = resolve_catalog_item_by_id_or_fallback(item_id, file_id=file_id, file_path=file_path)
 
         if not item and not loc and not file_path:
             return Response({'ok': False, 'error': 'Please provide item_id, file_id, or file_path.'}, status=400)
@@ -2684,9 +3030,15 @@ class MoveToMagAPIView(APIView):
     Move a Magazine / Periodical `CatalogItem` or `FileLocation` from `/books` to `/toMags`
     (`POST /mylibrary/api/move-to-mag/`), cleaning up `scanner_state.db` and `BookDB`.
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
-        from .opds import move_catalog_item_to_tomags, move_file_location_to_tomags
+        from .opds import (
+            move_catalog_item_to_tomags,
+            move_file_location_to_tomags,
+            resolve_catalog_item_by_id_or_fallback,
+        )
 
         body = request.data or {}
         item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
@@ -2700,7 +3052,7 @@ class MoveToMagAPIView(APIView):
             return Response(res, status=200 if res.get('ok') else 422)
 
         if item_id:
-            item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
+            item = resolve_catalog_item_by_id_or_fallback(item_id)
             if not item:
                 return Response({'ok': False, 'error': f'CatalogItem not found: {item_id}'}, status=404)
             res = move_catalog_item_to_tomags(item, only_detected_mags=False)
@@ -2709,10 +3061,42 @@ class MoveToMagAPIView(APIView):
         return Response({'ok': False, 'error': 'Please provide item_id or file_id.'}, status=400)
 
 
+class UndoMoveToMagAPIView(APIView):
+    """
+    Restore a `CatalogItem` or `FileLocation` from `/toMags` back to `/books/...`
+    (`POST /mylibrary/api/undo-to-mag/`), optionally running `epubmeta` enrichment as a Book.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import undo_move_from_tomags
+
+        body = request.data or {}
+        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = (body.get('file_id') or request.GET.get('file_id') or '').strip()
+        moved_files = body.get('moved_files')
+        if isinstance(moved_files, str):
+            moved_files = [x.strip() for x in moved_files.split(',') if x.strip()]
+        elif not isinstance(moved_files, list):
+            moved_files = None
+        enrich_after = str(body.get('enrich') or request.GET.get('enrich') or '').strip().lower() in ('1', 'true', 'yes')
+
+        res = undo_move_from_tomags(
+            item_id=item_id,
+            file_id=file_id,
+            moved_files=moved_files,
+            enrich_after=enrich_after,
+        )
+        return Response(res, status=200 if (res.get('ok') or res.get('restored_from_tomags')) else 422)
+
+
 class ToggleInterestingAPIView(APIView):
     """
     Toggle or set the 'Interesting' flag for a `CatalogItem` (`POST /mylibrary/api/interesting/`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
         from .opds import set_book_interesting
@@ -2732,6 +3116,8 @@ class ToggleBadMetadataAPIView(APIView):
     """
     Toggle or set the 'Bad Metadata' flag for a `CatalogItem` (`POST /mylibrary/api/bad-metadata/`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
         from .opds import set_book_bad_metadata
@@ -2748,12 +3134,37 @@ class ToggleBadMetadataAPIView(APIView):
         return Response(res, status=200 if res.get('ok') else 400)
 
 
+class ToggleNeedsCoverAPIView(APIView):
+    """
+    Flag or dismiss a `CatalogItem` on the 'Missing / Text Cover' shelf (`POST /mylibrary/api/needs-cover/`).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import set_book_needs_cover
+
+        body = request.data or {}
+        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
+        cover_issue = (body.get('cover_issue') or request.GET.get('cover_issue') or 'text_only').strip()
+        reason = (body.get('reason') or request.GET.get('reason') or '').strip()
+        raw_state = body.get('needs_cover')
+        needs_cover = None
+        if raw_state is not None:
+            needs_cover = str(raw_state).lower() in ('1', 'true', 'yes')
+
+        res = set_book_needs_cover(item_id, needs_cover=needs_cover, cover_issue=cover_issue, reason=reason)
+        return Response(res, status=200 if res.get('ok') else 400)
+
+
 class CoverSearchAPIView(APIView):
     """
     Web Cover Search API (`POST /mylibrary/api/cover-search/`), modeled after Moon+ Reader's
     'Download cover from internet' feature. Queries Apple Books, Google Books, and Open Library
     in parallel and returns candidate cover thumbnails (with the book's Original Cover first unless missing).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
         from .opds import search_book_covers_web
@@ -2773,6 +3184,8 @@ class CoverApplyAPIView(APIView):
     """
     Apply a chosen web cover URL to a `CatalogItem` (`POST /mylibrary/api/cover-apply/`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
         from .opds import apply_book_cover_to_item
@@ -2781,10 +3194,26 @@ class CoverApplyAPIView(APIView):
         item_id = (body.get('item_id') or '').strip()
         cover_url = (body.get('cover_url') or '').strip()
         fallback_url = (body.get('fallback_url') or '').strip()
-        if not item_id or not cover_url:
+        file_id = (body.get('file_id') or '').strip()
+        file_path = (body.get('file_path') or '').strip()
+        isbn = (body.get('isbn') or '').strip()
+        title = (body.get('title') or '').strip()
+        authors = (body.get('authors') or '').strip()
+        query = (body.get('query') or '').strip()
+        if not (item_id or file_id or file_path or isbn or title or query) or not cover_url:
             return Response({'ok': False, 'error': 'item_id and cover_url are required.'}, status=400)
 
-        res = apply_book_cover_to_item(item_id, cover_url, fallback_url=fallback_url)
+        res = apply_book_cover_to_item(
+            item_id,
+            cover_url,
+            fallback_url=fallback_url,
+            file_id=file_id,
+            file_path=file_path,
+            isbn=isbn,
+            title=title,
+            authors=authors,
+            query=query,
+        )
         return Response(res, status=200 if res.get('ok') else 422)
 
 
@@ -3017,6 +3446,8 @@ class DuplicatesAPIView(APIView):
     JSON API endpoint (`/mylibrary/api/duplicates/`) to query enriched duplicate groups
     and resolve single or batch duplicate groups safely (moving redundant copies to `/books_bad/duplicates/`).
     """
+    authentication_classes = []
+    permission_classes = []
 
     def get(self, request):
         from .opds import get_enriched_duplicate_groups
@@ -3106,6 +3537,719 @@ class DuplicatesAPIView(APIView):
             allow_unfinished_bookmark=allow_bm,
         )
         return Response(res, status=200 if res.get('ok') else 400)
+
+
+class SplitCatalogItemAPIView(APIView):
+    """
+    POST /mylibrary/api/split-item/
+    Body: {"item_id": "<uuid>", "file_id": "<optional-uuid>", "enrich_split": true|false, "force_split_all": true|false}
+    Splits unrelated `FileLocation`s on a multi-file `CatalogItem` into separate `CatalogItem` entries.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import split_unrelated_files_on_catalog_item
+
+        item_id = str(request.data.get('item_id') or '').strip()
+        file_id = str(request.data.get('file_id') or '').strip() or None
+        enrich_split = bool(request.data.get('enrich_split', False))
+        force_split_all = bool(request.data.get('force_split_all', False))
+
+        if not item_id:
+            return Response({'ok': False, 'error': 'item_id is required.'}, status=400)
+
+        res = split_unrelated_files_on_catalog_item(
+            item_or_id=item_id,
+            target_file_id=file_id,
+            enrich_split=enrich_split,
+            force_split_all=force_split_all,
+        )
+        return Response(res, status=200 if res.get('ok') else 400)
+
+
+def _isbn10_to_isbn13(isbn10: str) -> str:
+    clean = re.sub(r'[^0-9Xx]', '', str(isbn10 or '')).upper()
+    if len(clean) != 10 or not clean[:9].isdigit():
+        return ''
+    prefix = '978' + clean[:9]
+    total = sum((1 if i % 2 == 0 else 3) * int(ch) for i, ch in enumerate(prefix))
+    check = (10 - (total % 10)) % 10
+    return f'{prefix}{check}'
+
+
+def _isbn13_to_isbn10(isbn13: str) -> str:
+    clean = re.sub(r'[^0-9]', '', str(isbn13 or ''))
+    if len(clean) != 13 or not clean.startswith('978'):
+        return ''
+    core = clean[3:12]
+    total = sum((10 - i) * int(ch) for i, ch in enumerate(core))
+    rem = (11 - (total % 11)) % 11
+    check = 'X' if rem == 10 else str(rem)
+    return f'{core}{check}'
+
+
+def _clean_wishlist_title(raw_title: str) -> tuple[str, str]:
+    """
+    Return `(cleaned_full_title, base_title_before_colon)` stripped of Amazon format noise
+    while preserving edition/volume qualifiers in `cleaned_full_title`.
+    """
+    t = _clean_single_line(raw_title)
+    if not t:
+        return '', ''
+    # Strip trailing parenthetical/bracketed format tags (Kindle, Hardcover, Paperback, etc.)
+    # Do NOT strip edition/volume numbers from full_title so 2nd Edition / Vol. 2 stay distinct.
+    for _ in range(3):
+        t_next = re.sub(
+            r'\s*[\(\[](?:kindle\s+edition|kindle|hardcover|paperback|mass\s+market\s+paperback|'
+            r'spiral[\-\s]*bound|audio\s+cd|audible\s+audio\s+edition|unabridged|abridged|'
+            r'print\s+replica|illustrated\s+edition|reprint)[\)\]]\s*$',
+            '',
+            t,
+            flags=re.IGNORECASE,
+        ).strip()
+        if t_next == t:
+            break
+        t = t_next
+    base = re.split(r'\s*[:\-–—]\s+', t, maxsplit=1)[0].strip()
+    base = re.sub(r'\s*[\(\[][^)\]]*[\)\]]\s*$', '', base).strip()
+    if len(base) < 3:
+        base = t
+    return t, base
+
+
+_ORDINAL_MAP = {
+    'first': '1', '1st': '1', 'one': '1', 'i': '1',
+    'second': '2', '2nd': '2', 'two': '2', 'ii': '2',
+    'third': '3', '3rd': '3', 'three': '3', 'iii': '3',
+    'fourth': '4', '4th': '4', 'four': '4', 'iv': '4',
+    'fifth': '5', '5th': '5', 'five': '5', 'v': '5',
+    'sixth': '6', '6th': '6', 'six': '6', 'vi': '6',
+    'seventh': '7', '7th': '7', 'seven': '7', 'vii': '7',
+    'eighth': '8', '8th': '8', 'eight': '8', 'viii': '8',
+    'ninth': '9', '9th': '9', 'nine': '9', 'ix': '9',
+    'tenth': '10', '10th': '10', 'ten': '10', 'x': '10',
+}
+
+
+def _extract_edition_and_year_markers(text: str) -> tuple[set[str], int | None]:
+    """
+    Extract normalized edition/volume/part markers (e.g. `{'ed:2', 'vol:3'}`) and a 4-digit
+    publication year (if present) from a title or filename string.
+    """
+    s = _clean_single_line(text).lower()
+    if not s:
+        return set(), None
+    markers: set[str] = set()
+    for m in re.finditer(r'\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th)?)\s+(?:ed\.?|edition)\b', s):
+        raw_num = m.group(1)
+        norm_num = _ORDINAL_MAP.get(raw_num, re.sub(r'\D', '', raw_num))
+        if norm_num and norm_num != '1':
+            markers.add(f'ed:{norm_num}')
+    for m in re.finditer(r'\b(?:vol\.?|volume|book|part)\s*(?:no\.?\s*)?(\d+|i{1,3}|iv|v|vi{0,3}|ix|x)\b', s):
+        raw_num = m.group(1)
+        norm_num = _ORDINAL_MAP.get(raw_num, raw_num)
+        if norm_num:
+            markers.add(f'vol:{norm_num}')
+    for m in re.finditer(r'\b(ii|iii|iv|vi|vii|viii|ix)\b', s):
+        norm_num = _ORDINAL_MAP.get(m.group(1))
+        if norm_num:
+            markers.add(f'roman:{norm_num}')
+
+    years = [int(y) for y in re.findall(r'\b(19[7-9]\d|20[0-2]\d)\b', s)]
+    pub_year = max(years) if years else None
+    return markers, pub_year
+
+
+def _norm_title_preserve_qualifiers(val: str | None) -> str:
+    """Normalize a book title for comparison WITHOUT stripping parenthetical edition/volume qualifiers."""
+    if not val:
+        return ''
+    s = str(val).lower()
+    s = re.sub(
+        r'\s*[\(\[](?:kindle\s+edition|kindle|hardcover|paperback|mass\s+market\s+paperback|'
+        r'spiral[\-\s]*bound|audio\s+cd|audible\s+audio\s+edition|unabridged|abridged|'
+        r'print\s+replica)[\)\]]',
+        ' ',
+        s,
+    )
+    # Strip Anna's Archive / scanner filename suffixes if present in un-enriched CatalogItem titles
+    s = re.split(r'\s+--\s+', s, maxsplit=1)[0]
+    s = re.sub(r'[^a-z0-9]+', ' ', s)
+    return ' '.join(s.split())
+
+
+def _clean_wishlist_author(raw_author: str) -> tuple[str, str]:
+    """
+    Return `(cleaned_author, primary_author_surname)` stripped of Amazon/publisher byline noise.
+    """
+    a = _clean_single_line(raw_author)
+    if not a:
+        return '', ''
+    a = re.sub(r'<br\b.*$', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'<[^>]+>', ' ', a).strip()
+    a = re.sub(r'(?:foreword|preface|introduction|afterword)\s+by\b.*$', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'^\s*by\s+', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'\|.*$', '', a).strip()
+    a = re.sub(r'\s*\([^)]*(?:author|editor|translator|narrator|illustrator|foreword|edition|hardcover|paperback|kindle)[^)]*\)', '', a, flags=re.IGNORECASE).strip()
+    first_author = re.split(r'\s*(?:,|;|&|\band\b)\s*', a, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    tokens = [tok for tok in re.split(r'[^A-Za-z0-9\'\-]+', first_author) if len(tok) >= 2 and tok.lower() not in ('jr', 'sr', 'ii', 'iii', 'iv', 'dr', 'md', 'phd')]
+    surname = tokens[-1].lower() if tokens else ''
+    return a, surname
+
+
+_WISHLIST_IDX_STATE: dict[str, bool] = {
+    'checked': False,
+    'building': False,
+    'upper_ready': False,
+    'trgm_ready': False,
+}
+
+_STOP_PREPOSITIONS = {'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'nor', 'of', 'on', 'or', 'over', 'the', 'to', 'up', 'via', 'with'}
+
+
+def _generate_indexed_title_variants(raw_title: str) -> list[str]:
+    """Generate common case variants of a title so standard B-tree `title__in` index lookups hit immediately."""
+    t = _clean_single_line(raw_title)
+    if not t:
+        return []
+    variants = {t, t.title(), t.capitalize(), t.lower(), t.upper()}
+    words = t.split()
+    if len(words) > 1:
+        smart_words = [
+            w.capitalize() if (idx == 0 or idx == len(words) - 1 or w.lower() not in _STOP_PREPOSITIONS) else w.lower()
+            for idx, w in enumerate(words)
+        ]
+        variants.add(' '.join(smart_words))
+    return [v for v in variants if v]
+
+
+def _ensure_wishlist_fast_indexes() -> None:
+    """
+    Check if functional `UPPER(title)` and `pg_trgm` GIN indexes exist on `catalog_catalogitem`;
+    if missing, build them asynchronously in the background via `CREATE INDEX CONCURRENTLY`.
+    """
+    if _WISHLIST_IDX_STATE['upper_ready'] and _WISHLIST_IDX_STATE['trgm_ready']:
+        return
+    if _WISHLIST_IDX_STATE['building']:
+        return
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT indexname FROM pg_indexes WHERE tablename = 'catalog_catalogitem' "
+                "AND indexname IN ('idx_catalogitem_upper_title_btree', 'idx_catalogitem_upper_basetitle_btree')"
+            )
+            found = {row[0] for row in cur.fetchall()}
+        _WISHLIST_IDX_STATE['upper_ready'] = 'idx_catalogitem_upper_title_btree' in found
+        _WISHLIST_IDX_STATE['trgm_ready'] = 'idx_catalogitem_upper_basetitle_btree' in found
+        _WISHLIST_IDX_STATE['checked'] = True
+        if _WISHLIST_IDX_STATE['upper_ready'] and _WISHLIST_IDX_STATE['trgm_ready']:
+            return
+    except Exception:
+        return
+
+    def _bg_build():
+        try:
+            from django.db import connections
+            conn = connections['default']
+            conn.ensure_connection()
+            old_autocommit = conn.get_autocommit()
+            conn.set_autocommit(True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_catalogitem_upper_title_btree "
+                        "ON catalog_catalogitem (UPPER(title))"
+                    )
+                    _WISHLIST_IDX_STATE['upper_ready'] = True
+                    cur.execute(
+                        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_catalogitem_upper_basetitle_btree "
+                        "ON catalog_catalogitem (UPPER(TRIM(SPLIT_PART(SPLIT_PART(title, ':', 1), ' (', 1))))"
+                    )
+                    _WISHLIST_IDX_STATE['trgm_ready'] = True
+            finally:
+                conn.set_autocommit(old_autocommit)
+        except Exception:
+            pass
+        finally:
+            _WISHLIST_IDX_STATE['building'] = False
+
+    _WISHLIST_IDX_STATE['building'] = True
+    import threading
+    threading.Thread(target=_bg_build, daemon=True).start()
+
+
+class WishlistCheckAPIView(APIView):
+    """
+    Batch & Single-Item API endpoint (`/mylibrary/api/wishlist/check/`) for the MyLibrary
+    Amazon Wishlist & Anna's Archive Chrome Extension.
+
+    Checks whether books on Amazon Wishlists (`Books (Kindle)`, `Print Books`, etc.)
+    already exist in MyLibrary (`BookDB` `CatalogItem` / `FileLocation`, Kindle/Audible shelf,
+    or enriched `scanner_state.db` records).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def _check_books_batch(self, raw_books: list[dict]) -> list[dict]:
+        import time as _t
+        import urllib.parse
+        from django.db.models.functions import Upper
+        from .opds import is_file_enriched
+
+        t_start = _t.monotonic()
+        _ensure_wishlist_fast_indexes()
+        t_idx = _t.monotonic()
+
+        parsed_entries = []
+        all_asins = set()
+        all_isbns = set()
+        exact_titles_lower = set()
+
+        for idx, b in enumerate(raw_books[:120]):
+            if not isinstance(b, dict):
+                continue
+            key = str(b.get('key') or b.get('asin') or b.get('id') or idx)
+            raw_asin = re.sub(r'[^A-Za-z0-9]', '', str(b.get('asin') or '')).upper()
+            raw_isbn = re.sub(r'[^0-9Xx]', '', str(b.get('isbn') or '')).upper()
+
+            cand_isbns = set()
+            if len(raw_isbn) in (10, 13):
+                cand_isbns.add(raw_isbn)
+            if len(raw_asin) == 10 and raw_asin[:9].isdigit():
+                cand_isbns.add(raw_asin)
+            for ci in list(cand_isbns):
+                if len(ci) == 10:
+                    i13 = _isbn10_to_isbn13(ci)
+                    if i13:
+                        cand_isbns.add(i13)
+                elif len(ci) == 13:
+                    i10 = _isbn13_to_isbn10(ci)
+                    if i10:
+                        cand_isbns.add(i10)
+
+            full_t, base_t = _clean_wishlist_title(b.get('title') or '')
+            clean_a, surname = _clean_wishlist_author(b.get('author') or b.get('authors') or '')
+            ed_markers, det_year = _extract_edition_and_year_markers(
+                f"{b.get('title') or ''} {b.get('edition') or ''} {b.get('author') or ''} {b.get('pub_year') or b.get('pub_date') or ''}"
+            )
+            raw_pub_year = None
+            if b.get('pub_year'):
+                try:
+                    raw_pub_year = int(str(b.get('pub_year'))[:4])
+                except ValueError:
+                    pass
+            pub_year = raw_pub_year or det_year
+
+            if raw_asin:
+                all_asins.add(raw_asin)
+            all_isbns.update(cand_isbns)
+            if full_t:
+                exact_titles_lower.add(full_t.lower())
+            if base_t:
+                exact_titles_lower.add(base_t.lower())
+
+            parsed_entries.append({
+                'key': key,
+                'raw_asin': raw_asin,
+                'cand_isbns': cand_isbns,
+                'orig_title': _clean_single_line(b.get('title') or ''),
+                'full_title': full_t,
+                'base_title': base_t,
+                'norm_full_title': _norm_title_preserve_qualifiers(full_t),
+                'norm_base_title': _norm_lookup_str(base_t),
+                'ed_markers': ed_markers,
+                'pub_year': pub_year,
+                'clean_author': clean_a,
+                'surname': surname,
+                'wishlist_name': _clean_single_line(b.get('wishlist_name') or ''),
+            })
+
+        by_asin: dict[str, list[CatalogItem]] = {}
+        by_isbn: dict[str, list[CatalogItem]] = {}
+        if all_asins or all_isbns:
+            q_id = Q()
+            if all_asins:
+                q_id |= Q(asin__in=list(all_asins))
+            if all_isbns:
+                q_id |= Q(isbn__in=list(all_isbns)) | Q(asin__in=list(all_isbns))
+            for it in CatalogItem.objects.filter(q_id).order_by().prefetch_related('files')[:500]:
+                if it.asin:
+                    ca = re.sub(r'[^A-Za-z0-9]', '', it.asin).upper()
+                    by_asin.setdefault(ca, []).append(it)
+                    if ca in all_isbns:
+                        by_isbn.setdefault(ca, []).append(it)
+                if it.isbn:
+                    ci = re.sub(r'[^0-9Xx]', '', it.isbn).upper()
+                    by_isbn.setdefault(ci, []).append(it)
+
+        # Batch Title / Prefix / Author lookup across all entries that did not already match by ISBN/ASIN
+        need_title_entries = [
+            e for e in parsed_entries
+            if e['base_title']
+            and len(e['base_title']) >= 3
+            and not any(ci in by_isbn for ci in e['cand_isbns'])
+            and not (e['raw_asin'] and e['raw_asin'] in by_asin)
+        ]
+
+        cands_by_norm_base: dict[str, list[CatalogItem]] = {}
+        cands_by_norm_full: dict[str, list[CatalogItem]] = {}
+        seen_batch_cand_ids: set = set()
+
+        def _index_batch_cand(it_obj: CatalogItem):
+            if it_obj.id in seen_batch_cand_ids:
+                return
+            seen_batch_cand_ids.add(it_obj.id)
+            it_cf, it_cb = _clean_wishlist_title(it_obj.title or '')
+            it_nf = _norm_title_preserve_qualifiers(it_cf or it_obj.title)
+            it_nb = _norm_lookup_str(it_cb or it_obj.title)
+            if it_nb:
+                cands_by_norm_base.setdefault(it_nb, []).append(it_obj)
+            if it_nf and it_nf != it_nb:
+                cands_by_norm_full.setdefault(it_nf, []).append(it_obj)
+
+        if need_title_entries:
+            upper_titles: set[str] = set()
+            indexed_variants: set[str] = set()
+
+            for e in need_title_entries:
+                for raw_t in (e['full_title'], e['base_title'], e['orig_title']):
+                    if raw_t and len(raw_t) >= 3:
+                        upper_titles.add(raw_t.upper())
+                        if not _WISHLIST_IDX_STATE.get('upper_ready'):
+                            indexed_variants.update(_generate_indexed_title_variants(raw_t))
+
+            t_q1 = _t.monotonic()
+            if _WISHLIST_IDX_STATE.get('upper_ready') and upper_titles:
+                # Single B-tree index scan on `idx_catalogitem_upper_title_btree` (`UPPER(title) IN (...)`)
+                for it_obj in (
+                    CatalogItem.objects.annotate(_up_title=Upper('title'))
+                    .filter(_up_title__in=list(upper_titles)[:400])
+                    .order_by()
+                    .prefetch_related('files')[:400]
+                ):
+                    _index_batch_cand(it_obj)
+            elif indexed_variants:
+                for it_obj in CatalogItem.objects.filter(title__in=list(indexed_variants)[:600]).order_by().prefetch_related('files')[:400]:
+                    _index_batch_cand(it_obj)
+            t_q2 = _t.monotonic()
+
+            # 2. Subtitle-stripped base-title B-tree `= ANY(...)` lookup using `idx_catalogitem_upper_basetitle_btree`
+            if _WISHLIST_IDX_STATE.get('trgm_ready') and upper_titles:
+                up_list = list(upper_titles)[:400]
+                for it_obj in (
+                    CatalogItem.objects.extra(
+                        where=["UPPER(TRIM(SPLIT_PART(SPLIT_PART(title, ':', 1), ' (', 1))) = ANY(%s)"],
+                        params=[up_list],
+                    )
+                    .order_by()
+                    .prefetch_related('files')[:400]
+                ):
+                    _index_batch_cand(it_obj)
+            t_q3 = _t.monotonic()
+
+            self._last_timings = {
+                'idx_ms': round((t_idx - t_start) * 1000, 1),
+                'q_upper_in_ms': round((t_q2 - t_q1) * 1000, 1),
+                'q_prefix_ms': round((t_q3 - t_q2) * 1000, 1),
+                'idx_state': dict(_WISHLIST_IDX_STATE),
+            }
+
+        results = []
+        for entry in parsed_entries:
+            matched_items: list[CatalogItem] = []
+            other_edition_items: list[tuple[CatalogItem, str]] = []
+            seen_ids = set()
+            seen_other_ids = set()
+            match_type = ''
+
+            def _add_item(item_obj: CatalogItem, m_type: str):
+                nonlocal match_type
+                if item_obj.id not in seen_ids:
+                    seen_ids.add(item_obj.id)
+                    matched_items.append(item_obj)
+                    if not match_type:
+                        match_type = m_type
+
+            def _add_other_edition(item_obj: CatalogItem, reason: str):
+                if item_obj.id not in seen_ids and item_obj.id not in seen_other_ids:
+                    seen_other_ids.add(item_obj.id)
+                    other_edition_items.append((item_obj, reason))
+
+            # 1. Exact ISBN-10 / ISBN-13 match
+            for ci in entry['cand_isbns']:
+                for it in by_isbn.get(ci, []):
+                    _add_item(it, 'isbn')
+
+            # 2. Exact ASIN match
+            if entry['raw_asin']:
+                for it in by_asin.get(entry['raw_asin'], []):
+                    _add_item(it, 'asin')
+
+            # 3. Title + Author / Base-Title match from batched in-memory candidate map
+            if not matched_items and entry['base_title'] and len(entry['base_title']) >= 3:
+                sname = entry['surname']
+                norm_bt = entry['norm_base_title']
+                norm_ft = entry['norm_full_title']
+                bt_words = [w for w in norm_bt.split() if len(w) >= 3 and w not in ('the', 'and', 'for', 'with', 'from', 'into')]
+
+                cand_seen = set()
+                cands = []
+                for bucket_key in (norm_bt, norm_ft):
+                    if not bucket_key:
+                        continue
+                    for it_c in cands_by_norm_base.get(bucket_key, []) + cands_by_norm_full.get(bucket_key, []):
+                        if it_c.id not in cand_seen:
+                            cand_seen.add(it_c.id)
+                            cands.append(it_c)
+
+                for it in cands:
+                    it_clean_full, it_clean_base = _clean_wishlist_title(it.title or '')
+                    it_norm_full = _norm_title_preserve_qualifiers(it_clean_full or it.title)
+                    it_norm_base = _norm_lookup_str(it_clean_base or it.title)
+                    if not it_norm_base:
+                        continue
+
+                    # Check author agreement first
+                    it_auth_norm = _norm_lookup_str(it.authors or '')
+                    is_unknown_auth = not it_auth_norm or it_auth_norm in ('unknown', 'unknown author')
+                    author_ok = False
+                    if sname and not is_unknown_auth:
+                        author_ok = sname in it_auth_norm
+                    elif not sname or (is_unknown_auth and len(bt_words) >= 3):
+                        author_ok = True
+                    if not author_ok:
+                        continue
+
+                    # Check base title or full title equality (do NOT allow partial word subset matches)
+                    base_or_full_eq = (
+                        it_norm_full == norm_ft
+                        or it_norm_full == norm_bt
+                        or it_norm_base == norm_bt
+                        or it_norm_base == norm_ft
+                    )
+                    if not base_or_full_eq:
+                        continue
+
+                    # Collect candidate item's ISBNs, ASIN, edition markers, and publication year
+                    it_isbns = set()
+                    if it.isbn:
+                        ci_clean = re.sub(r'[^0-9Xx]', '', str(it.isbn)).upper()
+                        if len(ci_clean) in (10, 13):
+                            it_isbns.add(ci_clean)
+                    for m_isbn in re.findall(r'\b(97[89]\d{10})\b', f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}"):
+                        it_isbns.add(m_isbn)
+                    for ci_code in list(it_isbns):
+                        if len(ci_code) == 10:
+                            i13 = _isbn10_to_isbn13(ci_code)
+                            if i13:
+                                it_isbns.add(i13)
+                        elif len(ci_code) == 13:
+                            i10 = _isbn13_to_isbn10(ci_code)
+                            if i10:
+                                it_isbns.add(i10)
+
+                    it_ed_markers, it_text_year = _extract_edition_and_year_markers(
+                        f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}"
+                    )
+                    it_pub_year = it.pub_date.year if it.pub_date else it_text_year
+
+                    # Conflict 1: Both have ISBNs and they do NOT overlap -> Different book or edition!
+                    if entry['cand_isbns'] and it_isbns and entry['cand_isbns'].isdisjoint(it_isbns):
+                        _add_other_edition(it, f"Different ISBN ({next(iter(sorted(it_isbns, key=len, reverse=True)))})")
+                        continue
+
+                    # Conflict 2: Both have ASINs and they do NOT match -> Different book or edition!
+                    it_asin_clean = re.sub(r'[^A-Za-z0-9]', '', str(it.asin or '')).upper()
+                    if entry['raw_asin'] and it_asin_clean and entry['raw_asin'] != it_asin_clean:
+                        _add_other_edition(it, f"Different ASIN ({it_asin_clean})")
+                        continue
+
+                    # Conflict 3: Both have publication years and they differ by >= 2 years -> Older/different book with same title!
+                    if entry['pub_year'] and it_pub_year and abs(entry['pub_year'] - it_pub_year) >= 2:
+                        _add_other_edition(it, f"Published {it_pub_year} vs Wishlist {entry['pub_year']}")
+                        continue
+
+                    # Conflict 4: Edition / Volume / Part number mismatch (e.g. 2nd Edition vs 1st Edition, Vol 2 vs Vol 1)
+                    if entry['ed_markers'] != it_ed_markers and (entry['ed_markers'] or it_ed_markers):
+                        _add_other_edition(it, "Different Edition/Volume")
+                        continue
+
+                    # Conflict 5: Both have subtitles (full != base) and the full titles differ -> Different book in series!
+                    entry_has_sub = norm_ft != norm_bt
+                    it_has_sub = it_norm_full != it_norm_base
+                    if entry_has_sub and it_has_sub and it_norm_full != norm_ft:
+                        _add_other_edition(it, f"Different subtitle ({it.title})")
+                        continue
+
+                    # Conflict 6: Wishlist has a specific subtitle (or ISBN) that the library book lacks, and base title is short (<= 2 words, e.g. "Visualization")
+                    if (entry_has_sub != it_has_sub) and len(bt_words) <= 2:
+                        _add_other_edition(it, f"Different title/subtitle ({it.title})")
+                        continue
+
+                    _add_item(it, 'title_author' if sname else 'title')
+
+                # If any candidate for this title/author had an explicit ISBN, ASIN, Year, or Edition conflict
+                # and we only matched a sibling/duplicate row by title (e.g. a row missing its ISBN or pub_date),
+                # demote the title-only match into other_edition_items so it does not cause a false positive.
+                if other_edition_items and matched_items and match_type in ('title', 'title_author'):
+                    first_conflict_reason = other_edition_items[0][1]
+                    for m_it in list(matched_items):
+                        m_isbns = set()
+                        if m_it.isbn:
+                            c_i = re.sub(r'[^0-9Xx]', '', str(m_it.isbn)).upper()
+                            if len(c_i) in (10, 13):
+                                m_isbns.add(c_i)
+                                if len(c_i) == 10:
+                                    m_isbns.add(_isbn10_to_isbn13(c_i))
+                                elif len(c_i) == 13:
+                                    m_isbns.add(_isbn13_to_isbn10(c_i))
+                        has_exact_isbn = bool(entry['cand_isbns'] and m_isbns and not entry['cand_isbns'].isdisjoint(m_isbns))
+                        if not has_exact_isbn:
+                            matched_items.remove(m_it)
+                            seen_ids.discard(m_it.id)
+                            _add_other_edition(m_it, first_conflict_reason)
+                    if not matched_items:
+                        match_type = ''
+
+            def _serialize_match_obj(it: CatalogItem, note: str = '') -> dict:
+                files_data = []
+                is_enr = False
+                for fl in it.files.all():
+                    if not is_enr and fl.file_path and is_file_enriched(fl.file_path):
+                        is_enr = True
+                    fmt = (fl.file_format or '').upper()
+                    files_data.append({
+                        'id': str(fl.id),
+                        'file_name': fl.file_name,
+                        'file_format': fmt,
+                        'file_size': fl.file_size,
+                        'download_url': f'/mylibrary/opds/download/{fl.id}/{fl.file_name}',
+                    })
+                _, text_year = _extract_edition_and_year_markers(
+                    f"{it.title or ''} {' '.join(f['file_name'] or '' for f in files_data)}"
+                )
+                pub_date_str = str(it.pub_date) if it.pub_date else (str(text_year) if text_year else '')
+                pub_year_val = it.pub_date.year if it.pub_date else text_year
+                return {
+                    'id': str(it.id),
+                    'title': it.title,
+                    'authors': it.authors,
+                    'isbn': it.isbn or '',
+                    'asin': it.asin or '',
+                    'pub_date': pub_date_str,
+                    'pub_year': pub_year_val,
+                    'item_type': it.item_type,
+                    'is_enriched': is_enr,
+                    'note': note,
+                    'formats': [f['file_format'] for f in files_data if f['file_format']],
+                    'files': files_data,
+                }
+
+            # Format matched items for Chrome Extension badge & modal
+            serialized_matches = []
+            all_formats = []
+            all_types = []
+            any_enriched = False
+            for it in matched_items[:6]:
+                m_obj = _serialize_match_obj(it)
+                if m_obj['is_enriched']:
+                    any_enriched = True
+                if it.item_type and it.item_type not in all_types:
+                    all_types.append(it.item_type)
+                for fmt in m_obj['formats']:
+                    if fmt and fmt not in all_formats:
+                        all_formats.append(fmt)
+                # Only adopt ISBN from MyLibrary item when it was an exact ASIN/ISBN match
+                if match_type in ('isbn', 'asin') and it.isbn:
+                    ci_clean = re.sub(r'[^0-9Xx]', '', str(it.isbn)).upper()
+                    if len(ci_clean) in (10, 13):
+                        entry['cand_isbns'].add(ci_clean)
+                        if len(ci_clean) == 10:
+                            i13 = _isbn10_to_isbn13(ci_clean)
+                            if i13:
+                                entry['cand_isbns'].add(i13)
+                        elif len(ci_clean) == 13:
+                            i10 = _isbn13_to_isbn10(ci_clean)
+                            if i10:
+                                entry['cand_isbns'].add(i10)
+                serialized_matches.append(m_obj)
+
+            serialized_other_editions = [
+                _serialize_match_obj(it_other, reason)
+                for it_other, reason in other_edition_items[:4]
+            ]
+
+            sorted_isbns = sorted(entry['cand_isbns'], key=lambda x: (-len(x), x))
+            primary_isbn = sorted_isbns[0] if sorted_isbns else ''
+            title_core = entry['base_title'] or entry['full_title'] or entry['orig_title']
+            annas_title_q = ' '.join(filter(None, [title_core, entry['surname']])).strip()
+            search_q = title_core or entry['raw_asin']
+            annas_q = primary_isbn or annas_title_q or search_q
+
+            results.append({
+                'key': entry['key'],
+                'asin': entry['raw_asin'],
+                'isbns': sorted_isbns,
+                'primary_isbn': primary_isbn,
+                'pub_year': entry['pub_year'],
+                'cleaned_title': entry['full_title'],
+                'base_title': entry['base_title'],
+                'cleaned_author': entry['clean_author'],
+                'author_surname': entry['surname'],
+                'in_library': bool(serialized_matches),
+                'match_type': match_type,
+                'match_count': len(serialized_matches),
+                'is_enriched': any_enriched,
+                'formats': all_formats,
+                'item_types': all_types,
+                'search_query': search_q,
+                'annas_query': annas_q,
+                'annas_isbn_query': primary_isbn,
+                'annas_title_query': annas_title_q,
+                'annas_title_only_query': title_core,
+                'annas_search_url': f"https://annas-archive.pk/search?q={urllib.parse.quote_plus(annas_q)}",
+                'annas_isbn_search_url': f"https://annas-archive.pk/search?q={urllib.parse.quote_plus(primary_isbn)}" if primary_isbn else '',
+                'annas_title_search_url': f"https://annas-archive.pk/search?q={urllib.parse.quote_plus(annas_title_q or title_core)}" if (annas_title_q or title_core) else '',
+                'matches': serialized_matches,
+                'other_editions': serialized_other_editions,
+            })
+
+        return results
+
+    def get(self, request):
+        book = {
+            'key': request.GET.get('key') or '0',
+            'asin': request.GET.get('asin') or '',
+            'isbn': request.GET.get('isbn') or '',
+            'title': request.GET.get('title') or '',
+            'author': request.GET.get('author') or '',
+            'wishlist_name': request.GET.get('wishlist_name') or '',
+        }
+        res = self._check_books_batch([book])
+        resp = Response({'ok': True, 'timings': getattr(self, '_last_timings', {}), 'results': res, 'item': res[0] if res else None})
+        resp['Access-Control-Allow-Origin'] = '*'
+        return resp
+
+    def post(self, request):
+        body = request.data or {}
+        books = body.get('books') or []
+        if isinstance(books, dict):
+            books = [books]
+        res = self._check_books_batch(books)
+        in_lib_cnt = sum(1 for r in res if r.get('in_library'))
+        resp = Response({
+            'ok': True,
+            'checked_count': len(res),
+            'in_library_count': in_lib_cnt,
+            'missing_count': len(res) - in_lib_cnt,
+            'results': res,
+        })
+        resp['Access-Control-Allow-Origin'] = '*'
+        return resp
+
+
 
 
 

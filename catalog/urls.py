@@ -23,11 +23,14 @@ urlpatterns = [
     path('api/calibre/add/', api.CalibreAddAPIView.as_view(), name='api_calibre_add'),
     path('api/enrich/', views.OnDemandEnrichAPIView.as_view(), name='api_enrich_on_demand'),
     path('api/revert-enrich/', views.RevertEnrichAPIView.as_view(), name='api_revert_enrich'),
+    path('api/split-item/', views.SplitCatalogItemAPIView.as_view(), name='api_split_item'),
     path('api/move-to-mag/', views.MoveToMagAPIView.as_view(), name='api_move_to_mag'),
+    path('api/undo-to-mag/', views.UndoMoveToMagAPIView.as_view(), name='api_undo_to_mag'),
     path('api/cover-search/', views.CoverSearchAPIView.as_view(), name='api_cover_search'),
     path('api/cover-apply/', views.CoverApplyAPIView.as_view(), name='api_cover_apply'),
     path('api/interesting/', views.ToggleInterestingAPIView.as_view(), name='api_toggle_interesting'),
     path('api/bad-metadata/', views.ToggleBadMetadataAPIView.as_view(), name='api_toggle_bad_metadata'),
+    path('api/needs-cover/', views.ToggleNeedsCoverAPIView.as_view(), name='api_toggle_needs_cover'),
     path('api/book-preview/', views.BookPreviewAPIView.as_view(), name='api_book_preview'),
     path('api/book-preview/raw/', views.BookRawStreamView.as_view(), name='api_book_preview_raw'),
     
@@ -42,6 +45,7 @@ urlpatterns = [
     path('api/catalog/', views.CatalogSearchAPIView.as_view(), name='api_catalog_search'),
     path('api/catalog/<str:identifier>/', views.CatalogItemDetailAPIView.as_view(), name='api_catalog_detail'),
     path('api/calibre/check-enriched/', views.CalibreCheckEnrichedAPIView.as_view(), name='api_calibre_check_enriched'),
+    path('api/wishlist/check/', views.WishlistCheckAPIView.as_view(), name='api_wishlist_check'),
 
     # OPDS 1.2 & Calibre Content Server Emulation (Moon+ Reader, KOReader, Calibre Sync, PocketBook)
     path('opds', opds.OPDSRootView.as_view(), name='opds_root_no_slash'),
@@ -50,6 +54,7 @@ urlpatterns = [
     path('opds/search/', opds.OPDSSearchView.as_view(), name='opds_search'),
     path('opds/interesting/', opds.OPDSInterestingFeedView.as_view(), name='opds_interesting'),
     path('opds/bad-metadata/', opds.OPDSBadMetadataFeedView.as_view(), name='opds_bad_metadata'),
+    path('opds/missing-covers/', opds.OPDSMissingCoverFeedView.as_view(), name='opds_missing_covers'),
     path('opds/flag-bad-meta/<str:item_id>/', opds.OPDSFlagBadMetadataView.as_view(), name='opds_flag_bad_meta'),
     path('opds/bookmarked/', opds.OPDSBookmarkedFeedView.as_view(), name='opds_bookmarked'),
     path('opds/amazon/', opds.OPDSAmazonFeedView.as_view(), name='opds_amazon'),

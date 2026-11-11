@@ -230,6 +230,71 @@ def parse_pdf(filepath, include_cover=False):
     is_invalid = False
     cover_bytes = None
 
+    # Fast, hang-proof path via PyMuPDF (fitz) — avoids pypdf 63.8M-pixel XObject decompression bombs
+    try:
+        import pymupdf
+        doc = pymupdf.open(filepath)
+        try:
+            if doc.is_encrypted:
+                has_drm = True
+            meta = doc.metadata or {}
+            title = str(meta.get('title') or '').strip()
+            author = str(meta.get('author') or '').strip()
+            publisher = str(meta.get('producer') or meta.get('creator') or '').strip()
+            description = str(meta.get('subject') or '').strip()
+            keywords = str(meta.get('keywords') or '').strip()
+
+            if not title:
+                title = os.path.splitext(os.path.basename(filepath))[0]
+            if not author:
+                author = 'Unknown Author'
+
+            isbn = ''
+            try:
+                from epubmeta.isbn.extractor import extract_isbns_from_text
+                corpus = f"{keywords} {description} {title}"
+                if not has_drm and len(doc) > 0:
+                    for p_idx in range(min(4, len(doc))):
+                        corpus += ' ' + (doc[p_idx].get_text() or '')[:4000]
+                found_isbns = extract_isbns_from_text(corpus)
+                if found_isbns:
+                    isbn = found_isbns[0][0]
+            except Exception:
+                pass
+
+            if include_cover and not has_drm and len(doc) > 0:
+                try:
+                    pix = doc[0].get_pixmap(dpi=72)
+                    cover_bytes = pix.tobytes('jpeg')
+                except Exception:
+                    pass
+
+            res = _apply_epubmeta_fallbacks(filepath, {
+                'title': title,
+                'authors': author,
+                'publisher': publisher,
+                'description': description,
+                'isbn': isbn,
+                'pub_date': None,
+                'has_drm': has_drm,
+                'is_invalid': False,
+            })
+            return (res, cover_bytes) if include_cover else res
+        finally:
+            doc.close()
+    except ImportError:
+        pass
+    except Exception as fitz_err:
+        err_low = str(fitz_err).lower()
+        if 'encrypted' in err_low or 'password' in err_low:
+            res = {
+                'title': os.path.splitext(os.path.basename(filepath))[0],
+                'authors': 'Unknown Author',
+                'has_drm': True,
+                'is_invalid': False,
+            }
+            return (res, None) if include_cover else res
+
     try:
         import pypdf
         with open(filepath, 'rb') as f:
@@ -250,11 +315,11 @@ def parse_pdf(filepath, include_cover=False):
             else:
                 info = reader.metadata
 
-            title = info.title.strip() if info and info.title else ""
-            author = info.author.strip() if info and info.author else ""
-            publisher = info.get('/Publisher', '') if info else ''
-            description = info.get('/Subject', '') if info else ''
-            keywords = info.get('/Keywords', '') if info else ''
+            title = str(info.title or "").strip() if info and getattr(info, 'title', None) else ""
+            author = str(info.author or "").strip() if info and getattr(info, 'author', None) else ""
+            publisher = str(info.get('/Publisher', '') or "").strip() if info else ''
+            description = str(info.get('/Subject', '') or "").strip() if info else ''
+            keywords = str(info.get('/Keywords', '') or "").strip() if info else ''
 
             if not title or not title.strip():
                 title = os.path.splitext(os.path.basename(filepath))[0]
@@ -270,13 +335,6 @@ def parse_pdf(filepath, include_cover=False):
                     isbn = found_isbns[0][0]
             except Exception:
                 pass
-
-            if include_cover and not has_drm:
-                try:
-                    if reader.pages and reader.pages[0].images:
-                        cover_bytes = reader.pages[0].images[0].data
-                except Exception:
-                    pass
 
             res = _apply_epubmeta_fallbacks(filepath, {
                 'title': title,
@@ -308,48 +366,41 @@ def parse_pdf(filepath, include_cover=False):
 
 
 def parse_mobi(filepath):
-    """Extract metadata from a MOBI file, catching DRM and corruption errors."""
+    """Extract metadata from a MOBI/AZW3 file using fast header-only MobiReader."""
     has_drm = False
     is_invalid = False
 
     try:
-        import mobi
-        book = mobi.Mobi(filepath)
-        book.parse()
-        meta = book.config
-
-        title = meta.get('title', '').strip() if meta.get('title') else ""
-        author = meta.get('author', '').strip() if meta.get('author') else ""
-
-        if not title:
-            title = os.path.splitext(os.path.basename(filepath))[0]
-        if not author:
-            author = 'Unknown Author'
-
+        from pathlib import Path
+        from epubmeta.readers.mobi import MobiReader
+        reader = MobiReader(Path(filepath))
+        mmeta = reader.read_metadata()
+        title = (mmeta.title or '').strip() or os.path.splitext(os.path.basename(filepath))[0]
+        author = ', '.join(mmeta.authors) if mmeta.authors else 'Unknown Author'
         return _apply_epubmeta_fallbacks(filepath, {
             'title': title,
             'authors': author,
-            'publisher': meta.get('publisher', ''),
-            'description': meta.get('description', ''),
-            'pub_date': None,
+            'publisher': mmeta.publisher or '',
+            'description': mmeta.description or '',
+            'isbn': mmeta.isbn13 or mmeta.isbn10 or '',
+            'asin': mmeta.asin or None,
+            'pub_date': (mmeta.published_date or '')[:10] if mmeta.published_date else None,
             'has_drm': False,
-            'is_invalid': False
+            'is_invalid': False,
         })
     except Exception as e:
-        print(f"Error parsing MOBI {filepath}: {e}")
         error_msg = str(e).lower()
         if "encrypted" in error_msg or "drm" in error_msg or "cipher" in error_msg:
             has_drm = True
             is_invalid = False
         else:
-            is_invalid = True
-
-        return {
+            is_invalid = False
+        return _apply_epubmeta_fallbacks(filepath, {
             'title': os.path.splitext(os.path.basename(filepath))[0],
             'authors': 'Unknown Author',
             'has_drm': has_drm,
             'is_invalid': is_invalid
-        }
+        })
 
 
 def get_epub_cover(filepath):
@@ -393,22 +444,26 @@ def get_pdf_cover(filepath):
 
 def generate_thumbnail(image_bytes, max_size=(200, 300)):
     """Generate a base64 encoded JPEG thumbnail from raw image bytes."""
-    if not image_bytes:
+    if not image_bytes or len(image_bytes) > 8 * 1024 * 1024:
         return None
     try:
         import io
         from PIL import Image
         import base64
 
-        img = Image.open(io.BytesIO(image_bytes))
-        img.thumbnail(max_size)
-        if img.mode not in ('RGB', 'L'):
-            img = img.convert('RGB')
+        warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+        Image.MAX_IMAGE_PIXELS = 30_000_000
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if (img.width or 0) * (img.height or 0) > 25_000_000:
+                return None
+            img.thumbnail(max_size)
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
 
-        out_buf = io.BytesIO()
-        img.save(out_buf, format='JPEG', quality=80)
-        base64_str = base64.b64encode(out_buf.getvalue()).decode('utf-8')
-        return f"data:image/jpeg;base64,{base64_str}"
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='JPEG', quality=80)
+            base64_str = base64.b64encode(out_buf.getvalue()).decode('utf-8')
+            return f"data:image/jpeg;base64,{base64_str}"
     except Exception as e:
         print(f"Error generating thumbnail: {e}")
     return None

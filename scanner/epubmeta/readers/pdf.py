@@ -99,7 +99,7 @@ class PdfReader(BaseReader):
         from ..exceptions import DrmProtectedError, InvalidDocumentError
         try:
             doc = pymupdf.open(self.file_path)
-            if doc.is_encrypted:
+            if doc.needs_pass and not doc.authenticate(""):
                 doc.close()
                 raise DrmProtectedError(f"PDF is encrypted / password protected: {self.file_path.name}")
             if len(doc) == 0:

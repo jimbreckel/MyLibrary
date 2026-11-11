@@ -136,7 +136,8 @@ def send_to_server(server_url, api_token, metadata):
             print(f" Successfully synced: {metadata['file_name']}")
             return True
         else:
-            print(f" Failed to sync {metadata['file_name']}. Server returned status {response.status_code}: {response.text}")
+            err_preview = (response.text or "")[:300].replace("\n", " ")
+            print(f" Failed to sync {metadata['file_name']}. Server returned status {response.status_code}: {err_preview}")
             return False
     except Exception as e:
         print(f" Error connecting to server: {e}")
@@ -166,7 +167,8 @@ def send_deleted_paths_to_server(server_url, api_token, deleted_paths, batch_siz
                 total_pruned_locations += data.get('deleted_locations', 0)
                 total_pruned_catalog += data.get('deleted_catalog_items', 0)
             else:
-                print(f" Failed to prune chunk of {len(chunk)} paths. Server status {response.status_code}: {response.text}")
+                err_preview = (response.text or "")[:300].replace("\n", " ")
+                print(f" Failed to prune chunk of {len(chunk)} paths. Server status {response.status_code}: {err_preview}")
                 success_all = False
         except Exception as e:
             print(f" Error connecting to server for cleanup: {e}")
@@ -260,7 +262,7 @@ def scan_directory(
             modified_at = str(stat.st_mtime)
             size = 0 if os.path.isdir(abspath) else stat.st_size
 
-            cached = cache.get(abspath)
+            cached = cache.pop(abspath, None)
             is_unchanged = (not force and cached and cached['modified_at'] == modified_at and cached['size'] == size)
 
             if is_unchanged:
@@ -280,9 +282,28 @@ def scan_directory(
             print(f"  Error reading stats for {name}: {e}")
             failed_files += 1
 
+    # Compute deleted paths now from remaining cache entries and free 1.48M-item scan_items & cache
+    norm_dir = os.path.abspath(directory)
+    dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
+    deleted_paths = [
+        cached_path for cached_path in cache.keys()
+        if (cached_path == norm_dir or cached_path.startswith(dir_prefix))
+    ]
+    del cache
+    del scan_items
+    if enrich_session:
+        enrich_session.processed_map.clear()
+        if enrich_session.mylibrary_client:
+            enrich_session.mylibrary_client.skip_hashes.clear()
+            enrich_session.mylibrary_client.skip_rel_paths.clear()
+            enrich_session.mylibrary_client.complete_hashes.clear()
+            enrich_session.mylibrary_client.complete_rel_paths.clear()
+    import gc
+    gc.collect()
+
     # 3. Unified epubmeta Enrichment Pass (New/changed files prioritized first, then backfill up to max_files)
     quarantined_paths = []
-    if enrich_session and (new_enrich_candidates or backfill_enrich_candidates):
+    if enrich_session:
         enrich_res = enrich_session.run_enrichment_batch(
             new_candidates=new_enrich_candidates,
             backfill_candidates=backfill_enrich_candidates,
@@ -306,53 +327,60 @@ def scan_directory(
                     remaining_to_parse.append(item)
             files_to_parse = remaining_to_parse
 
-    # 4. Parallel Metadata Extraction (CPU-bound) & Concurrent Uploads (Network/IO-bound) for remaining new/changed files
+    # Free enrichment structures before parallel metadata extraction to minimize RAM usage
+    del enrich_session
+    del new_enrich_candidates
+    del backfill_enrich_candidates
+    import gc
+    gc.collect()
+
+    # 4. Parallel Metadata Extraction & Concurrent Uploads (with strict per-file timeout so no file can hang the scanner)
     if files_to_parse:
         print(f"Found {len(files_to_parse)} files needing metadata extraction and syncing.", flush=True)
-        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
-        chunk_size = 1000
+        chunk_size = 250
         total_chunks = (len(files_to_parse) + chunk_size - 1) // chunk_size
         print(f"Processing in {total_chunks} chunks of {chunk_size}...", flush=True)
 
-        with ThreadPoolExecutor(max_workers=8) as uploader:
+        with ThreadPoolExecutor(max_workers=4) as uploader:
             for i in range(0, len(files_to_parse), chunk_size):
                 chunk = files_to_parse[i:i + chunk_size]
                 chunk_idx = (i // chunk_size) + 1
                 print(f"\n--- Processing Chunk {chunk_idx}/{total_chunks} ({len(chunk)} files) ---", flush=True)
 
                 parsed_metadata = {}
-                try:
-                    with ProcessPoolExecutor() as executor:
-                        tasks = {executor.submit(process_file_metadata, (item[0], item_type)): item for item in chunk}
-                        for future in as_completed(tasks):
-                            item = tasks[future]
-                            abspath, modified_at, size, file_name = item
-                            try:
-                                res_path, meta, error = future.result()
-                                if error:
-                                    print(f"  Error extracting metadata for {file_name}: {error}")
-                                    failed_files += 1
-                                else:
-                                    parsed_metadata[res_path] = (meta, modified_at, size)
-                            except Exception as e:
-                                print(f"  Exception extracting metadata for {file_name}: {e}")
-                                failed_files += 1
-                except Exception as e:
-                    print(f"  Warning: Parallel chunk processing error ({e}). Falling back to safe sequential processing for remaining items in chunk.")
-                    for item in chunk:
-                        abspath, modified_at, size, file_name = item
-                        if abspath not in parsed_metadata:
-                            try:
-                                res_path, meta, error = process_file_metadata((abspath, item_type))
-                                if error:
-                                    print(f"  Error extracting metadata for {file_name}: {error}")
-                                    failed_files += 1
-                                else:
-                                    parsed_metadata[res_path] = (meta, modified_at, size)
-                            except Exception as ex:
-                                print(f"  Skipping corrupt file {file_name}: {ex}")
-                                failed_files += 1
+                for item in chunk:
+                    abspath, modified_at, size, file_name = item
+                    file_pool = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        fut = file_pool.submit(process_file_metadata, (abspath, item_type))
+                        res_path, meta, error = fut.result(timeout=20.0)
+                        if error:
+                            print(f"  Error extracting metadata for {file_name}: {error}", flush=True)
+                            failed_files += 1
+                        else:
+                            parsed_metadata[res_path] = (meta, modified_at, size)
+                    except FuturesTimeoutError:
+                        print(f"  Timeout (20s) extracting metadata for {file_name}; using filename fallback.", flush=True)
+                        fallback_meta = {
+                            'file_name': file_name,
+                            'file_path': abspath,
+                            'file_size': size,
+                            'file_format': os.path.splitext(file_name)[1][1:].upper() or 'BOOK',
+                            'file_hash': '',
+                            'title': os.path.splitext(file_name)[0],
+                            'authors': 'Unknown Author',
+                            'item_type': item_type,
+                            'is_invalid': True,
+                            'has_drm': False,
+                        }
+                        parsed_metadata[abspath] = (fallback_meta, modified_at, size)
+                    except Exception as e:
+                        print(f"  Exception extracting metadata for {file_name}: {e}", flush=True)
+                        failed_files += 1
+                    finally:
+                        file_pool.shutdown(wait=False, cancel_futures=True)
 
                 if not parsed_metadata:
                     continue
@@ -368,14 +396,14 @@ def scan_directory(
                 for future in as_completed(upload_tasks):
                     path = upload_tasks[future]
                     try:
-                        abspath, modified_at, size, file_hash, success = future.result()
+                        abspath, modified_at, size, file_hash, success = future.result(timeout=35.0)
                         if success:
                             success_batch.append((abspath, modified_at, size, file_hash))
                             synced_files += 1
                         else:
                             failed_files += 1
                     except Exception as e:
-                        print(f"  Exception during upload: {e}")
+                        print(f"  Exception during upload: {e}", flush=True)
                         failed_files += 1
 
                 if success_batch:
@@ -383,16 +411,6 @@ def scan_directory(
 
     # 5. Deletion Pruning Phase (includes any files moved to quarantine during this run)
     print(f"Pruning deleted files from database...", flush=True)
-    norm_dir = os.path.abspath(directory)
-    dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
-    quarantined_set = set(quarantined_paths)
-    current_active_set = {item[0] for item in scan_items if item[0] not in quarantined_set}
-
-    deleted_paths = [
-        cached_path for cached_path in cache.keys()
-        if (cached_path == norm_dir or cached_path.startswith(dir_prefix))
-        and cached_path not in current_active_set
-    ]
     for q_path in quarantined_paths:
         if q_path not in deleted_paths:
             deleted_paths.append(q_path)

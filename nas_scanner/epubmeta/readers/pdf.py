@@ -99,7 +99,7 @@ class PdfReader(BaseReader):
         from ..exceptions import DrmProtectedError, InvalidDocumentError
         try:
             doc = pymupdf.open(self.file_path)
-            if doc.is_encrypted:
+            if doc.needs_pass and not doc.authenticate(""):
                 doc.close()
                 raise DrmProtectedError(f"PDF is encrypted / password protected: {self.file_path.name}")
             if len(doc) == 0:
@@ -115,10 +115,16 @@ class PdfReader(BaseReader):
         """Extract metadata from PDF Document Info and XMP stream."""
         doc = pymupdf.open(self.file_path)
         try:
+            from ..filename_parser import is_garbage_embedded_title, is_garbage_embedded_author
             meta = doc.metadata or {}
-            title = meta.get("title") or None
+            raw_title = (meta.get("title") or "").strip()
+            title = raw_title if (raw_title and not is_garbage_embedded_title(raw_title)) else None
             author_str = meta.get("author") or ""
-            authors = [a.strip() for a in re.split(r"[,;&]\s*", author_str) if a.strip()]
+            authors = [
+                a.strip()
+                for a in re.split(r"[,;&]\s*", author_str)
+                if a.strip() and not is_garbage_embedded_author(a.strip())
+            ]
 
             subject = meta.get("subject") or None  # Often used as summary / description in PDFs
             keywords_str = meta.get("keywords") or ""

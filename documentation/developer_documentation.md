@@ -107,6 +107,12 @@ MyLibrary/
    - Tails `scanner.log` and/or `epubmeta.log`.
 8. **`GET | POST /mylibrary/api/calibre/check-enriched/` (`CalibreCheckEnrichedAPIView`)**
    - Batch enrichment lookup for `calibre_moon_sync.py`. Matches Calibre books (`calibre_id`, `sha256`, `isbn`, `title`, `authors`, `file_name`) and Moon+ Reader cache filenames (`moon_filenames`) against `processed_files WHERE status = 'SUCCESS'`.
+9. **`GET | POST /mylibrary/api/wishlist/check/` (`WishlistCheckAPIView`)**
+   - Batch & single-book lookup used by the Chrome Extension (`chrome_wishlist_extension/`). Accepts `{ books: [{ key, asin, isbn, pub_year, edition, title, author, wishlist_name }] }`, expands ISBN-10 ↔ ISBN-13, checks `CatalogItem` and `scanner_state.db`, enforces strict ISBN/ASIN/Publication Year/Edition/Subtitle conflict detection to prevent same-title multi-edition false positives, and returns `in_library`, `matches`, `other_editions`, and prebuilt Anna's Archive ISBN & Title search URLs.
+10. **`POST /mylibrary/api/interesting/toggle/` (`ToggleInterestingAPIView`) & `POST /mylibrary/api/bad-metadata/toggle/` (`ToggleBadMetadataAPIView`)**
+    - Toggles `interesting_books` and `bad_metadata_books` state in `scanner_state.db` (`csrf_exempt`, `authentication_classes = []`).
+11. **`GET | POST /mylibrary/api/duplicates/` (`DuplicatesAPIView`)**
+    - Scans and resolves duplicate enriched files of the same format and verified content, moving redundant copies safely to `/books_bad/duplicates/`.
 
 ### B. OPDS 1.2 & Calibre Content Server Endpoints (`catalog/opds.py`)
 - `GET /mylibrary/opds/` (`OPDSRootView`) — Root OPDS 1.2 navigation catalog.

@@ -40,13 +40,18 @@ def normalize_cache_stem(file_path: Path) -> str:
 
 
 def normalize_title_author_key(title: Optional[str], author: Optional[str] = None) -> str:
-    """Create a normalized lookup key from title and primary author."""
+    """Create a normalized lookup key from title and primary author (only when neither is a DTP/placeholder slug)."""
     if not title:
+        return ""
+    from .filename_parser import is_garbage_embedded_title, is_garbage_embedded_author
+    if is_garbage_embedded_title(title):
         return ""
     norm_t = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
     if len(norm_t) < 3:
         return ""
-    norm_a = re.sub(r"[^a-z0-9]+", " ", (author or "").lower()).strip()
+    norm_a = "" if is_garbage_embedded_author(author) else re.sub(r"[^a-z0-9]+", " ", (author or "").lower()).strip()
+    if not norm_a:
+        return ""
     return f"{norm_t}||{norm_a}"
 
 

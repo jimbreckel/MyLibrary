@@ -446,30 +446,38 @@ def fetch_amazon_via_browser(
 
 
 def push_items_to_mylibrary(server_url: str, api_token: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Push the batch of Amazon Kindle / Kindle+ / Audible items & bookmarks to MyLibrary."""
+    """Push the batch of Amazon Kindle / Kindle+ / Audible items & bookmarks to MyLibrary in safe chunks."""
     url = f"{server_url.rstrip('/')}/api/sync/amazon/"
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
     }
     print(f"Syncing {len(items):,} Amazon/Kindle/Audible records to {url}...")
-    resp = requests.post(url, json={"items": items}, headers=headers, timeout=120)
-    if resp.status_code in (200, 201):
-        res_data = resp.json()
-        print("=" * 88)
-        print(" AMAZON LIBRARY & BOOKMARK SYNC COMPLETE")
-        print("=" * 88)
-        print(f" Total Synced             : {res_data.get('total_synced', len(items)):,}")
-        print(f" Purchased on Amazon      : {res_data.get('kindle_purchased', 0):,}")
-        print(f" Kindle+ (KU / Prime)     : {res_data.get('kindle_plus', 0):,}")
-        print(f" Audible Audiobooks       : {res_data.get('audible_total', 0):,}")
-        print(f" With Kindle Bookmarks    : {res_data.get('with_bookmarks', 0):,}")
-        print(f" Matched to NAS Books     : {res_data.get('matched_catalog_items', 0):,}")
-        print("=" * 88)
-        return res_data
-    else:
-        print(f"Error from server ({resp.status_code}): {resp.text[:500]}", file=sys.stderr)
-        return {"ok": False, "status_code": resp.status_code}
+    chunk_size = 500
+    last_res: Dict[str, Any] = {}
+
+    for start_idx in range(0, len(items), chunk_size):
+        chunk = items[start_idx : start_idx + chunk_size]
+        if len(items) > chunk_size:
+            print(f"  -> Uploading batch {start_idx + 1:,}..{start_idx + len(chunk):,} of {len(items):,}...")
+        resp = requests.post(url, json={"items": chunk}, headers=headers, timeout=120)
+        if resp.status_code in (200, 201):
+            last_res = resp.json()
+        else:
+            print(f"Error from server ({resp.status_code}): {resp.text[:500]}", file=sys.stderr)
+            return {"ok": False, "status_code": resp.status_code}
+
+    print("=" * 88)
+    print(" AMAZON LIBRARY & BOOKMARK SYNC COMPLETE")
+    print("=" * 88)
+    print(f" Total Synced             : {last_res.get('total_synced', len(items)):,}")
+    print(f" Purchased on Amazon      : {last_res.get('kindle_purchased', 0):,}")
+    print(f" Kindle+ (KU / Prime)     : {last_res.get('kindle_plus', 0):,}")
+    print(f" Audible Audiobooks       : {last_res.get('audible_total', 0):,}")
+    print(f" With Kindle Bookmarks    : {last_res.get('with_bookmarks', 0):,}")
+    print(f" Matched to NAS Books     : {last_res.get('matched_catalog_items', 0):,}")
+    print("=" * 88)
+    return last_res
 
 
 def sync_kindle_from_file(filepath: str, server_url: str, api_token: str) -> None:

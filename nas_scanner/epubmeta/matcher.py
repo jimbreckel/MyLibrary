@@ -138,7 +138,7 @@ def calculate_match_confidence(
     details: List[str] = []
 
     # 1. Gather all potential title clues
-    generic_titles = {"book", "document", "ebook", "untitled", "sample"}
+    generic_titles = {"book", "document", "ebook", "untitled", "sample", "unknown", "upload"}
     title_clues: List[str] = []
     if filename_info and filename_info.get("title"):
         ft = filename_info["title"].strip()

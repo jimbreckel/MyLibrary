@@ -37,9 +37,17 @@ NSMAP = {
 
 def _read_zip_member_lenient(z: zipfile.ZipFile, name_or_info) -> bytes:
     """Read a member from a ZipFile while ignoring bad CRC-32 checksums in legacy EPUBs."""
-    with z.open(name_or_info, "r") as zf:
-        zf._expected_crc = None
-        return zf.read()
+    try:
+        info = z.getinfo(name_or_info) if isinstance(name_or_info, str) else name_or_info
+        if getattr(info, "header_offset", 0) < 0:
+            raise zipfile.BadZipFile(
+                f"Truncated zip member {info.filename} (negative offset {info.header_offset})"
+            )
+        with z.open(info, "r") as zf:
+            zf._expected_crc = None
+            return zf.read()
+    except OSError as e:
+        raise zipfile.BadZipFile(f"Truncated or unreadable zip member ({e})") from e
 
 
 def _strip_html(html_bytes: bytes) -> str:
@@ -110,14 +118,52 @@ class EpubReader(BaseReader):
                 return name
         raise InvalidDocumentError(f"Could not locate OPF package document in {self.file_path.name}")
 
-    def read_metadata(self) -> BookMetadata:
-        """Read embedded metadata from the EPUB OPF document."""
-        with zipfile.ZipFile(self.file_path, "r") as z:
-            opf_path = self._get_opf_path(z)
-            opf_bytes = _read_zip_member_lenient(z, opf_path)
+    def _read_ncx_fallback_metadata(self, z: zipfile.ZipFile) -> BookMetadata:
+        """Fallback metadata extraction from toc.ncx when the OPF member is missing or truncated."""
+        title = None
+        authors: List[str] = []
+        for info in z.infolist():
+            if getattr(info, "header_offset", 0) < 0 or not info.filename.lower().endswith(".ncx"):
+                continue
+            try:
+                ncx_bytes = _read_zip_member_lenient(z, info)
+                parser = etree.XMLParser(recover=True, encoding="utf-8")
+                root = etree.fromstring(ncx_bytes, parser)
+                if root is None:
+                    continue
+                for el in root.iter():
+                    if not isinstance(el.tag, str):
+                        continue
+                    local = el.tag.split("}")[-1].lower()
+                    if local == "doctitle" and not title:
+                        txt = " ".join(t.strip() for t in el.itertext() if t and t.strip()).strip()
+                        if txt and not re.match(r"^untitled\b", txt, re.IGNORECASE):
+                            title = txt
+                    elif local == "docauthor":
+                        txt = " ".join(t.strip() for t in el.itertext() if t and t.strip()).strip()
+                        if txt and txt.lower() not in ("unknown", "unknown author") and txt not in authors:
+                            authors.append(txt)
+                if title or authors:
+                    break
+            except Exception:
+                continue
+        return BookMetadata(title=title, authors=authors, source="epub-embedded")
 
-        parser = etree.XMLParser(recover=True, encoding="utf-8")
-        root = etree.fromstring(opf_bytes, parser)
+    def read_metadata(self) -> BookMetadata:
+        """Read embedded metadata from the EPUB OPF document (or fallback to toc.ncx if OPF is truncated)."""
+        opf_bytes = None
+        with zipfile.ZipFile(self.file_path, "r") as z:
+            try:
+                opf_path = self._get_opf_path(z)
+                opf_bytes = _read_zip_member_lenient(z, opf_path)
+            except Exception as e:
+                logger.debug("OPF unreadable in %s (%s); trying NCX fallback", self.file_path.name, e)
+                return self._read_ncx_fallback_metadata(z)
+
+            parser = etree.XMLParser(recover=True, encoding="utf-8")
+            root = etree.fromstring(opf_bytes, parser) if opf_bytes else None
+            if root is None:
+                return self._read_ncx_fallback_metadata(z)
 
         metadata_el = root.find(f"{{{NS_OPF}}}metadata")
         if metadata_el is None:
@@ -137,10 +183,16 @@ class EpubReader(BaseReader):
             vals = get_all_text(tag)
             return vals[0] if vals else None
 
-        title = get_single_text("title")
-        if title and re.match(r"^untitled(?:\s+book)?(?:\s+\d+)?$", title.strip(), re.IGNORECASE):
+        raw_title = get_single_text("title")
+        title = raw_title
+        if title and re.match(r"^(?:untitled(?:\s+book)?(?:\s+\d+)?|upload|unknown(?:\s+title|\s+book|\s+author)?)$", title.strip(), re.IGNORECASE):
             title = None
         authors = get_all_text("creator")
+        if raw_title and raw_title.strip().lower() == "upload" and len(authors) == 1 and " " not in authors[0].strip():
+            # Broken uploader metadata where <dc:title> is 'upload' and <dc:creator> is the single-word book title
+            if not title:
+                title = authors[0].strip()
+            authors = []
         description = get_single_text("description")
         subjects = get_all_text("subject")
         publisher = get_single_text("publisher")
@@ -187,71 +239,101 @@ class EpubReader(BaseReader):
         )
 
     def extract_front_text(self, max_pages: int = 15) -> str:
-        """Extract text from the first several spine items in the EPUB."""
+        """Extract text from the first several spine items in the EPUB (falling back to readable members if OPF is truncated)."""
         with zipfile.ZipFile(self.file_path, "r") as z:
-            opf_path = self._get_opf_path(z)
-            opf_dir = os.path.dirname(opf_path)
-            opf_bytes = _read_zip_member_lenient(z, opf_path)
-
-            parser = etree.XMLParser(recover=True, encoding="utf-8")
-            root = etree.fromstring(opf_bytes, parser)
-
-            manifest = {}
-            for item in root.findall(f".//{{{NS_OPF}}}item"):
-                item_id = item.get("id")
-                href = item.get("href")
-                media_type = item.get("media-type")
-                if item_id and href:
-                    full_href = os.path.normpath(os.path.join(opf_dir, href)).replace("\\", "/")
-                    manifest[item_id] = (full_href, media_type)
-
-            spine_ids = []
-            for itemref in root.findall(f".//{{{NS_OPF}}}itemref"):
-                idref = itemref.get("idref")
-                if idref:
-                    spine_ids.append(idref)
-
-            # Gather priority spine items:
-            # 1. Front items (first max_pages)
-            # 2. Back items (last 6 items, where colophons/copyright frequently live, excluding promo/also-by/excerpt sections)
-            # 3. Any item matching copyright/colophon/imprint/title keywords
-            promo_exclude_kw = ("also", "other_books", "otherbooks", "teaser", "excerpt", "sample", "adcard", "promo", "backlist")
-            selected_sids = []
-            for sid in spine_ids[:max_pages]:
-                if sid not in selected_sids:
-                    href_low = manifest[sid][0].lower() if sid in manifest else ""
-                    if not any(pk in href_low or pk in sid.lower() for pk in promo_exclude_kw):
-                        selected_sids.append(sid)
-
-            for sid in spine_ids[-6:]:
-                if sid not in selected_sids:
-                    href_low = manifest[sid][0].lower() if sid in manifest else ""
-                    if not any(pk in href_low or pk in sid.lower() for pk in promo_exclude_kw):
-                        selected_sids.append(sid)
-
-            keywords = ("copy", "colophon", "imprint", "legal", "title", "edition", "about", "rights")
-            for sid in spine_ids:
-                if sid in manifest:
-                    href = manifest[sid][0].lower()
-                    if any(k in href or k in sid.lower() for k in keywords) and not any(pk in href or pk in sid.lower() for pk in promo_exclude_kw):
-                        if sid not in selected_sids:
-                            selected_sids.append(sid)
+            root = None
+            opf_dir = ""
+            try:
+                opf_path = self._get_opf_path(z)
+                opf_dir = os.path.dirname(opf_path)
+                opf_bytes = _read_zip_member_lenient(z, opf_path)
+                parser = etree.XMLParser(recover=True, encoding="utf-8")
+                root = etree.fromstring(opf_bytes, parser) if opf_bytes else None
+            except Exception as e:
+                logger.debug("OPF unreadable during extract_front_text for %s: %s", self.file_path.name, e)
 
             texts = []
-            for sid in selected_sids:
-                if sid in manifest:
-                    href, mtype = manifest[sid]
-                    if href in z.namelist() and ("xhtml" in mtype or "html" in mtype or "xml" in mtype):
-                        try:
-                            content = _read_zip_member_lenient(z, href)
-                            plain = _strip_html(content)
-                            if plain:
-                                head_low = plain.strip()[:120].lower()
-                                if re.match(r"^(?:also\s+by|other\s+books\s+by|more\s+from|books\s+by)\b", head_low):
-                                    continue
-                                texts.append(plain)
-                        except Exception as e:
-                            logger.debug("Failed reading spine item %s: %s", href, e)
+            promo_exclude_kw = ("also", "other_books", "otherbooks", "teaser", "excerpt", "sample", "adcard", "promo", "backlist")
+            keywords = ("copy", "colophon", "imprint", "legal", "title", "edition", "about", "rights")
+
+            if root is not None:
+                manifest = {}
+                for item in root.findall(f".//{{{NS_OPF}}}item"):
+                    item_id = item.get("id")
+                    href = item.get("href")
+                    media_type = item.get("media-type") or ""
+                    if item_id and href:
+                        full_href = os.path.normpath(os.path.join(opf_dir, href)).replace("\\", "/")
+                        manifest[item_id] = (full_href, media_type)
+
+                spine_ids = []
+                for itemref in root.findall(f".//{{{NS_OPF}}}itemref"):
+                    idref = itemref.get("idref")
+                    if idref:
+                        spine_ids.append(idref)
+
+                selected_sids = []
+                for sid in spine_ids[:max_pages]:
+                    if sid not in selected_sids:
+                        href_low = manifest[sid][0].lower() if sid in manifest else ""
+                        if not any(pk in href_low or pk in sid.lower() for pk in promo_exclude_kw):
+                            selected_sids.append(sid)
+
+                for sid in spine_ids[-6:]:
+                    if sid not in selected_sids:
+                        href_low = manifest[sid][0].lower() if sid in manifest else ""
+                        if not any(pk in href_low or pk in sid.lower() for pk in promo_exclude_kw):
+                            selected_sids.append(sid)
+
+                for sid in spine_ids:
+                    if sid in manifest:
+                        href = manifest[sid][0].lower()
+                        if any(k in href or k in sid.lower() for k in keywords) and not any(pk in href or pk in sid.lower() for pk in promo_exclude_kw):
+                            if sid not in selected_sids:
+                                selected_sids.append(sid)
+
+                namelist_set = set(z.namelist())
+                for sid in selected_sids:
+                    if sid in manifest:
+                        href, mtype = manifest[sid]
+                        if href in namelist_set and ("xhtml" in mtype or "html" in mtype or "xml" in mtype):
+                            try:
+                                content = _read_zip_member_lenient(z, href)
+                                plain = _strip_html(content)
+                                if plain:
+                                    head_low = plain.strip()[:120].lower()
+                                    if re.match(r"^(?:also\s+by|other\s+books\s+by|more\s+from|books\s+by)\b", head_low):
+                                        continue
+                                    texts.append(plain)
+                            except Exception as e:
+                                logger.debug("Failed reading spine item %s: %s", href, e)
+
+            # Fallback if OPF was truncated or all selected spine items were in a truncated portion of the archive
+            if not texts:
+                readable_infos = [
+                    info for info in z.infolist()
+                    if getattr(info, "header_offset", 0) >= 0
+                    and info.filename.lower().endswith((".xhtml", ".html", ".htm", ".ncx"))
+                    and not any(pk in info.filename.lower() for pk in promo_exclude_kw)
+                ]
+                priority_infos = [
+                    info for info in readable_infos
+                    if any(k in info.filename.lower() for k in keywords + ("toc",))
+                ]
+                other_infos = [info for info in readable_infos if info not in priority_infos]
+                cand_infos = priority_infos + other_infos[:max_pages] + other_infos[-4:]
+                seen_names = set()
+                for info in cand_infos:
+                    if info.filename in seen_names:
+                        continue
+                    seen_names.add(info.filename)
+                    try:
+                        content = _read_zip_member_lenient(z, info)
+                        plain = _strip_html(content)
+                        if plain:
+                            texts.append(plain)
+                    except Exception:
+                        continue
 
             return "\n\n".join(texts)
 

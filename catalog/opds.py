@@ -160,16 +160,27 @@ def _resolve_physical_file_path(nas_path: str) -> Optional[Path]:
     allowed_roots = [
         Path('/books'),
         Path('/audiobooks'),
+        Path('/toMags'),
         Path('/volume1/common/Media/Books'),
         Path('/volume1/common/Media/Audiobooks'),
+        Path('/volume1/common/Media/toMags'),
+        Path(r'U:\Media\Books'),
+        Path(r'U:\Media\Audiobooks'),
+        Path(r'U:\Media\toMags'),
     ]
     candidates = [Path(raw)]
     if raw.startswith('/books/'):
         rel = raw[len('/books/'):]
         candidates.append(Path('/volume1/common/Media/Books') / rel)
+        candidates.append(Path(r'U:\Media\Books') / rel)
     elif raw.startswith('/audiobooks/'):
         rel = raw[len('/audiobooks/'):]
         candidates.append(Path('/volume1/common/Media/Audiobooks') / rel)
+        candidates.append(Path(r'U:\Media\Audiobooks') / rel)
+    elif raw.startswith('/toMags/'):
+        rel = raw[len('/toMags/'):]
+        candidates.append(Path('/volume1/common/Media/toMags') / rel)
+        candidates.append(Path(r'U:\Media\toMags') / rel)
 
     for cand in candidates:
         try:
@@ -234,6 +245,22 @@ def _resolve_physical_file_path(nas_path: str) -> Optional[Path]:
             except Exception:
                 continue
 
+    # Fallback 2: check if a `/books/...` file was moved to `/toMags/<filename>`
+    if fname and raw.startswith('/books/'):
+        tomags_dir = _get_tomags_dir()
+        if tomags_dir:
+            tm_cand = tomags_dir / fname
+            try:
+                if tm_cand.exists() and tm_cand.is_file():
+                    resolved_tm = tm_cand.resolve()
+                    try:
+                        FileLocation.objects.filter(file_path=raw).update(file_path=f'/toMags/{fname}')
+                    except Exception:
+                        pass
+                    return resolved_tm
+            except Exception:
+                pass
+
     return None
 
 
@@ -256,6 +283,44 @@ def _get_moon_cache_dir() -> Optional[Path]:
     return None
 
 
+def _get_tags_cache_disk_paths() -> List[Path]:
+    paths: List[Path] = []
+    for d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if d.exists() and d.is_dir():
+                paths.append(d / '.tags_shelf_cache.json')
+                break
+        except Exception:
+            continue
+    paths.append(Path('/tmp/mylibrary_tags_shelf_cache.json'))
+    return paths
+
+
+def _load_tags_shelf_cache_from_disk() -> bool:
+    for p in _get_tags_cache_disk_paths():
+        try:
+            if not p.exists() or p.stat().st_size > 15 * 1024 * 1024:
+                continue
+            data = json.loads(p.read_text(encoding='utf-8'))
+            tag_counts = [tuple(x) for x in (data.get('tag_counts') or ())]
+            if not tag_counts:
+                continue
+            folder_counts = [tuple(x) for x in (data.get('folder_counts') or ())]
+            _TAGS_SHELF_CACHE['expires_at'] = time.monotonic() + 1800.0
+            _TAGS_SHELF_CACHE['tag_counts'] = tag_counts
+            _TAGS_SHELF_CACHE['tag_to_paths'] = data.get('tag_to_paths') or {}
+            _TAGS_SHELF_CACHE['tag_to_titles'] = data.get('tag_to_titles') or {}
+            _TAGS_SHELF_CACHE['path_to_tags'] = data.get('path_to_tags') or {}
+            _TAGS_SHELF_CACHE['folder_counts'] = folder_counts
+            _TAGS_SHELF_CACHE['folder_to_paths'] = data.get('folder_to_paths') or {}
+            _TAGS_SHELF_CACHE['folder_to_titles'] = data.get('folder_to_titles') or {}
+            _TAGS_SHELF_CACHE['_refreshing'] = False
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def get_enriched_tags_and_folders_index() -> Dict[str, Any]:
     """
     Build and cache (for 1800s with stale-while-revalidate) the dynamic virtual bookshelves of:
@@ -271,6 +336,9 @@ def get_enriched_tags_and_folders_index() -> Dict[str, Any]:
         _TAGS_SHELF_CACHE['expires_at'] = now + 1800.0
         import threading
         threading.Thread(target=_rebuild_tags_shelf_cache, daemon=True).start()
+        return _TAGS_SHELF_CACHE
+
+    if _load_tags_shelf_cache_from_disk():
         return _TAGS_SHELF_CACHE
 
     return _rebuild_tags_shelf_cache()
@@ -362,6 +430,21 @@ def _rebuild_tags_shelf_cache() -> Dict[str, Any]:
     _TAGS_SHELF_CACHE['folder_to_paths'] = folder_to_paths
     _TAGS_SHELF_CACHE['folder_to_titles'] = folder_to_titles
     _TAGS_SHELF_CACHE['_refreshing'] = False
+    try:
+        raw_tags_cache = json.dumps({
+            'tag_counts': tag_counts[:500],
+            'folder_counts': folder_counts,
+            'path_to_tags': path_to_tags,
+        }, ensure_ascii=False)
+        for p in _get_tags_cache_disk_paths():
+            try:
+                tmp_p = p.with_suffix(f'.tmp.{os.getpid()}')
+                tmp_p.write_text(raw_tags_cache, encoding='utf-8')
+                tmp_p.replace(p)
+            except Exception:
+                continue
+    except Exception:
+        pass
     return _TAGS_SHELF_CACHE
 
 
@@ -376,10 +459,28 @@ def get_file_tags(file_path: str) -> List[str]:
     p2t = idx.get('path_to_tags', {})
     if norm in p2t:
         return p2t[norm]
-    phys = _resolve_physical_file_path(norm)
-    if phys and str(phys) in p2t:
-        return p2t[str(phys)]
+    if norm.startswith('/books/'):
+        alt = '/volume1/common/Media/Books/' + norm[len('/books/'):]
+        if alt in p2t:
+            return p2t[alt]
+    elif norm.startswith('/volume1/common/Media/Books/'):
+        alt = '/books/' + norm[len('/volume1/common/Media/Books/'):]
+        if alt in p2t:
+            return p2t[alt]
     return []
+
+
+def _get_bookmarked_cache_disk_paths() -> List[Path]:
+    paths: List[Path] = []
+    for d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if d.exists() and d.is_dir():
+                paths.append(d / '.bookmarked_shelf_cache.json')
+                break
+        except Exception:
+            continue
+    paths.append(Path('/tmp/mylibrary_bookmarked_shelf_cache.json'))
+    return paths
 
 
 def get_dynamic_bookmarked_shelf() -> Dict[str, Any]:
@@ -410,6 +511,32 @@ def get_dynamic_bookmarked_shelf() -> Dict[str, Any]:
         and dir_mtime == _BOOKMARKED_SHELF_CACHE['dir_mtime']
     ):
         return _BOOKMARKED_SHELF_CACHE
+
+    if not _BOOKMARKED_SHELF_CACHE['item_ids']:
+        import uuid as _uuid
+        from types import SimpleNamespace as _NS
+        for p in _get_bookmarked_cache_disk_paths():
+            try:
+                if not p.exists():
+                    continue
+                data = json.loads(p.read_text(encoding='utf-8'))
+                if float(data.get('dir_mtime') or -1.0) != dir_mtime:
+                    continue
+                raw_ids = data.get('item_ids') or []
+                moon_meta_by_id = data.get('moon_meta_by_id') or {}
+                if not raw_ids or not moon_meta_by_id:
+                    continue
+                item_ids = [_uuid.UUID(str(x)) for x in raw_ids]
+                items_with_meta = [(_NS(id=cid), moon_meta_by_id.get(str(cid), {})) for cid in item_ids]
+                _BOOKMARKED_SHELF_CACHE['expires_at'] = now + 1800.0
+                _BOOKMARKED_SHELF_CACHE['dir_mtime'] = dir_mtime
+                _BOOKMARKED_SHELF_CACHE['items_with_meta'] = items_with_meta
+                _BOOKMARKED_SHELF_CACHE['item_ids'] = item_ids
+                _BOOKMARKED_SHELF_CACHE['moon_meta_by_id'] = moon_meta_by_id
+                _BOOKMARKED_SHELF_CACHE['total_moon_stems'] = int(data.get('total_moon_stems') or len(item_ids))
+                return _BOOKMARKED_SHELF_CACHE
+            except Exception:
+                continue
 
     # 1. Scan all .po and .an files in Moon+ WebDAV Cache
     stems: Dict[str, Dict[str, Any]] = {}
@@ -667,6 +794,22 @@ def get_dynamic_bookmarked_shelf() -> Dict[str, Any]:
     _BOOKMARKED_SHELF_CACHE['item_ids'] = item_ids
     _BOOKMARKED_SHELF_CACHE['moon_meta_by_id'] = moon_meta_by_id
     _BOOKMARKED_SHELF_CACHE['total_moon_stems'] = len(stems)
+    try:
+        raw_bm = json.dumps({
+            'dir_mtime': dir_mtime,
+            'item_ids': [str(x) for x in item_ids],
+            'moon_meta_by_id': moon_meta_by_id,
+            'total_moon_stems': len(stems),
+        }, ensure_ascii=False)
+        for p in _get_bookmarked_cache_disk_paths():
+            try:
+                tmp_p = p.with_suffix(f'.tmp.{os.getpid()}')
+                tmp_p.write_text(raw_bm, encoding='utf-8')
+                tmp_p.replace(p)
+            except Exception:
+                continue
+    except Exception:
+        pass
     return _BOOKMARKED_SHELF_CACHE
 
 
@@ -1076,6 +1219,7 @@ def _sync_incremental_enriched_changes() -> None:
         try:
             new_cids = list(
                 FileLocation.objects.filter(file_path__in=new_success_paths)
+                .order_by()
                 .values_list('catalog_item_id', flat=True)
             )
             for cid in new_cids:
@@ -1106,6 +1250,7 @@ def _sync_incremental_enriched_changes() -> None:
         try:
             ign_cids = list(
                 FileLocation.objects.filter(file_path__in=new_ignored_paths)
+                .order_by()
                 .values_list('catalog_item_id', flat=True)
             )
             for cid in ign_cids:
@@ -1130,6 +1275,7 @@ def _sync_incremental_enriched_changes() -> None:
         try:
             rev_cids = list(
                 FileLocation.objects.filter(file_path__in=new_review_paths)
+                .order_by()
                 .values_list('catalog_item_id', flat=True)
             )
             for cid in rev_cids:
@@ -1143,6 +1289,7 @@ def _sync_incremental_enriched_changes() -> None:
         try:
             s_cids = list(
                 FileLocation.objects.filter(file_path__in=new_strict_review_paths)
+                .order_by()
                 .values_list('catalog_item_id', flat=True)
             )
             for cid in s_cids:
@@ -1156,6 +1303,7 @@ def _sync_incremental_enriched_changes() -> None:
         try:
             ex_cids = list(
                 FileLocation.objects.filter(file_path__in=new_excluded_paths)
+                .order_by()
                 .values_list('catalog_item_id', flat=True)
             )
             for cid in ex_cids:
@@ -1167,6 +1315,119 @@ def _sync_incremental_enriched_changes() -> None:
 
     _ENRICHED_PATHS_CACHE['db_mtime'] = cur_mtime
     _ENRICHED_PATHS_CACHE['last_updated_at'] = max_ts
+
+
+def _get_enriched_cache_disk_paths() -> List[Path]:
+    paths: List[Path] = []
+    for d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if d.exists() and d.is_dir():
+                paths.append(d / '.enriched_ids_cache.json')
+                break
+        except Exception:
+            continue
+    paths.append(Path('/tmp/mylibrary_enriched_ids_cache.json'))
+    return paths
+
+
+def _save_enriched_cache_to_disk() -> None:
+    try:
+        canon_paths = [
+            p for p in (_ENRICHED_PATHS_CACHE.get('paths_set') or ())
+            if not str(p).startswith('/volume1/common/Media/Books/')
+        ]
+        enr_set = _ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set(_ENRICHED_PATHS_CACHE.get('enriched_item_ids') or ())
+        excl_set = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set') or set(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids') or ())
+        non_success_only = [str(x) for x in (excl_set - enr_set)]
+        payload = {
+            'db_mtime': _ENRICHED_PATHS_CACHE.get('db_mtime', 0.0),
+            'last_updated_at': _ENRICHED_PATHS_CACHE.get('last_updated_at', ''),
+            'paths_list': canon_paths,
+            'enriched_item_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('enriched_item_ids') or ())],
+            'needs_review_item_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('needs_review_item_ids') or ())],
+            'strict_in_review_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or ())],
+            'non_success_item_ids': non_success_only,
+        }
+        raw = json.dumps(payload, ensure_ascii=False)
+        for p in _get_enriched_cache_disk_paths():
+            try:
+                tmp_p = p.with_suffix(f'.tmp.{os.getpid()}')
+                tmp_p.write_text(raw, encoding='utf-8')
+                tmp_p.replace(p)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _load_enriched_cache_from_disk() -> bool:
+    import uuid as _uuid
+    for p in _get_enriched_cache_disk_paths():
+        try:
+            if not p.exists():
+                continue
+            if p.stat().st_size > 128 * 1024 * 1024:
+                continue
+            data = json.loads(p.read_text(encoding='utf-8'))
+            raw_paths = data.get('paths_list') or []
+            if len(raw_paths) < 100:
+                continue
+            paths_set = set()
+            for p_str in raw_paths:
+                paths_set.add(p_str)
+                if p_str.startswith('/books/'):
+                    paths_set.add('/volume1/common/Media/Books/' + p_str[len('/books/'):])
+                elif p_str.startswith('/volume1/common/Media/Books/'):
+                    paths_set.add('/books/' + p_str[len('/volume1/common/Media/Books/'):])
+            enr_ids = [_uuid.UUID(str(x)) for x in (data.get('enriched_item_ids') or ())]
+            rev_ids = [_uuid.UUID(str(x)) for x in (data.get('needs_review_item_ids') or ())]
+            strict_rev_ids = [_uuid.UUID(str(x)) for x in (data.get('strict_in_review_ids') or ())]
+            if 'non_success_item_ids' in data:
+                non_succ_ids = [_uuid.UUID(str(x)) for x in (data.get('non_success_item_ids') or ())]
+                excl_set = set(enr_ids) | set(non_succ_ids) | set(rev_ids)
+                excl_ids = list(excl_set)
+            else:
+                excl_raw = [_uuid.UUID(str(x)) for x in (data.get('excluded_from_needs_enriching_ids') or ())]
+                excl_set = set(enr_ids) | set(excl_raw) | set(rev_ids)
+                excl_ids = list(excl_set)
+            _ENRICHED_PATHS_CACHE['db_mtime'] = float(data.get('db_mtime') or 0.0)
+            _ENRICHED_PATHS_CACHE['last_updated_at'] = str(data.get('last_updated_at') or '')
+            _ENRICHED_PATHS_CACHE['paths_set'] = paths_set
+            _ENRICHED_PATHS_CACHE['non_success_paths_set'] = set()
+            _ENRICHED_PATHS_CACHE['status_by_path'] = {}
+            _ENRICHED_PATHS_CACHE['enriched_item_ids'] = enr_ids
+            _ENRICHED_PATHS_CACHE['enriched_item_ids_set'] = set(enr_ids)
+            _ENRICHED_PATHS_CACHE['needs_review_item_ids'] = rev_ids
+            _ENRICHED_PATHS_CACHE['needs_review_item_ids_set'] = set(rev_ids)
+            _ENRICHED_PATHS_CACHE['strict_in_review_ids'] = strict_rev_ids
+            _ENRICHED_PATHS_CACHE['strict_in_review_ids_set'] = set(strict_rev_ids)
+            _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'] = excl_ids
+            _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'] = excl_set
+            _ENRICHED_PATHS_CACHE['expires_at'] = time.monotonic() + 3600.0
+            _ENRICHED_PATHS_CACHE['_refreshing'] = False
+            _sync_incremental_enriched_changes()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+_FILELOCATION_PATH_INDEX_READY = False
+
+
+def _ensure_filelocation_path_index() -> None:
+    global _FILELOCATION_PATH_INDEX_READY
+    if _FILELOCATION_PATH_INDEX_READY:
+        return
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_catalog_filelocation_file_path ON catalog_filelocation (file_path)"
+            )
+        _FILELOCATION_PATH_INDEX_READY = True
+    except Exception:
+        _FILELOCATION_PATH_INDEX_READY = True
 
 
 def get_enriched_paths_set() -> set:
@@ -1188,15 +1449,18 @@ def get_enriched_paths_set() -> set:
         threading.Thread(target=_rebuild_enriched_index_cache, daemon=True).start()
         return _ENRICHED_PATHS_CACHE['paths_set']
 
+    if _load_enriched_cache_from_disk():
+        return _ENRICHED_PATHS_CACHE['paths_set']
+
     _rebuild_enriched_index_cache()
     return _ENRICHED_PATHS_CACHE['paths_set']
 
 
 def _rebuild_enriched_index_cache() -> None:
+    _ensure_filelocation_path_index()
     pg_enabled = is_postgres_scanner_enabled()
     db_path = _get_scanner_db_path()
     paths_set: set = set()
-    status_by_path: Dict[str, Dict[str, Any]] = {}
     review_paths: List[str] = []
     strict_review_paths: List[str] = []
     non_success_paths: List[str] = []
@@ -1240,29 +1504,15 @@ def _rebuild_enriched_index_cache() -> None:
             diag_rows = []
             try:
                 diag_rows = conn.execute(
-                    """
-                    SELECT file_path, status, error_message,
-                           title, author, isbn,
-                           orig_title, orig_author, orig_isbn,
-                           match_confidence, original_metadata_json, updated_metadata_json
-                    FROM processed_files
-                    WHERE status != 'SUCCESS'
-                    ORDER BY updated_at DESC
-                    """
+                    "SELECT file_path, status FROM processed_files WHERE status != 'SUCCESS' ORDER BY updated_at DESC"
                 ).fetchall()
             except Exception:
-                try:
-                    diag_rows = conn.execute(
-                        "SELECT file_path, status, error_message FROM processed_files WHERE status != 'SUCCESS'"
-                    ).fetchall()
-                except Exception:
-                    diag_rows = []
+                diag_rows = []
             conn.close()
             for r in diag_rows:
                 if r and r[0]:
                     p_str = str(r[0])
                     st_val = str(r[1] or '').upper()
-                    err_val = str(r[2] or '')
                     if p_str.startswith('/volume1/common/Media/Books/'):
                         alt_p = '/books/' + p_str[len('/volume1/common/Media/Books/'):]
                     elif p_str.startswith('/books/'):
@@ -1273,62 +1523,6 @@ def _rebuild_enriched_index_cache() -> None:
                         non_success_paths.append(p_str)
                         if alt_p:
                             non_success_paths.append(alt_p)
-                    if st_val in ('NEEDS_REVIEW', 'FAILED', 'NOT_FOUND', 'NO_ISBN', 'HAS_DRM', 'QUARANTINED'):
-                        orig_m = {}
-                        upd_m = {}
-                        if len(r) > 10 and r[10]:
-                            try:
-                                orig_m = json.loads(r[10]) or {}
-                            except Exception:
-                                orig_m = {}
-                        if len(r) > 11 and r[11]:
-                            try:
-                                upd_m = json.loads(r[11]) or {}
-                            except Exception:
-                                upd_m = {}
-                        conf_pct = None
-                        if len(r) > 9 and r[9] is not None:
-                            try:
-                                raw_c = float(r[9])
-                                conf_pct = int(round(raw_c * 100)) if raw_c <= 1.0 else int(round(raw_c))
-                            except Exception:
-                                conf_pct = None
-                        cand_auth_list = upd_m.get('authors')
-                        cand_auth_str = (
-                            ', '.join(str(a) for a in cand_auth_list if a)
-                            if isinstance(cand_auth_list, list)
-                            else str(cand_auth_list or '')
-                        )
-                        orig_auth_list = orig_m.get('authors')
-                        orig_auth_str = (
-                            ', '.join(str(a) for a in orig_auth_list if a)
-                            if isinstance(orig_auth_list, list)
-                            else str(orig_auth_list or '')
-                        )
-                        diag_obj = {
-                            'status': st_val,
-                            'error': err_val,
-                            'message': err_val,
-                            'file_path': p_str,
-                            'confidence': conf_pct,
-                            'candidate_title': str((r[3] if len(r) > 3 else '') or upd_m.get('title') or ''),
-                            'candidate_authors': str((r[4] if len(r) > 4 else '') or cand_auth_str or ''),
-                            'candidate_isbn': str((r[5] if len(r) > 5 else '') or upd_m.get('isbn13') or upd_m.get('isbn10') or ''),
-                            'candidate_publisher': str(upd_m.get('publisher') or ''),
-                            'candidate_pub_date': str(upd_m.get('published_date') or ''),
-                            'candidate_description': _strip_html(str(upd_m.get('description') or '')),
-                            'candidate_cover': str(upd_m.get('cover_url') or ''),
-                            'orig_title': str((r[6] if len(r) > 6 else '') or orig_m.get('title') or ''),
-                            'orig_authors': str((r[7] if len(r) > 7 else '') or orig_auth_str or ''),
-                            'orig_isbn': str((r[8] if len(r) > 8 else '') or orig_m.get('isbn13') or orig_m.get('isbn10') or ''),
-                            'orig_publisher': str(orig_m.get('publisher') or ''),
-                            'orig_pub_date': str(orig_m.get('published_date') or ''),
-                            'orig_description': _strip_html(str(orig_m.get('description') or '')),
-                            'orig_cover': str(orig_m.get('cover_url') or ''),
-                        }
-                        status_by_path[p_str] = diag_obj
-                        if alt_p:
-                            status_by_path[alt_p] = diag_obj
                     if st_val in ('NEEDS_REVIEW', 'FAILED', 'NOT_FOUND', 'NO_ISBN') and p_str not in paths_set:
                         review_paths.append(p_str)
                         if alt_p:
@@ -1340,64 +1534,51 @@ def _rebuild_enriched_index_cache() -> None:
         except Exception:
             pass
 
-    enr_ids_set: set = set()
-    if paths_set:
+    all_lookup_paths = list(paths_set | set(non_success_paths))
+    path_to_cids: Dict[str, List[Any]] = {}
+    if all_lookup_paths:
         try:
-            enr_list = list(paths_set)
-            for i in range(0, len(enr_list), 4000):
-                chunk = enr_list[i:i + 4000]
-                c_ids = (
+            for i in range(0, len(all_lookup_paths), 4000):
+                chunk = all_lookup_paths[i:i + 4000]
+                rows_loc = (
                     FileLocation.objects.filter(file_path__in=chunk)
-                    .values_list('catalog_item_id', flat=True)
+                    .order_by()
+                    .values_list('file_path', 'catalog_item_id')
                 )
-                enr_ids_set.update(c_ids)
+                for fp_val, cid_val in rows_loc:
+                    if fp_val and cid_val:
+                        path_to_cids.setdefault(fp_val, []).append(cid_val)
         except Exception:
             pass
+
+    enr_ids_set: set = set()
+    for p in paths_set:
+        c_list = path_to_cids.get(p)
+        if c_list:
+            enr_ids_set.update(c_list)
     enr_ids = list(enr_ids_set)
 
     strict_rev_ids_set: set = set()
-    if strict_review_paths:
-        try:
-            for i in range(0, len(strict_review_paths), 4000):
-                chunk = strict_review_paths[i:i + 4000]
-                c_ids = (
-                    FileLocation.objects.filter(file_path__in=chunk)
-                    .values_list('catalog_item_id', flat=True)
-                )
-                strict_rev_ids_set.update(c_ids)
-            strict_rev_ids_set -= enr_ids_set
-        except Exception:
-            strict_rev_ids_set = set()
+    for p in strict_review_paths:
+        c_list = path_to_cids.get(p)
+        if c_list:
+            strict_rev_ids_set.update(c_list)
+    strict_rev_ids_set -= enr_ids_set
     strict_rev_ids = list(strict_rev_ids_set)
 
-    rev_ids: List[Any] = []
-    if review_paths:
-        try:
-            raw_rev_ids: set = set()
-            for i in range(0, len(review_paths), 4000):
-                chunk = review_paths[i:i + 4000]
-                c_ids = (
-                    FileLocation.objects.filter(file_path__in=chunk)
-                    .values_list('catalog_item_id', flat=True)
-                )
-                raw_rev_ids.update(c_ids)
-            raw_rev_ids -= enr_ids_set
-            rev_ids = list(strict_rev_ids) + [cid for cid in raw_rev_ids if cid not in strict_rev_ids_set]
-        except Exception:
-            rev_ids = []
+    raw_rev_ids: set = set()
+    for p in review_paths:
+        c_list = path_to_cids.get(p)
+        if c_list:
+            raw_rev_ids.update(c_list)
+    raw_rev_ids -= enr_ids_set
+    rev_ids: List[Any] = list(strict_rev_ids) + [cid for cid in raw_rev_ids if cid not in strict_rev_ids_set]
 
     non_success_ids_set: set = set()
-    if non_success_paths:
-        try:
-            for i in range(0, len(non_success_paths), 4000):
-                chunk = non_success_paths[i:i + 4000]
-                c_ids = (
-                    FileLocation.objects.filter(file_path__in=chunk)
-                    .values_list('catalog_item_id', flat=True)
-                )
-                non_success_ids_set.update(c_ids)
-        except Exception:
-            non_success_ids_set = set()
+    for p in non_success_paths:
+        c_list = path_to_cids.get(p)
+        if c_list:
+            non_success_ids_set.update(c_list)
 
     excl_ids_set = enr_ids_set | non_success_ids_set
     excl_ids = list(excl_ids_set)
@@ -1405,7 +1586,9 @@ def _rebuild_enriched_index_cache() -> None:
     _ENRICHED_PATHS_CACHE['db_mtime'] = cur_mtime
     _ENRICHED_PATHS_CACHE['last_updated_at'] = max_ts
     _ENRICHED_PATHS_CACHE['paths_set'] = paths_set
-    _ENRICHED_PATHS_CACHE['status_by_path'] = status_by_path
+    _ENRICHED_PATHS_CACHE['non_success_paths_set'] = set(non_success_paths)
+    if not isinstance(_ENRICHED_PATHS_CACHE.get('status_by_path'), dict) or len(_ENRICHED_PATHS_CACHE['status_by_path']) > 400:
+        _ENRICHED_PATHS_CACHE['status_by_path'] = {}
     _ENRICHED_PATHS_CACHE['enriched_item_ids'] = enr_ids
     _ENRICHED_PATHS_CACHE['enriched_item_ids_set'] = enr_ids_set
     _ENRICHED_PATHS_CACHE['needs_review_item_ids'] = rev_ids
@@ -1416,6 +1599,7 @@ def _rebuild_enriched_index_cache() -> None:
     _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'] = excl_ids_set
     _ENRICHED_PATHS_CACHE['expires_at'] = time.monotonic() + 3600.0
     _ENRICHED_PATHS_CACHE['_refreshing'] = False
+    _save_enriched_cache_to_disk()
     try:
         summary_file = Path('/tmp/mylibrary_summary_counts.json')
         existing = {}
@@ -1430,13 +1614,14 @@ def _rebuild_enriched_index_cache() -> None:
         pass
 
 
-def get_enriched_item_ids_index() -> Dict[str, List[Any]]:
+def get_enriched_item_ids_index() -> Dict[str, Any]:
     """
     Return cached lists of CatalogItem UUIDs for:
       - `enriched_ids`: items with at least one file marked `status = 'SUCCESS'` in `scanner_state.db`
       - `needs_review_ids`: items with a file marked `status IN ('NEEDS_REVIEW', 'FAILED', 'NOT_FOUND', 'NO_ISBN')`
       - `strict_in_review_ids`: items with `status = 'NEEDS_REVIEW'` (ordered first in In Review)
       - `excluded_from_needs_enriching_ids`: all items already in `processed_files` (`SUCCESS` + `NEEDS_REVIEW` + `IGNORED` + etc.)
+      - `excluded_from_needs_enriching_ids_set`: set of UUIDs for O(1) Python filtering
     """
     get_enriched_paths_set()
     if (
@@ -1449,6 +1634,7 @@ def get_enriched_item_ids_index() -> Dict[str, List[Any]]:
             'needs_review_ids': _ENRICHED_PATHS_CACHE['needs_review_item_ids'],
             'strict_in_review_ids': _ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or [],
             'excluded_from_needs_enriching_ids': _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'],
+            'excluded_from_needs_enriching_ids_set': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set') or set(),
         }
     _rebuild_enriched_index_cache()
     return {
@@ -1456,36 +1642,164 @@ def get_enriched_item_ids_index() -> Dict[str, List[Any]]:
         'needs_review_ids': _ENRICHED_PATHS_CACHE.get('needs_review_item_ids') or [],
         'strict_in_review_ids': _ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or [],
         'excluded_from_needs_enriching_ids': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids') or [],
+        'excluded_from_needs_enriching_ids_set': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set') or set(),
     }
 
 
 def get_file_enrich_diagnostic(file_path: str) -> Optional[Dict[str, str]]:
     """
-    Return `{'status': str, 'error': str}` if `file_path` has a non-SUCCESS entry
+    Return `{'status': str, 'error': str, ...}` if `file_path` has a non-SUCCESS entry
     (`FAILED`, `NEEDS_REVIEW`, `NOT_FOUND`, `NO_ISBN`, `HAS_DRM`, `QUARANTINED`) in `scanner_state.db`.
+    Fetches on-demand for only the requested file_path and caches up to 400 recent items in memory.
     """
     if not file_path:
         return None
     norm = str(file_path).strip().replace('\\', '/')
     get_enriched_paths_set()
-    s_map = _ENRICHED_PATHS_CACHE.get('status_by_path') or {}
+    s_map = _ENRICHED_PATHS_CACHE.get('status_by_path')
+    if not isinstance(s_map, dict):
+        s_map = {}
+        _ENRICHED_PATHS_CACHE['status_by_path'] = s_map
     if norm in s_map:
         return s_map[norm]
+    alt = None
     if norm.startswith('/books/'):
         alt = '/volume1/common/Media/Books/' + norm[len('/books/'):]
         if alt in s_map:
             return s_map[alt]
-    return None
+    elif norm.startswith('/volume1/common/Media/Books/'):
+        alt = '/books/' + norm[len('/volume1/common/Media/Books/'):]
+        if alt in s_map:
+            return s_map[alt]
+
+    non_succ_set = _ENRICHED_PATHS_CACHE.get('non_success_paths_set')
+    if isinstance(non_succ_set, set) and non_succ_set:
+        if norm not in non_succ_set and (not alt or alt not in non_succ_set):
+            return None
+
+    try:
+        db_path = _get_scanner_db_path()
+        conn = connect_scanner_db(db_path, timeout=3.0)
+        conn.text_factory = lambda b: b.decode('utf-8', errors='replace')
+        row = None
+        for cand_p in ([norm, alt] if alt else [norm]):
+            row = conn.execute(
+                """
+                SELECT file_path, status, error_message,
+                       title, author, isbn,
+                       orig_title, orig_author, orig_isbn,
+                       match_confidence, original_metadata_json, updated_metadata_json
+                FROM processed_files
+                WHERE file_path = ? AND status != 'SUCCESS'
+                LIMIT 1
+                """,
+                (cand_p,),
+            ).fetchone()
+            if row:
+                break
+        conn.close()
+        if not row:
+            if len(s_map) > 1000:
+                s_map.clear()
+            s_map[norm] = None
+            if alt:
+                s_map[alt] = None
+            return None
+        p_str = str(row[0])
+        st_val = str(row[1] or '').upper()
+        err_val = str(row[2] or '')
+        if st_val not in ('NEEDS_REVIEW', 'FAILED', 'NOT_FOUND', 'NO_ISBN', 'HAS_DRM', 'QUARANTINED'):
+            s_map[norm] = None
+            if alt:
+                s_map[alt] = None
+            return None
+        orig_m = json.loads(row[10]) or {} if (len(row) > 10 and row[10]) else {}
+        upd_m = json.loads(row[11]) or {} if (len(row) > 11 and row[11]) else {}
+        conf_pct = None
+        if len(row) > 9 and row[9] is not None:
+            try:
+                raw_c = float(row[9])
+                conf_pct = int(round(raw_c * 100)) if raw_c <= 1.0 else int(round(raw_c))
+            except Exception:
+                conf_pct = None
+        cand_auth_list = upd_m.get('authors')
+        cand_auth_str = (
+            ', '.join(str(a) for a in cand_auth_list if a)
+            if isinstance(cand_auth_list, list)
+            else str(cand_auth_list or '')
+        )
+        orig_auth_list = orig_m.get('authors')
+        orig_auth_str = (
+            ', '.join(str(a) for a in orig_auth_list if a)
+            if isinstance(orig_auth_list, list)
+            else str(orig_auth_list or '')
+        )
+        diag_obj = {
+            'status': st_val,
+            'error': err_val,
+            'message': err_val,
+            'file_path': p_str,
+            'confidence': conf_pct,
+            'candidate_title': str((row[3] if len(row) > 3 else '') or upd_m.get('title') or ''),
+            'candidate_authors': str((row[4] if len(row) > 4 else '') or cand_auth_str or ''),
+            'candidate_isbn': str((row[5] if len(row) > 5 else '') or upd_m.get('isbn13') or upd_m.get('isbn10') or ''),
+            'candidate_publisher': str(upd_m.get('publisher') or ''),
+            'candidate_pub_date': str(upd_m.get('published_date') or ''),
+            'candidate_description': _strip_html(str(upd_m.get('description') or '')),
+            'candidate_cover': str(upd_m.get('cover_url') or ''),
+            'orig_title': str((row[6] if len(row) > 6 else '') or orig_m.get('title') or ''),
+            'orig_authors': str((row[7] if len(row) > 7 else '') or orig_auth_str or ''),
+            'orig_isbn': str((row[8] if len(row) > 8 else '') or orig_m.get('isbn13') or orig_m.get('isbn10') or ''),
+            'orig_publisher': str(orig_m.get('publisher') or ''),
+            'orig_pub_date': str(orig_m.get('published_date') or ''),
+            'orig_description': _strip_html(str(orig_m.get('description') or '')),
+            'orig_cover': str(orig_m.get('cover_url') or ''),
+        }
+        if len(s_map) > 400:
+            s_map.clear()
+        s_map[norm] = diag_obj
+        if alt:
+            s_map[alt] = diag_obj
+        return diag_obj
+    except Exception:
+        return None
 
 
 def _record_in_memory_diag(file_loc: FileLocation, phys_path: Optional[Path], status: str, error_msg: str) -> None:
+    get_enriched_paths_set()
     s_map = _ENRICHED_PATHS_CACHE.get('status_by_path')
-    if not isinstance(s_map, dict):
-        return
-    diag_obj = {'status': status, 'error': error_msg}
-    for p in (file_loc.file_path if file_loc else None, str(phys_path) if phys_path else None):
-        if p:
-            s_map[str(p)] = diag_obj
+    if isinstance(s_map, dict):
+        diag_obj = {'status': status, 'error': error_msg}
+        for p in (file_loc.file_path if file_loc else None, str(phys_path) if phys_path else None):
+            if p:
+                s_map[str(p)] = diag_obj
+    try:
+        item_id = getattr(file_loc, 'catalog_item_id', None) if file_loc else None
+        if item_id:
+            enr_set = _ENRICHED_PATHS_CACHE.get('enriched_item_ids_set')
+            if not (isinstance(enr_set, set) and item_id in enr_set):
+                rev_set = _ENRICHED_PATHS_CACHE.get('needs_review_item_ids_set')
+                if isinstance(rev_set, set) and item_id not in rev_set:
+                    rev_set.add(item_id)
+                    rev_lst = _ENRICHED_PATHS_CACHE.get('needs_review_item_ids')
+                    if isinstance(rev_lst, list):
+                        rev_lst.append(item_id)
+                if status == 'NEEDS_REVIEW':
+                    s_rev_set = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids_set')
+                    if isinstance(s_rev_set, set) and item_id not in s_rev_set:
+                        s_rev_set.add(item_id)
+                        s_rev_lst = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids')
+                        if isinstance(s_rev_lst, list):
+                            s_rev_lst.append(item_id)
+                excl_set = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set')
+                if isinstance(excl_set, set) and item_id not in excl_set:
+                    excl_set.add(item_id)
+                    excl_lst = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids')
+                    if isinstance(excl_lst, list):
+                        excl_lst.append(item_id)
+                _save_enriched_cache_to_disk()
+    except Exception:
+        pass
 
 
 def is_file_enriched(file_path: str) -> bool:
@@ -1498,9 +1812,14 @@ def is_file_enriched(file_path: str) -> bool:
     enr_set = get_enriched_paths_set()
     if norm in enr_set:
         return True
-    phys = _resolve_physical_file_path(norm)
-    if phys and str(phys) in enr_set:
-        return True
+    if norm.startswith('/books/'):
+        alt = '/volume1/common/Media/Books/' + norm[len('/books/'):]
+        if alt in enr_set:
+            return True
+    elif norm.startswith('/volume1/common/Media/Books/'):
+        alt = '/books/' + norm[len('/volume1/common/Media/Books/'):]
+        if alt in enr_set:
+            return True
     return False
 
 
@@ -1521,6 +1840,203 @@ def _load_scanner_epubmeta_config() -> Dict[str, Any]:
     return {}
 
 
+_GENERIC_TITLE_STOPWORDS = {
+    'the', 'and', 'for', 'with', 'from', 'into', 'your', 'that', 'this', 'what', 'when', 'where',
+    'book', 'ebook', 'pdf', 'epub', 'mobi', 'azw', 'azw3', 'retail', 'nodrm', 'scan', 'ocr',
+    'mcgraw', 'hill', 'osborne', 'wiley', 'sons', 'john', 'oreilly', 'reilly', 'apress', 'packt',
+    'sams', 'pearson', 'addison', 'wesley', 'prentice', 'hall', 'springer', 'elsevier', 'oxford',
+    'cambridge', 'university', 'press', 'routledge', 'manning', 'pragmatic', 'nostarch', 'sybex',
+    'wrox', 'syngress', 'crc', 'artech', 'house', 'morgan', 'kaufmann', 'new', 'riders', 'que',
+    'demystified', 'handbook', 'guide', 'manual', 'introduction', 'principles', 'edition',
+    'second', 'third', 'fourth', 'fifth', 'sixth', 'first', 'complete', 'reference', 'dummies',
+    'volume', 'vol', 'part', 'series', 'library', 'collection', 'professional', 'technical',
+    'self', 'teaching', 'teach', 'yourself', 'made', 'easy', 'simple', 'step', 'quick', 'visual',
+}
+
+
+def _clean_book_stem_for_grouping(raw_name_or_title: str) -> str:
+    """
+    Strip file extensions, duplicate copy suffixes `(1)`, and trailing `(Publisher, Year) WW`
+    release tags from a filename or title.
+    """
+    s = str(raw_name_or_title or '').strip()
+    if not s:
+        return ''
+    s = os.path.basename(s.replace('\\', '/'))
+    s = re.sub(r'\.(?:epub|pdf|mobi|azw3?|djvu|cbz|cbr|fb2|txt|rtf|doc|docx|lit|prc|pdb)$', '', s, flags=re.I)
+    s = re.sub(r'\s*\(\d{1,2}\)$', '', s)
+    s = re.sub(r'\s*\([^)]*?\b(?:19\d{2}|20\d{2})\b[^)]*\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$', '', s, flags=re.I)
+    s = re.sub(r'\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$', '', s, flags=re.I)
+    s = re.sub(r'\b(?:a\s+)?self[\s\-]*teaching\s+guide\b', ' ', s, flags=re.I)
+    s = re.sub(r'^\s*mcgraw[\s\-]*hill(?:\s+osborne)?\s+', '', s, flags=re.I)
+    s = re.sub(r'^\s*demystified\s*-\s*', '', s, flags=re.I)
+    if '.' in s and ' ' not in s and s.count('.') >= 2:
+        s = s.replace('.', ' ')
+    s = s.replace('_', ' ')
+    # If "Title - Author" where the right side is a short author name like "E. Teicholz" or "P. bedell"
+    if ' - ' in s:
+        parts = [p.strip() for p in s.split(' - ') if p.strip()]
+        if len(parts) == 2:
+            if re.match(r'^[A-Z]\.\s*[A-Za-z\-]+$', parts[1]):
+                s = parts[0]
+            elif re.match(r'^[A-Z]\.\s*[A-Za-z\-]+$', parts[0]):
+                s = parts[1]
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _extract_distinctive_book_tokens(raw_name_or_title: str) -> set:
+    cleaned = _clean_book_stem_for_grouping(raw_name_or_title).lower()
+    tokens = set()
+    for w in re.findall(r'[a-z0-9]{2,}', cleaned):
+        if w in _GENERIC_TITLE_STOPWORDS:
+            continue
+        if re.match(r'^(?:19\d{2}|20\d{2}|\d+)$', w):
+            continue
+        if len(w) >= 3:
+            tokens.add(w)
+    return tokens
+
+
+def are_two_files_same_book(file_a: str, file_b: str, item_isbn: str = '') -> bool:
+    """
+    Determine if two `FileLocation` filenames/paths on the same `CatalogItem`
+    actually represent the same book (e.g. `.epub` + `.pdf` formats or `(1)` duplicate copy)
+    versus two completely different books that were falsely grouped together.
+    """
+    stem_a = _clean_book_stem_for_grouping(file_a)
+    stem_b = _clean_book_stem_for_grouping(file_b)
+    if not stem_a or not stem_b:
+        return True
+    norm_a = _norm_lookup_str(stem_a)
+    norm_b = _norm_lookup_str(stem_b)
+    if norm_a == norm_b:
+        return True
+    if norm_a and norm_b and (norm_a in norm_b or norm_b in norm_a) and min(len(norm_a), len(norm_b)) >= 6:
+        return True
+
+    # Check if one of the filenames is an ISBN filename matching the other or item_isbn
+    isbn_a = _extract_book_isbn_from_text(stem_a)
+    isbn_b = _extract_book_isbn_from_text(stem_b)
+    clean_item_isbn = re.sub(r'[^0-9Xx]', '', str(item_isbn or '')).upper()
+    if isbn_a and isbn_b:
+        if isbn_a == isbn_b or (len(isbn_a) >= 10 and len(isbn_b) >= 10 and isbn_a[-9:-1] == isbn_b[-9:-1]):
+            return True
+        return False
+    if (isbn_a and clean_item_isbn and isbn_a == clean_item_isbn and len(norm_a) <= 13) or (
+        isbn_b and clean_item_isbn and isbn_b == clean_item_isbn and len(norm_b) <= 13
+    ):
+        return True
+
+    toks_a = _extract_distinctive_book_tokens(stem_a)
+    toks_b = _extract_distinctive_book_tokens(stem_b)
+    if not toks_a or not toks_b:
+        return norm_a == norm_b
+    overlap = toks_a & toks_b
+    min_sz = min(len(toks_a), len(toks_b))
+    max_sz = max(len(toks_a), len(toks_b))
+    if min_sz == 1:
+        return max_sz == 1 and toks_a == toks_b
+    if min_sz == 2:
+        return (toks_a <= toks_b or toks_b <= toks_a) and max_sz <= 4
+    if toks_a <= toks_b or toks_b <= toks_a:
+        return (min_sz / float(max_sz)) >= 0.6
+    return (len(overlap) / float(max_sz)) >= 0.65
+
+
+def ensure_isolated_catalog_item_for_file(
+    item: CatalogItem,
+    file_loc: FileLocation,
+    new_title: str = '',
+    new_authors: str = '',
+) -> CatalogItem:
+    """
+    If `item` has multiple `FileLocation` rows attached and some sibling files are different books
+    from `file_loc`, keep `file_loc` (and any same-book siblings) on `item` and split the unrelated
+    sibling files onto their own `CatalogItem` rows so `item` itself gets enriched cleanly!
+    """
+    if not item or not file_loc:
+        return item
+    try:
+        all_files = list(item.files.all())
+        if len(all_files) <= 1:
+            return item
+        siblings = [f for f in all_files if f.id != file_loc.id]
+        if not siblings:
+            return item
+        ref_label = file_loc.file_name or os.path.basename(file_loc.file_path or '') or new_title
+        unrelated_siblings = [
+            sib for sib in siblings
+            if not are_two_files_same_book(
+                ref_label,
+                sib.file_name or os.path.basename(sib.file_path or ''),
+                item.isbn or '',
+            )
+        ]
+        if not unrelated_siblings:
+            return item
+
+        # Group unrelated siblings into clusters and move them onto separate CatalogItem rows,
+        # keeping `file_loc` (and its same-book siblings) on `item`!
+        clusters: List[List[FileLocation]] = []
+        for sib in unrelated_siblings:
+            s_lbl = sib.file_name or os.path.basename(sib.file_path or '')
+            placed = False
+            for cl in clusters:
+                rep_lbl = cl[0].file_name or os.path.basename(cl[0].file_path or '')
+                if are_two_files_same_book(s_lbl, rep_lbl, ''):
+                    cl.append(sib)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([sib])
+
+        async_hydrate_pairs: List[Tuple[str, str]] = []
+        for idx, cl in enumerate(clusters):
+            rep_loc = cl[0]
+            sib_item = CatalogItem.objects.create(
+                title=(_clean_book_stem_for_grouping(rep_loc.file_name or '') or rep_loc.file_name or 'Untitled')[:512],
+                authors='Unknown Author',
+                publisher='',
+                item_type=item.item_type or 'BOOK',
+            )
+            FileLocation.objects.filter(id__in=[fl.id for fl in cl]).update(catalog_item=sib_item)
+            if len(clusters) <= 3:
+                _hydrate_catalog_item_for_single_file(sib_item, rep_loc, enrich_if_needed=False)
+            else:
+                async_hydrate_pairs.append((str(sib_item.id), str(rep_loc.id)))
+
+        if async_hydrate_pairs:
+            import threading
+            def _bg_hydrate(pairs: List[Tuple[str, str]]) -> None:
+                for s_item_id, s_loc_id in pairs:
+                    try:
+                        si = CatalogItem.objects.filter(id=s_item_id).first()
+                        sl = FileLocation.objects.filter(id=s_loc_id).first()
+                        if si and sl:
+                            _hydrate_catalog_item_for_single_file(si, sl, enrich_if_needed=False)
+                    except Exception:
+                        pass
+            threading.Thread(target=_bg_hydrate, args=(async_hydrate_pairs,), daemon=True).start()
+
+        # Reset `item`'s cover_thumbnail and cover_image_url to `file_loc`'s own embedded cover
+        # so `item` never retains a cover image that belonged to one of the unrelated siblings!
+        item.cover_image_url = None
+        item.cover_thumbnail = None
+        emb_cov = extract_original_cover_for_item(item)
+        if emb_cov and emb_cov.startswith('data:image'):
+            item.cover_thumbnail = emb_cov
+        item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
+
+        try:
+            from .views import adjust_cached_books_count
+            adjust_cached_books_count(len(clusters))
+        except Exception:
+            pass
+        return item
+    except Exception:
+        return item
+
+
 def _apply_enriched_metadata_to_catalog_item(
     item: CatalogItem,
     file_loc: FileLocation,
@@ -1529,7 +2045,7 @@ def _apply_enriched_metadata_to_catalog_item(
     file_sha256: Optional[str] = None,
     cover_thumbnail: Optional[str] = None,
     phys_path: Optional[Path] = None,
-) -> None:
+) -> Tuple[CatalogItem, List[str]]:
     """
     Persist newly enriched metadata (`target_meta`) from `epubmeta` onto both `FileLocation`
     and `CatalogItem` in PostgreSQL BookDB.
@@ -1552,16 +2068,28 @@ def _apply_enriched_metadata_to_catalog_item(
     try:
         new_title = _clean_single_line(getattr(target_meta, 'title', None))
         if new_title:
-            item.title = new_title[:512]
+            new_title = re.sub(r'\s+by\s+[A-Z][A-Za-z.\s,\-]+?\s*\(\d{4}(?:-\d{2}){0,2}\)\s*$', '', new_title).strip()
         raw_authors = getattr(target_meta, 'authors', None) or []
-        if isinstance(raw_authors, list) and raw_authors:
-            new_authors = _clean_single_line(', '.join(str(a) for a in raw_authors if a))
-            if new_authors:
-                item.authors = new_authors[:512]
+        dedup_authors: List[str] = []
+        seen_auth_low: set = set()
+        if isinstance(raw_authors, list):
+            for raw_a in raw_authors:
+                for part_a in str(raw_a or '').split(','):
+                    clean_a = _clean_single_line(part_a)
+                    if clean_a and clean_a.lower() not in seen_auth_low:
+                        seen_auth_low.add(clean_a.lower())
+                        dedup_authors.append(clean_a)
+        new_authors = ', '.join(dedup_authors)
+        item = ensure_isolated_catalog_item_for_file(item, file_loc, new_title=new_title or '', new_authors=new_authors or '')
+        if new_title:
+            item.title = new_title[:512]
+        if new_authors:
+            item.authors = new_authors[:512]
         new_isbn = _clean_single_line(
             getattr(target_meta, 'isbn13', None)
             or getattr(target_meta, 'isbn10', None)
             or isbn_fallback
+            or _extract_book_isbn_from_text(file_loc.file_name or '', file_loc.file_path or '')
         )
         if new_isbn:
             item.isbn = new_isbn[:32]
@@ -1575,16 +2103,21 @@ def _apply_enriched_metadata_to_catalog_item(
         if new_desc and str(new_desc).strip():
             item.description = str(new_desc).strip()
         new_cover_url = _clean_single_line(getattr(target_meta, 'cover_url', None))
-        had_orig_cover = bool(
-            (item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image'))
-            or item.cover_image_url
-        )
-        # Preserve the original cover unless it was missing; only replace if no original cover existed
+        orig_cover_issue = classify_cover_image(item.cover_thumbnail, item.cover_image_url)
+        had_good_orig_cover = orig_cover_issue is None
+        # Preserve a genuine graphic cover, or upgrade if the original cover was missing or text-only
         if cover_thumbnail and str(cover_thumbnail).startswith('data:image'):
             if not (item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image')):
                 item.cover_thumbnail = cover_thumbnail
-        if new_cover_url and not had_orig_cover:
+            elif orig_cover_issue == 'text_only' and classify_cover_image(cover_thumbnail) is None:
+                item.cover_thumbnail = cover_thumbnail
+        if new_cover_url and not had_good_orig_cover:
             item.cover_image_url = new_cover_url[:1024]
+            if orig_cover_issue in ('missing', 'text_only') and classify_cover_image(item.cover_thumbnail) in ('missing', 'text_only'):
+                try:
+                    apply_book_cover_to_item(item, new_cover_url, user_selected=False)
+                except Exception:
+                    pass
         if item.pub_date and getattr(item.pub_date, 'year', 2000) < 1000:
             item.pub_date = None
         raw_pub_date = _clean_single_line(getattr(target_meta, 'published_date', None))
@@ -1610,9 +2143,156 @@ def _apply_enriched_metadata_to_catalog_item(
             clear_book_bad_metadata(item.id)
         except Exception:
             pass
-        return merge_duplicate_catalog_items_for_item(item)
+        try:
+            evaluate_and_record_item_cover_status(item)
+        except Exception:
+            pass
+        return item, merge_duplicate_catalog_items_for_item(item)
     except Exception:
-        return []
+        return item, []
+
+
+_MERGED_ITEM_ID_REDIRECTS: Dict[str, str] = {}
+
+
+def resolve_catalog_item_by_id_or_fallback(
+    item_or_id: Any = None,
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    query: str = '',
+) -> Optional[CatalogItem]:
+    """
+    Resolve a `CatalogItem` by primary key (`item_or_id`), or seamlessly fall back if that UUID
+    was merged/split into another `CatalogItem` since the browser page loaded (via redirect table,
+    `file_id`, `file_path`, `isbn`, `title` + `authors`, or cover search `query`).
+    """
+    if isinstance(item_or_id, CatalogItem):
+        return item_or_id
+
+    raw_id = str(item_or_id or '').strip()
+    if raw_id:
+        try:
+            it = CatalogItem.objects.prefetch_related('files').filter(id=raw_id).first()
+            if it:
+                return it
+        except Exception:
+            pass
+        # Follow up to 4 hops in _MERGED_ITEM_ID_REDIRECTS
+        cur_id = raw_id
+        for _ in range(4):
+            nxt_id = _MERGED_ITEM_ID_REDIRECTS.get(cur_id)
+            if not nxt_id or nxt_id == cur_id:
+                break
+            cur_id = nxt_id
+            try:
+                it = CatalogItem.objects.prefetch_related('files').filter(id=cur_id).first()
+                if it:
+                    return it
+            except Exception:
+                pass
+
+    fid = str(file_id or '').strip()
+    if fid:
+        try:
+            loc = FileLocation.objects.select_related('catalog_item').filter(id=fid).first()
+            if loc and loc.catalog_item_id:
+                return CatalogItem.objects.prefetch_related('files').filter(id=loc.catalog_item_id).first()
+        except Exception:
+            pass
+
+    fpath = str(file_path or '').strip()
+    if fpath:
+        try:
+            path_cands = [fpath]
+            if fpath.startswith('/books/'):
+                path_cands.append('/volume1/common/Media/Books/' + fpath[len('/books/'):])
+            elif fpath.startswith('/volume1/common/Media/Books/'):
+                path_cands.append('/books/' + fpath[len('/volume1/common/Media/Books/'):])
+            loc = FileLocation.objects.select_related('catalog_item').filter(file_path__in=path_cands).first()
+            if loc and loc.catalog_item_id:
+                return CatalogItem.objects.prefetch_related('files').filter(id=loc.catalog_item_id).first()
+        except Exception:
+            pass
+
+    clean_isbn = re.sub(r'[^0-9Xx]', '', str(isbn or '')).upper()
+    if len(clean_isbn) in (10, 13):
+        try:
+            cands = {str(isbn).strip(), clean_isbn}
+            it = CatalogItem.objects.prefetch_related('files').filter(isbn__in=list(cands)).first()
+            if it:
+                return it
+        except Exception:
+            pass
+
+    from django.db.models.functions import Trim, Upper
+
+    t_clean = str(title or '').strip()
+    a_clean = str(authors or '').strip()
+    if t_clean:
+        try:
+            up_t = t_clean.upper()
+            up_base = t_clean.split(':', 1)[0].split(' (', 1)[0].strip().upper()
+            cands = list(
+                CatalogItem.objects.annotate(_ut=Upper('title'))
+                .filter(_ut=up_t)
+                .prefetch_related('files')
+                .order_by()[:10]
+            )
+            if not cands and up_base and len(up_base) >= 4:
+                cands = list(
+                    CatalogItem.objects.extra(
+                        where=["UPPER(TRIM(SPLIT_PART(SPLIT_PART(title, ':', 1), ' (', 1))) = %s"],
+                        params=[up_base],
+                    )
+                    .prefetch_related('files')
+                    .order_by()[:15]
+                )
+            if cands:
+                if a_clean and a_clean.lower() not in ('unknown', 'unknown author', '..'):
+                    a_tokens = [tok.lower() for tok in re.split(r'[^A-Za-z0-9]+', a_clean) if len(tok) >= 3]
+                    surname = a_tokens[-1] if a_tokens else ''
+                    if surname:
+                        auth_matches = [c for c in cands if surname in (c.authors or '').lower()]
+                        if auth_matches:
+                            cands = auth_matches
+                cands.sort(key=lambda c: (bool(c.isbn), bool(c.description), bool(c.cover_thumbnail)), reverse=True)
+                return cands[0]
+        except Exception:
+            pass
+
+    q_clean = str(query or '').strip()
+    if q_clean and len(q_clean) >= 5:
+        try:
+            words = q_clean.split()
+            for split_at in range(len(words), max(1, len(words) - 4), -1):
+                cand_base = ' '.join(words[:split_at]).split(':', 1)[0].strip().upper()
+                rem_auth = ' '.join(words[split_at:]).strip().lower()
+                if len(cand_base) < 4:
+                    continue
+                cands = list(
+                    CatalogItem.objects.extra(
+                        where=["UPPER(TRIM(SPLIT_PART(SPLIT_PART(title, ':', 1), ' (', 1))) = %s"],
+                        params=[cand_base],
+                    )
+                    .prefetch_related('files')
+                    .order_by()[:10]
+                )
+                if cands:
+                    if rem_auth:
+                        r_toks = [t for t in re.split(r'[^a-z0-9]+', rem_auth) if len(t) >= 3]
+                        if r_toks:
+                            am = [c for c in cands if any(rt in (c.authors or '').lower() for rt in r_toks)]
+                            if am:
+                                cands = am
+                    cands.sort(key=lambda c: (bool(c.isbn), bool(c.description), bool(c.cover_thumbnail)), reverse=True)
+                    return cands[0]
+        except Exception:
+            pass
+
+    return None
 
 
 def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
@@ -1625,8 +2305,9 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
     merged_ids: List[str] = []
     if not item or not item.title:
         return merged_ids
+    from .search import _is_garbage_or_placeholder_author, _is_garbage_or_placeholder_title
     authors_clean = (item.authors or '').strip()
-    if not authors_clean or authors_clean.lower() in ('unknown', 'unknown author', '..', '.'):
+    if _is_garbage_or_placeholder_title(item.title) or _is_garbage_or_placeholder_author(authors_clean):
         return merged_ids
 
     try:
@@ -1647,17 +2328,27 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
 
         norm_base = _norm_lookup_str(item.title.split(':')[0])
         item_updated = False
-        existing_paths = {f.file_path for f in item.files.all() if f.file_path}
+        item_files = list(item.files.all())
+        existing_paths = {f.file_path for f in item_files if f.file_path}
 
         for other in dups:
             other_base = _norm_lookup_str((other.title or '').split(':')[0])
             if norm_base and other_base and norm_base != other_base:
                 continue
+            other_files = list(other.files.all())
+            # Never merge if the underlying physical filenames are unrelated books!
+            if item_files and other_files:
+                ref_fn = item_files[0].file_name or os.path.basename(item_files[0].file_path or '')
+                if any(
+                    not are_two_files_same_book(ref_fn, of.file_name or os.path.basename(of.file_path or ''), item.isbn or '')
+                    for of in other_files
+                ):
+                    continue
             for field in ('isbn', 'asin', 'publisher', 'pub_date', 'description', 'cover_thumbnail', 'cover_image_url'):
                 if not getattr(item, field, None) and getattr(other, field, None):
                     setattr(item, field, getattr(other, field))
                     item_updated = True
-            for f_loc in list(other.files.all()):
+            for f_loc in other_files:
                 if f_loc.file_path and f_loc.file_path in existing_paths:
                     f_loc.delete()
                 else:
@@ -1666,6 +2357,7 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                     if f_loc.file_path:
                         existing_paths.add(f_loc.file_path)
             merged_ids.append(str(other.id))
+            _MERGED_ITEM_ID_REDIRECTS[str(other.id)] = str(item.id)
             try:
                 if str(other.id) in set(get_interesting_item_ids()):
                     set_book_interesting(str(item.id), True)
@@ -1694,9 +2386,337 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
 
         if item_updated:
             item.save()
+        if merged_ids:
+            try:
+                from .views import adjust_cached_books_count
+                adjust_cached_books_count(-len(merged_ids))
+            except Exception:
+                pass
     except Exception:
         pass
     return merged_ids
+
+
+def _hydrate_catalog_item_for_single_file(item: CatalogItem, f_loc: FileLocation, enrich_if_needed: bool = False) -> None:
+    """
+    Hydrate `item` from `f_loc`'s matching `processed_files` entry in `scanner_state.db`
+    (only if that `processed_files` entry's title genuinely matches `f_loc`'s filename stem)
+    or from `parse_filename(f_loc.file_name)` + embedded PDF/EPUB cover.
+    """
+    import sys
+    base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+    for sub in ('scanner', 'nas_scanner'):
+        cand_dir = str((base_dir / sub).resolve())
+        if os.path.isdir(cand_dir) and cand_dir not in sys.path:
+            sys.path.insert(0, cand_dir)
+
+    fname = f_loc.file_name or os.path.basename(f_loc.file_path or '')
+    parsed_title = _clean_book_stem_for_grouping(fname) or fname
+    parsed_authors = 'Unknown Author'
+    parsed_isbn = ''
+    parsed_year = None
+    try:
+        from epubmeta.filename_parser import parse_filename
+        pf = parse_filename(fname)
+        if pf.get('title'):
+            parsed_title = str(pf['title']).strip()
+        if pf.get('authors'):
+            parsed_authors = ', '.join(str(a).strip() for a in pf['authors'] if str(a).strip()) or 'Unknown Author'
+        if pf.get('isbn'):
+            parsed_isbn = str(pf['isbn']).strip()
+        if pf.get('published_date') and re.match(r'^(19\d{2}|20\d{2})$', str(pf['published_date'])):
+            parsed_year = int(pf['published_date'])
+    except Exception:
+        pass
+
+    # Check if `scanner_state.db` has a valid non-poisoned enrichment row for `f_loc.file_path`
+    db_path = _get_scanner_db_path()
+    used_scanner_row = False
+    if f_loc.file_path and (is_postgres_scanner_enabled() or db_path.exists()):
+        conn = None
+        try:
+            conn = connect_scanner_db(db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            path_variants = [f_loc.file_path]
+            if f_loc.file_path.startswith('/books/'):
+                path_variants.append('/volume1/common/Media/Books/' + f_loc.file_path[len('/books/'):])
+            elif f_loc.file_path.startswith('/volume1/common/Media/Books/'):
+                path_variants.append('/books/' + f_loc.file_path[len('/volume1/common/Media/Books/'):])
+            ph = ','.join(['?'] * len(path_variants))
+            row = conn.execute(
+                f"""
+                SELECT file_path, status, title, author, isbn, updated_metadata_json, cover_thumbnail
+                FROM processed_files
+                WHERE file_path IN ({ph}) AND status = 'SUCCESS'
+                LIMIT 1
+                """,
+                path_variants,
+            ).fetchone()
+            if row:
+                r_title = str(row['title'] or '').strip()
+                if r_title and are_two_files_same_book(fname, r_title, str(row['isbn'] or '')):
+                    upd_m = {}
+                    if row['updated_metadata_json']:
+                        try:
+                            upd_m = json.loads(row['updated_metadata_json']) or {}
+                        except Exception:
+                            upd_m = {}
+                    item.title = r_title[:512]
+                    r_auth = str(row['author'] or '').strip()
+                    if not r_auth and isinstance(upd_m.get('authors'), list):
+                        r_auth = ', '.join(str(a) for a in upd_m['authors'] if a)
+                    item.authors = (r_auth or parsed_authors or 'Unknown Author')[:512]
+                    item.isbn = str(row['isbn'] or upd_m.get('isbn13') or upd_m.get('isbn10') or parsed_isbn or '')[:32]
+                    item.publisher = str(upd_m.get('publisher') or item.publisher or '')[:256]
+                    item.description = _strip_html(str(upd_m.get('description') or ''))
+                    pub_d_str = str(upd_m.get('published_date') or '')
+                    m_yr = re.search(r'\b(1[89]\d{2}|20\d{2})\b', pub_d_str)
+                    if m_yr:
+                        item.pub_date = datetime.date(int(m_yr.group(1)), 1, 1)
+                    elif parsed_year:
+                        item.pub_date = datetime.date(parsed_year, 1, 1)
+                    if row['cover_thumbnail'] and str(row['cover_thumbnail']).startswith('data:image'):
+                        item.cover_thumbnail = row['cover_thumbnail']
+                    if upd_m.get('cover_url'):
+                        item.cover_image_url = str(upd_m['cover_url'])[:1024]
+                    used_scanner_row = True
+                else:
+                    # Poisoned row in processed_files (e.g. matched to a different book via "(McGraw-Hill, 2004) WW") -> purge it!
+                    conn.execute(f"DELETE FROM processed_files WHERE file_path IN ({ph})", path_variants)
+                    conn.commit()
+                    p_set = _ENRICHED_PATHS_CACHE.get('paths_set')
+                    if isinstance(p_set, set):
+                        for pv in path_variants:
+                            p_set.discard(pv)
+        except Exception:
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
+
+    if not used_scanner_row:
+        item.title = (parsed_title or fname)[:512]
+        item.authors = (parsed_authors or 'Unknown Author')[:512]
+        item.isbn = (parsed_isbn or '')[:32]
+        item.description = ''
+        if parsed_year:
+            item.pub_date = datetime.date(parsed_year, 1, 1)
+        item.cover_image_url = ''
+        item.cover_thumbnail = ''
+
+    # Always extract the actual embedded cover from `f_loc`'s physical file if `cover_thumbnail` is empty or belonged to another book
+    item.save()
+    emb_cov = extract_original_cover_for_item(item)
+    if emb_cov and emb_cov.startswith('data:image'):
+        item.cover_thumbnail = emb_cov
+        item.save(update_fields=['cover_thumbnail', 'updated_at'])
+
+    if enrich_if_needed and not used_scanner_row:
+        try:
+            enrich_file_location_on_demand(f_loc, force=False)
+        except Exception:
+            pass
+
+
+def split_unrelated_files_on_catalog_item(
+    item_or_id: Any,
+    target_file_id: Optional[str] = None,
+    enrich_split: bool = False,
+    force_split_all: bool = False,
+) -> Dict[str, Any]:
+    """
+    Split unrelated `FileLocation`s on a multi-file `CatalogItem` into their own separate
+    `CatalogItem` records, hydrating each book's title, author, cover, and metadata from its
+    own physical file / `scanner_state.db` entry.
+    """
+    item = resolve_catalog_item_by_id_or_fallback(item_or_id, file_id=target_file_id or '')
+    if not item:
+        return {'ok': False, 'error': f'CatalogItem not found: {item_or_id}'}
+
+    files = sorted(list(item.files.all()), key=lambda f: (f.file_name or '', str(f.id)))
+    if len(files) <= 1:
+        return {
+            'ok': True,
+            'split_count': 0,
+            'item_id': str(item.id),
+            'created_items': [],
+            'message': 'This item only has 1 file attached.',
+        }
+
+    # If a specific `target_file_id` was requested to be split out into its own book
+    if target_file_id:
+        target_loc = next((f for f in files if str(f.id) == str(target_file_id)), None)
+        if not target_loc:
+            return {'ok': False, 'error': f'FileLocation {target_file_id} not found on item {item.id}'}
+        new_item = CatalogItem.objects.create(
+            title=(_clean_book_stem_for_grouping(target_loc.file_name or '') or target_loc.file_name or item.title)[:512],
+            authors='Unknown Author',
+            publisher=item.publisher or '',
+            item_type=item.item_type or 'BOOK',
+        )
+        target_loc.catalog_item = new_item
+        target_loc.save(update_fields=['catalog_item'])
+        _hydrate_catalog_item_for_single_file(new_item, target_loc, enrich_if_needed=enrich_split)
+        return {
+            'ok': True,
+            'split_count': 1,
+            'item_id': str(item.id),
+            'created_items': [{
+                'item_id': str(new_item.id),
+                'file_id': str(target_loc.id),
+                'title': new_item.title,
+                'authors': new_item.authors,
+                'file_name': target_loc.file_name,
+            }],
+            'message': f"Split '{target_loc.file_name}' into its own book: {new_item.title}",
+        }
+
+    # Group `files` into clusters of genuinely same-book files
+    clusters: List[List[FileLocation]] = []
+    if force_split_all:
+        clusters = [[f] for f in files]
+    else:
+        for f in files:
+            f_label = f.file_name or os.path.basename(f.file_path or '')
+            placed = False
+            for cl in clusters:
+                rep_label = cl[0].file_name or os.path.basename(cl[0].file_path or '')
+                if are_two_files_same_book(f_label, rep_label, item.isbn or ''):
+                    cl.append(f)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([f])
+
+    if len(clusters) <= 1:
+        return {
+            'ok': True,
+            'split_count': 0,
+            'item_id': str(item.id),
+            'created_items': [],
+            'message': 'All files on this item appear to be formats/copies of the same book.',
+        }
+
+    # Choose which cluster stays on `item` (prefer the cluster that matches `item.title`)
+    keep_idx = 0
+    for idx, cl in enumerate(clusters):
+        rep_label = cl[0].file_name or os.path.basename(cl[0].file_path or '')
+        if are_two_files_same_book(rep_label, item.title or '', item.isbn or ''):
+            keep_idx = idx
+            break
+
+    created_items: List[Dict[str, Any]] = []
+    async_hydrate_pairs: List[Tuple[str, str]] = []
+    for idx, cl in enumerate(clusters):
+        if idx == keep_idx:
+            continue
+        rep_loc = cl[0]
+        new_item = CatalogItem.objects.create(
+            title=(_clean_book_stem_for_grouping(rep_loc.file_name or '') or rep_loc.file_name or 'Untitled')[:512],
+            authors='Unknown Author',
+            publisher=item.publisher or '',
+            item_type=item.item_type or 'BOOK',
+        )
+        FileLocation.objects.filter(id__in=[fl.id for fl in cl]).update(catalog_item=new_item)
+        if len(clusters) <= 4:
+            _hydrate_catalog_item_for_single_file(new_item, rep_loc, enrich_if_needed=enrich_split)
+        else:
+            async_hydrate_pairs.append((str(new_item.id), str(rep_loc.id)))
+        created_items.append({
+            'item_id': str(new_item.id),
+            'file_id': str(rep_loc.id),
+            'title': new_item.title,
+            'authors': new_item.authors,
+            'file_name': rep_loc.file_name,
+        })
+
+    if async_hydrate_pairs:
+        import threading
+        def _bg_hydrate_split(pairs: List[Tuple[str, str]], do_enrich: bool) -> None:
+            for s_item_id, s_loc_id in pairs:
+                try:
+                    si = CatalogItem.objects.filter(id=s_item_id).first()
+                    sl = FileLocation.objects.filter(id=s_loc_id).first()
+                    if si and sl:
+                        _hydrate_catalog_item_for_single_file(si, sl, enrich_if_needed=do_enrich)
+                except Exception:
+                    pass
+        threading.Thread(target=_bg_hydrate_split, args=(async_hydrate_pairs, enrich_split), daemon=True).start()
+
+    # Re-hydrate `item` from its kept cluster so its cover, synopsis, and title match its remaining file(s) cleanly
+    kept_rep = clusters[keep_idx][0]
+    _hydrate_catalog_item_for_single_file(item, kept_rep, enrich_if_needed=enrich_split)
+    if CatalogItem.objects.filter(id=item.id).exists() and not FileLocation.objects.filter(catalog_item_id=item.id).exists():
+        item.delete()
+        if kept_rep.catalog_item_id:
+            item = CatalogItem.objects.filter(id=kept_rep.catalog_item_id).first() or item
+
+    # Also clean up any empty orphan CatalogItem rows with 0 files and title == item.title
+    CatalogItem.objects.filter(title=item.title, files__isnull=True).delete()
+
+    return {
+        'ok': True,
+        'split_count': len(created_items),
+        'item_id': str(item.id),
+        'title': item.title,
+        'authors': item.authors,
+        'created_items': created_items,
+        'message': f"Split {len(created_items) + 1} distinct books into separate catalog entries.",
+    }
+
+
+def split_all_multi_book_catalog_items() -> Dict[str, Any]:
+    """
+    Find all `CatalogItem` rows in BookDB that have > 1 `FileLocation` attached and split any
+    unrelated book files into their own individual `CatalogItem` records.
+    """
+    from django.db.models import Count
+
+    multi_ids = list(
+        CatalogItem.objects.annotate(f_cnt=Count('files'))
+        .filter(f_cnt__gt=1)
+        .order_by('-f_cnt')
+        .values_list('id', flat=True)[:200]
+    )
+    items_split = 0
+    new_items_created = 0
+    split_details: List[Dict[str, Any]] = []
+
+    for mid in multi_ids:
+        it = CatalogItem.objects.filter(id=mid).first()
+        if not it:
+            continue
+        old_title = it.title
+        old_cnt = it.files.count()
+        if old_cnt <= 1:
+            continue
+        res = split_unrelated_files_on_catalog_item(it, enrich_split=False)
+        sc = int(res.get('split_count') or 0)
+        if sc > 0:
+            items_split += 1
+            new_items_created += sc
+            split_details.append({
+                'item_id': str(mid),
+                'old_title': old_title,
+                'new_title': res.get('title') or old_title,
+                'old_file_count': old_cnt,
+                'split_count': sc,
+            })
+
+    if new_items_created > 0:
+        try:
+            from .views import adjust_cached_books_count
+            adjust_cached_books_count(new_items_created)
+        except Exception:
+            pass
+
+    return {
+        'ok': True,
+        'multi_file_items_checked': len(multi_ids),
+        'items_split': items_split,
+        'new_items_created': new_items_created,
+        'details': split_details[:50],
+    }
 
 
 def merge_all_enriched_duplicate_catalog_items() -> Dict[str, int]:
@@ -1775,13 +2795,52 @@ def merge_all_enriched_duplicate_catalog_items() -> Dict[str, int]:
 
 
 _MAG_BOOK_PUBLISHERS_RE = re.compile(
-    r'\b(packt|apress|o\'reilly|addison-wesley|wiley|manning|sams|no starch(?: press)?|'
-    r'pragmatic(?: bookshelf)?|mcgraw-hill|pearson|springer|sitepoint|crc press|syngress|'
-    r'wrox|peachpit|cisco press|microsoft press|redbooks|for dummies|'
-    r'head first|in a nutshell|unleashed|pocket reference|friendsofed|'
-    r'penguin|random house|harpercollins|simon & schuster|macmillan|hachette|tor books|orbit|baen|del rey|avon books|bantam|Ace Books|Gollancz)\b',
+    r'\b(packt|apress|o\'?reilly|addison[\s\-]*wesley|wiley|manning|sams|no\s+starch(?:\s+press)?|'
+    r'pragmatic(?:\s+bookshelf)?|mcgraw[\s\-]*hill|pearson|springer|sitepoint|crc\s+press|syngress|'
+    r'wrox|peachpit|cisco\s+press|microsoft\s+press|redbooks|for\s+dummies|'
+    r'head\s+first|in\s+a\s+nutshell|unleashed|pocket\s+reference|friendsofed|'
+    r'penguin|random\s+house|harpercollins|simon\s*(?:&|and)\s*schuster|macmillan|hachette|tor\s+books|orbit|baen|del\s+rey|avon\s+books|bantam|ace\s+books|gollancz|'
+    r'oxford(?:\s+university\s+press|univpress)?|cambridge(?:\s+university\s+press)?|university\s+press|'
+    r'mit\s+press|princeton|harvard|yale|routledge|elsevier|academic\s+press|kluwer|de\s+gruyter|palgrave|bloomsbury|'
+    r'vintage|knopf|doubleday|norton|scholastic|dk\s+publishing|dorling\s+kindersley|focal\s+press|new\s+riders|que\s+publishing|'
+    r'morgan\s+kaufmann|artech\s+house|world\s+scientific|very\s+short\s+introduction)\b',
     re.IGNORECASE,
 )
+
+
+def _is_valid_isbn_token(token: str) -> bool:
+    """Return True if `token` is a valid 10-digit Book ISBN (non-977) or 13-digit 978/979 Bookland ISBN."""
+    clean = re.sub(r'[^0-9Xx]', '', token or '').upper()
+    if len(clean) == 13 and clean.isdigit():
+        if not clean.startswith(('978', '979')):
+            return False
+        total = sum((1 if i % 2 == 0 else 3) * int(ch) for i, ch in enumerate(clean[:12]))
+        check = (10 - (total % 10)) % 10
+        return check == int(clean[12])
+    if len(clean) == 10 and not clean.startswith('977'):
+        if not clean[:9].isdigit():
+            return False
+        total = 0
+        for i in range(9):
+            total += (10 - i) * int(clean[i])
+        last_val = 10 if clean[9] == 'X' else (int(clean[9]) if clean[9].isdigit() else -1)
+        if last_val < 0:
+            return False
+        total += last_val
+        return (total % 11) == 0
+    return False
+
+
+def _extract_book_isbn_from_text(*texts: str) -> Optional[str]:
+    """Scan title/filename/isbn strings for a valid 10-digit or 13-digit Book ISBN."""
+    for txt in texts:
+        if not txt:
+            continue
+        for m in re.finditer(r'(?<![0-9])(97[89][\d\- ]{10,14}|\d{9}[\dXx])(?![0-9])', str(txt)):
+            cand = re.sub(r'[^0-9Xx]', '', m.group(1)).upper()
+            if _is_valid_isbn_token(cand):
+                return cand
+    return None
 
 _MAG_KNOWN_PATTERNS = [
     (re.compile(r'\bpc[\s\-]*games(?:\s*hardware)?\b', re.I), 'PC Games'),
@@ -1844,6 +2903,50 @@ def _get_tomags_dir() -> Optional[Path]:
     return None
 
 
+def _get_books_root_dir() -> Optional[Path]:
+    for cand_str in ('/books', '/volume1/common/Media/Books', r'U:\Media\Books'):
+        p = Path(cand_str)
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _get_tomags_history_path() -> Path:
+    for cand_dir in ('/books_bad', '/volume1/common/Media/Books_bad', r'U:\Media\Books_bad'):
+        p = Path(cand_dir)
+        try:
+            if p.exists() and p.is_dir():
+                return p / '.tomags_history.json'
+        except Exception:
+            continue
+    return Path('/tmp/mylibrary_tomags_history.json')
+
+
+def _load_tomags_history() -> Dict[str, Any]:
+    hp = _get_tomags_history_path()
+    try:
+        if hp.exists():
+            data = json.loads(hp.read_text(encoding='utf-8')) or {}
+            if isinstance(data, dict):
+                data.setdefault('entries', {})
+                data.setdefault('not_magazine_paths', [])
+                return data
+    except Exception:
+        pass
+    return {'entries': {}, 'not_magazine_paths': []}
+
+
+def _save_tomags_history(data: Dict[str, Any]) -> None:
+    hp = _get_tomags_history_path()
+    try:
+        hp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+
+
 def detect_magazine_publication(
     title: str = '',
     authors: str = '',
@@ -1855,6 +2958,15 @@ def detect_magazine_publication(
     Determine if an item or file is a Magazine / Periodical that belongs in `toMags`.
     Returns the publication/reason string if it is a magazine, or `None` if it is a book.
     """
+    fname = os.path.basename(file_path or '')
+    try:
+        hist = _load_tomags_history()
+        not_mag = set(hist.get('not_magazine_paths') or [])
+        if (file_path and file_path in not_mag) or (fname and fname in not_mag):
+            return None
+    except Exception:
+        pass
+
     clean_isbn = re.sub(r'[^0-9Xx]', '', str(isbn or ''))
     # Standard books have 978 or 979 Bookland ISBNs (whereas 977 is ISSN for periodicals)
     if clean_isbn.startswith(('978', '979')) and len(clean_isbn) == 13:
@@ -1862,24 +2974,35 @@ def detect_magazine_publication(
     if len(clean_isbn) == 10 and not clean_isbn.startswith('977'):
         return None
 
-    fname = os.path.basename(file_path or '')
-    combined = f"{title or ''} | {fname} | {publisher or ''}"
+    # Also check if a valid 10-digit or 13-digit Book ISBN is embedded in the title or filename
+    # (e.g. `0192804936.Oxford.University.Press.USA.Global.Catastrophes...Oct.2009.pdf`)
+    if _extract_book_isbn_from_text(isbn, title, fname):
+        return None
 
-    if _MAG_BOOK_PUBLISHERS_RE.search(combined):
+    combined = f"{title or ''} | {fname} | {publisher or ''}"
+    combined_spaced = re.sub(r'[._\-]+', ' ', combined)
+
+    if _MAG_BOOK_PUBLISHERS_RE.search(combined) or _MAG_BOOK_PUBLISHERS_RE.search(combined_spaced):
         return None
 
     if clean_isbn.startswith('977'):
         return title or fname or 'ISSN Periodical'
 
     for rx, pub_label in _MAG_KNOWN_PATTERNS:
-        if rx.search(title or '') or rx.search(fname):
+        if rx.search(title or '') or rx.search(fname) or rx.search(combined_spaced):
             return pub_label
 
     in_mag_folder = 'computer mags' in (file_path or '').lower() or '/mags/' in (file_path or '').lower()
     has_issue_date = bool(_MAG_ISSUE_DATE_RE.search(title or '') or _MAG_ISSUE_DATE_RE.search(fname))
-    author_is_placeholder = (authors or '').strip().lower() in ('', '..', '.', 'unknown', 'unknown author', 'n/a', 'various')
+    has_periodical_word = bool(
+        re.search(
+            r'\b(magazine|magazin|journal|zeitschrift|quarterly|weekly|monthly|issue|heft|ausgabe|sonderheft|truepdf|emag|downmagaz|freemagazines)\b',
+            combined_spaced,
+            re.I,
+        )
+    )
 
-    if has_issue_date and (in_mag_folder or author_is_placeholder or re.search(r'\b(magazine|magazin|journal|zeitschrift|quarterly|weekly|monthly)\b', combined, re.I)):
+    if has_issue_date and (in_mag_folder or has_periodical_word):
         return title or os.path.splitext(fname)[0] or 'Periodical Issue'
 
     return None
@@ -1902,8 +3025,9 @@ def _unique_tomags_dest(tomags_dir: Path, filename: str) -> Path:
 def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
     """
     Move a single physical file from `/books/...` into `/toMags/` (`/volume1/common/Media/toMags`),
-    remove its old `/books/...` state from `scanner_state.db`, and delete its `FileLocation`
-    (and parent `CatalogItem` if no files remain).
+    record its original location in `.tomags_history.json` so the move can be undone at any time,
+    and update `FileLocation.file_path = '/toMags/<filename>'` so it appears on the `Moved to toMags`
+    review shelf (`?shelf=tomags`).
     """
     tomags_dir = _get_tomags_dir()
     if not tomags_dir:
@@ -1913,16 +3037,32 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
             'message': 'toMags directory (/toMags or /volume1/common/Media/toMags) is not mounted.',
         }
 
-    phys_path = _resolve_physical_file_path(file_loc.file_path)
+    item = file_loc.catalog_item
+    old_file_path = str(file_loc.file_path or '')
+    file_id_str = str(file_loc.id)
+    item_id_str = str(item.id) if item else ''
+
+    if old_file_path.startswith('/toMags/'):
+        return {
+            'ok': True,
+            'status': 'MOVED_TO_MAGS',
+            'moved_to_tomags': True,
+            'item_deleted': False,
+            'item_id': item_id_str,
+            'file_id': file_id_str,
+            'moved_files': [os.path.basename(old_file_path)],
+            'dest_path': old_file_path,
+            'message': f"'{os.path.basename(old_file_path)}' is already in toMags.",
+        }
+
+    phys_path = _resolve_physical_file_path(old_file_path)
     if not phys_path or not phys_path.exists():
         return {
             'ok': False,
             'status': 'NOT_FOUND',
-            'message': f'Physical file not found on NAS: {file_loc.file_path}',
+            'message': f'Physical file not found on NAS: {old_file_path}',
         }
 
-    item = file_loc.catalog_item
-    old_file_path = file_loc.file_path
     dest_file = _unique_tomags_dest(tomags_dir, phys_path.name)
     try:
         shutil.move(str(phys_path), str(dest_file))
@@ -1937,7 +3077,27 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
             'message': f'Failed to move {phys_path.name} to toMags: {mv_err}',
         }
 
-    # Remove old /books/... record from scanner_state.db / BookDB so scanner doesn't treat it as missing/book
+    # Save history entry for 1-click Undo / Restore
+    try:
+        hist = _load_tomags_history()
+        hist['entries'][dest_file.name] = {
+            'orig_file_path': old_file_path,
+            'dest_file_path': f'/toMags/{dest_file.name}',
+            'dest_name': dest_file.name,
+            'item_id': item_id_str,
+            'file_id': file_id_str,
+            'file_format': file_loc.file_format,
+            'file_size': file_loc.file_size,
+            'file_hash': file_loc.file_hash,
+            'library_name': file_loc.library_name,
+            'orig_item_type': item.item_type if item else 'BOOK',
+            'moved_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        _save_tomags_history(hist)
+    except Exception:
+        pass
+
+    # Remove old /books/... record from scanner_state.db so scanner doesn't treat it as missing
     db_path = _get_scanner_db_path()
     if is_postgres_scanner_enabled() or db_path.exists():
         try:
@@ -1949,33 +3109,65 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
         except Exception:
             pass
 
-    file_id_str = str(file_loc.id)
-    item_id_str = str(item.id) if item else ''
-    file_loc.delete()
+    # Update FileLocation in BookDB to point to /toMags/<dest_file.name> so it can be reviewed/undone!
+    new_db_path = f'/toMags/{dest_file.name}'
+    try:
+        file_loc.file_path = new_db_path
+        file_loc.file_name = dest_file.name
+        file_loc.save(update_fields=['file_path', 'file_name'])
+    except Exception:
+        pass
+    _TOMAGS_SHELF_CACHE['expires_at'] = 0.0
 
-    item_deleted = False
     if item:
-        if not FileLocation.objects.filter(catalog_item_id=item.id).exists():
-            CatalogItem.objects.filter(id=item.id).delete()
-            item_deleted = True
+        rem_files = list(FileLocation.objects.filter(catalog_item_id=item.id).values_list('file_path', flat=True))
+        if rem_files and all(str(p).startswith('/toMags/') for p in rem_files):
+            was_book = item.item_type == 'BOOK'
+            item.item_type = 'MAGAZINE'
+            item.save(update_fields=['item_type', 'updated_at'])
+            if was_book:
+                try:
+                    from .views import adjust_cached_books_count
+                    adjust_cached_books_count(-1)
+                except Exception:
+                    pass
+            try:
+                for set_key, list_key in (
+                    ('enriched_item_ids_set', 'enriched_item_ids'),
+                    ('needs_review_item_ids_set', 'needs_review_item_ids'),
+                    ('strict_in_review_ids_set', 'strict_in_review_ids'),
+                    ('excluded_from_needs_enriching_ids_set', 'excluded_from_needs_enriching_ids'),
+                ):
+                    s = _ENRICHED_PATHS_CACHE.get(set_key)
+                    if isinstance(s, set) and item.id in s:
+                        s.discard(item.id)
+                        lst = _ENRICHED_PATHS_CACHE.get(list_key)
+                        if isinstance(lst, list):
+                            try:
+                                lst.remove(item.id)
+                            except ValueError:
+                                pass
+                _save_enriched_cache_to_disk()
+            except Exception:
+                pass
 
     return {
         'ok': True,
         'status': 'MOVED_TO_MAGS',
         'moved_to_tomags': True,
-        'item_deleted': item_deleted,
+        'item_deleted': False,
         'item_id': item_id_str,
         'file_id': file_id_str,
         'moved_files': [dest_file.name],
-        'dest_path': f'/toMags/{dest_file.name}',
-        'message': f"Moved '{phys_path.name}' to toMags ({dest_file.name}).",
+        'dest_path': new_db_path,
+        'message': f"Moved '{phys_path.name}' to toMags ({dest_file.name}). Click Undo toMag to restore.",
     }
 
 
 def move_catalog_item_to_tomags(item: CatalogItem, only_detected_mags: bool = False) -> Dict[str, Any]:
     """
     Move all physical files (or all magazine-detected files when `only_detected_mags=True`)
-    of a `CatalogItem` to `/toMags/` and clean up `scanner_state.db` and `BookDB`.
+    of a `CatalogItem` to `/toMags/` and record history for Undo/Review.
     """
     tomags_dir = _get_tomags_dir()
     if not tomags_dir:
@@ -1985,12 +3177,12 @@ def move_catalog_item_to_tomags(item: CatalogItem, only_detected_mags: bool = Fa
             'message': 'toMags directory (/toMags or /volume1/common/Media/toMags) is not mounted.',
         }
 
-    files_list = list(item.files.all())
+    files_list = [f for f in item.files.all() if not str(f.file_path or '').startswith('/toMags/')]
     if not files_list:
         return {
             'ok': False,
             'status': 'NO_FILES',
-            'message': 'This catalog item has no physical files to move.',
+            'message': 'This catalog item has no physical book files left to move.',
         }
 
     moved_names: List[str] = []
@@ -2014,24 +3206,368 @@ def move_catalog_item_to_tomags(item: CatalogItem, only_detected_mags: bool = Fa
         else:
             errors.append(res.get('message', 'Move failed'))
 
-    if not FileLocation.objects.filter(catalog_item_id=item_id_str).exists():
-        CatalogItem.objects.filter(id=item_id_str).delete()
-    item_exists = CatalogItem.objects.filter(id=item_id_str).exists()
     if moved_names:
         return {
             'ok': True,
             'status': 'MOVED_TO_MAGS',
             'moved_to_tomags': True,
-            'item_deleted': not item_exists,
+            'item_deleted': False,
             'item_id': item_id_str,
             'moved_files': moved_names,
-            'message': f"Moved {len(moved_names)} magazine file(s) to toMags: {', '.join(moved_names[:4])}{'...' if len(moved_names) > 4 else ''}",
+            'message': f"Moved {len(moved_names)} file(s) to toMags: {', '.join(moved_names[:4])}{'...' if len(moved_names) > 4 else ''}",
         }
 
     return {
         'ok': False,
         'status': 'MOVE_FAILED',
         'message': '; '.join(errors) if errors else 'No matching magazine files were moved.',
+    }
+
+
+_TOMAGS_SHELF_CACHE: Dict[str, Any] = {
+    'dir_mtime': -1.0,
+    'expires_at': 0.0,
+    'item_ids': [],
+}
+
+
+def get_tomags_item_ids(sync_disk: bool = True) -> List[Any]:
+    """
+    Return the list of `CatalogItem.id`s that currently have at least one file physically in `/toMags/`.
+    Uses `/toMags` directory mtime + `.tomags_history.json` + PK lookups so it executes in <2ms
+    without any unindexed `FileLocation.file_path` table scans!
+    """
+    tomags_dir = _get_tomags_dir()
+    if not tomags_dir or not tomags_dir.exists():
+        return []
+
+    now_m = time.monotonic()
+    try:
+        cur_mtime = tomags_dir.stat().st_mtime
+    except Exception:
+        cur_mtime = 0.0
+
+    if (
+        not sync_disk
+        and _TOMAGS_SHELF_CACHE['dir_mtime'] == cur_mtime
+        and now_m < _TOMAGS_SHELF_CACHE['expires_at']
+    ):
+        return list(_TOMAGS_SHELF_CACHE['item_ids'])
+
+    if (
+        _TOMAGS_SHELF_CACHE['dir_mtime'] == cur_mtime
+        and now_m < _TOMAGS_SHELF_CACHE['expires_at']
+    ):
+        return list(_TOMAGS_SHELF_CACHE['item_ids'])
+
+    try:
+        disk_files = {p.name: p for p in tomags_dir.iterdir() if p.is_file() and not p.name.startswith('.')}
+    except Exception:
+        disk_files = {}
+
+    hist_data = _load_tomags_history()
+    entries = hist_data.setdefault('entries', {})
+    hist_changed = False
+
+    # 1. Clean up any history entries whose file is no longer in `/toMags` (e.g. processed by OrgPeriodicals)
+    stale_names = [fname for fname in list(entries.keys()) if fname not in disk_files]
+    for fname in stale_names:
+        ent = entries.pop(fname, {}) or {}
+        hist_changed = True
+        fid = ent.get('file_id')
+        cid = ent.get('item_id')
+        if fid:
+            try:
+                FileLocation.objects.filter(id=fid).delete()
+            except Exception:
+                pass
+        if cid:
+            try:
+                if not FileLocation.objects.filter(catalog_item_id=cid).exists():
+                    CatalogItem.objects.filter(id=cid).delete()
+            except Exception:
+                pass
+
+    # 2. Ensure every file physically in `/toMags` is registered in `.tomags_history.json` and `BookDB`
+    active_item_ids: List[str] = []
+    for fname, fpath in sorted(disk_files.items(), key=lambda kv: kv[0]):
+        ent = entries.get(fname) or {}
+        cid = ent.get('item_id')
+        fid = ent.get('file_id')
+
+        target_item = CatalogItem.objects.filter(id=cid).first() if cid else None
+        if not target_item:
+            # Fast indexed title lookup by filename or prefix
+            target_item = CatalogItem.objects.filter(title=fname).first()
+            if not target_item:
+                isbn_cand = _extract_book_isbn_from_text(fname)
+                if isbn_cand:
+                    target_item = CatalogItem.objects.filter(title=f"{isbn_cand}.pdf").first() or CatalogItem.objects.filter(title=f"{isbn_cand}.epub").first()
+            if not target_item:
+                target_item = CatalogItem.objects.create(
+                    title=fname,
+                    authors='Unknown Author',
+                    item_type='MAGAZINE',
+                )
+
+        new_db_path = f'/toMags/{fname}'
+        ext = fpath.suffix.lstrip('.').upper() or 'PDF'
+        try:
+            fsize = fpath.stat().st_size
+        except Exception:
+            fsize = 0
+
+        loc = FileLocation.objects.filter(id=fid).first() if fid else None
+        if not loc:
+            loc = FileLocation.objects.filter(catalog_item_id=target_item.id, file_name=fname).first()
+        if not loc:
+            loc = FileLocation.objects.create(
+                catalog_item=target_item,
+                file_path=new_db_path,
+                file_name=fname,
+                file_format=ext[:16],
+                file_size=fsize,
+                library_name='NAS toMags Queue',
+            )
+            hist_changed = True
+        elif loc.file_path != new_db_path:
+            loc.file_path = new_db_path
+            loc.file_name = fname
+            loc.save(update_fields=['file_path', 'file_name'])
+            hist_changed = True
+
+        if str(ent.get('item_id')) != str(target_item.id) or str(ent.get('file_id')) != str(loc.id):
+            ent['dest_name'] = fname
+            ent['dest_file_path'] = new_db_path
+            ent['item_id'] = str(target_item.id)
+            ent['file_id'] = str(loc.id)
+            ent.setdefault('file_format', ext[:16])
+            ent.setdefault('file_size', fsize)
+            entries[fname] = ent
+            hist_changed = True
+
+        if str(target_item.id) not in active_item_ids:
+            active_item_ids.append(str(target_item.id))
+
+    if hist_changed:
+        _save_tomags_history(hist_data)
+
+    _TOMAGS_SHELF_CACHE['dir_mtime'] = cur_mtime
+    _TOMAGS_SHELF_CACHE['expires_at'] = now_m + 30.0
+    _TOMAGS_SHELF_CACHE['item_ids'] = active_item_ids
+    return list(active_item_ids)
+
+
+def _compute_restore_dest_path(filename: str, item: Optional[CatalogItem], hist_entry: Dict[str, Any]) -> Tuple[Path, str]:
+    """
+    Determine `(physical_dest_path, db_file_path)` when restoring `filename` from `/toMags/` back to `/books/`.
+    """
+    books_root = _get_books_root_dir() or Path('/books')
+    orig_db_path = str(hist_entry.get('orig_file_path') or '').strip().replace('\\', '/')
+
+    if orig_db_path.startswith('/volume1/common/Media/Books/'):
+        orig_db_path = '/books/' + orig_db_path[len('/volume1/common/Media/Books/'):]
+
+    # If no recorded original path, infer category from sibling files on `item` or default to `Misc`
+    if not orig_db_path.startswith('/books/'):
+        cat_folder = 'Misc'
+        if item:
+            for sib in item.files.all():
+                sp = str(sib.file_path or '').replace('\\', '/')
+                if sp.startswith('/books/'):
+                    parts = [pt for pt in sp[len('/books/'):].split('/') if pt]
+                    if len(parts) >= 2:
+                        cat_folder = parts[0]
+                        break
+        stem = os.path.splitext(filename)[0]
+        alnum = re.sub(r'[^A-Za-z0-9]+', '', stem)
+        three_dir = (alnum[:3] if len(alnum) >= 3 else (stem[:3] or 'MIS')).upper()
+        orig_db_path = f'/books/{cat_folder}/{three_dir}/{filename}'
+
+    rel = orig_db_path[len('/books/'):].lstrip('/')
+    phys_dest = books_root / rel
+    if phys_dest.exists():
+        stem = phys_dest.stem
+        suf = phys_dest.suffix
+        parent = phys_dest.parent
+        c = 1
+        while True:
+            cand = parent / f"{stem} ({c}){suf}"
+            if not cand.exists():
+                phys_dest = cand
+                rel_parent = str(parent.relative_to(books_root)).replace('\\', '/')
+                orig_db_path = f"/books/{rel_parent}/{cand.name}"
+                break
+            c += 1
+
+    return phys_dest, orig_db_path
+
+
+def undo_move_from_tomags(
+    item_id: str = '',
+    file_id: str = '',
+    moved_files: Optional[List[str]] = None,
+    enrich_after: bool = False,
+) -> Dict[str, Any]:
+    """
+    Undo a move to `/toMags/`:
+      1. Moves physical file(s) from `/toMags/` back to their original `/books/<Category>/<3-letter>/` folder.
+      2. Updates `FileLocation.file_path` and restores `CatalogItem.item_type = 'BOOK'` in PostgreSQL `BookDB`.
+      3. Whitelists the file in `.tomags_history.json` (`not_magazine_paths`) so `detect_magazine_publication`
+         never auto-moves it to `/toMags/` again.
+      4. When `enrich_after=True`, immediately runs `enrich_catalog_item_on_demand(item, force=True)` to enrich
+         the restored book!
+    """
+    tomags_dir = _get_tomags_dir()
+    if not tomags_dir:
+        return {
+            'ok': False,
+            'status': 'TOMAGS_NOT_MOUNTED',
+            'message': 'toMags directory is not mounted.',
+        }
+
+    # Ensure any unindexed files in /toMags are synced into BookDB first
+    get_tomags_item_ids(sync_disk=True)
+
+    hist_data = _load_tomags_history()
+    entries = hist_data.get('entries', {})
+    not_mag_list: List[str] = list(hist_data.get('not_magazine_paths') or [])
+
+    target_locs: List[FileLocation] = []
+    target_item: Optional[CatalogItem] = None
+
+    if file_id:
+        loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
+        if loc and str(loc.file_path or '').startswith('/toMags/'):
+            target_locs.append(loc)
+            target_item = loc.catalog_item
+
+    if item_id and not target_locs:
+        target_item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
+        if target_item:
+            target_locs = [
+                f for f in target_item.files.all()
+                if str(f.file_path or '').startswith('/toMags/')
+            ]
+
+    if moved_files:
+        for mf in moved_files:
+            clean_mf = os.path.basename(str(mf or '').strip())
+            if not clean_mf:
+                continue
+            h_ent = entries.get(clean_mf) or {}
+            loc = None
+            if h_ent.get('file_id'):
+                loc = FileLocation.objects.select_related('catalog_item').filter(id=h_ent['file_id']).first()
+            if loc and loc not in target_locs:
+                target_locs.append(loc)
+                if not target_item:
+                    target_item = loc.catalog_item
+
+    if not target_locs and item_id:
+        # Check history entries matching item_id
+        for dname, h_ent in entries.items():
+            if str(h_ent.get('item_id')) == str(item_id) and h_ent.get('file_id'):
+                loc = FileLocation.objects.select_related('catalog_item').filter(
+                    id=h_ent['file_id']
+                ).first()
+                if loc and loc not in target_locs:
+                    target_locs.append(loc)
+                    if not target_item:
+                        target_item = loc.catalog_item
+
+    if not target_locs:
+        return {
+            'ok': False,
+            'status': 'NOT_FOUND_IN_TOMAGS',
+            'message': 'No matching files were found in /toMags to restore.',
+        }
+
+    restored_files: List[str] = []
+    restored_paths: List[str] = []
+    errors: List[str] = []
+
+    for loc in target_locs:
+        fname = os.path.basename(loc.file_path or loc.file_name or '')
+        phys_src = tomags_dir / fname
+        if not phys_src.exists():
+            alt_src = _resolve_physical_file_path(loc.file_path)
+            if alt_src and alt_src.exists():
+                phys_src = alt_src
+            else:
+                errors.append(f"File '{fname}' no longer exists in /toMags.")
+                continue
+
+        h_ent = entries.get(fname) or {}
+        phys_dest, new_db_path = _compute_restore_dest_path(fname, loc.catalog_item or target_item, h_ent)
+        try:
+            phys_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(phys_src), str(phys_dest))
+            try:
+                os.chmod(str(phys_dest), 0o666)
+            except Exception:
+                pass
+        except Exception as mv_err:
+            errors.append(f"Failed to restore '{fname}': {mv_err}")
+            continue
+
+        loc.file_path = new_db_path
+        loc.file_name = phys_dest.name
+        if h_ent.get('library_name'):
+            loc.library_name = h_ent['library_name']
+        elif loc.library_name == 'NAS toMags Queue':
+            loc.library_name = 'NAS Library'
+        loc.save(update_fields=['file_path', 'file_name', 'library_name'])
+
+        if not target_item:
+            target_item = loc.catalog_item
+
+        restored_files.append(phys_dest.name)
+        restored_paths.append(new_db_path)
+        for token in (phys_dest.name, fname, new_db_path):
+            if token and token not in not_mag_list:
+                not_mag_list.append(token)
+        entries.pop(fname, None)
+
+    hist_data['entries'] = entries
+    hist_data['not_magazine_paths'] = not_mag_list[-2000:]
+    _save_tomags_history(hist_data)
+    _TOMAGS_SHELF_CACHE['expires_at'] = 0.0
+
+    if not restored_files:
+        return {
+            'ok': False,
+            'status': 'RESTORE_FAILED',
+            'message': '; '.join(errors) if errors else 'Could not restore file(s) from /toMags.',
+        }
+
+    if target_item:
+        target_item.refresh_from_db()
+        if target_item.item_type == 'MAGAZINE':
+            target_item.item_type = 'BOOK'
+            target_item.save(update_fields=['item_type', 'updated_at'])
+
+    if enrich_after and target_item:
+        enr_res = enrich_catalog_item_on_demand(target_item, force=True)
+        enr_res['restored_from_tomags'] = True
+        enr_res['restored_files'] = restored_files
+        enr_res['restored_paths'] = restored_paths
+        if enr_res.get('ok'):
+            enr_res['message'] = f"Restored {', '.join(restored_files[:2])} to Books & enriched: {enr_res.get('title', target_item.title)}"
+        else:
+            enr_res['message'] = f"Restored {', '.join(restored_files[:2])} to Books. {enr_res.get('message', '')}".strip()
+        return enr_res
+
+    return {
+        'ok': True,
+        'status': 'RESTORED_FROM_MAGS',
+        'restored_from_tomags': True,
+        'item_id': str(target_item.id) if target_item else item_id,
+        'title': target_item.title if target_item else restored_files[0],
+        'authors': target_item.authors if target_item else 'Unknown Author',
+        'restored_files': restored_files,
+        'restored_paths': restored_paths,
+        'message': f"Restored {len(restored_files)} file(s) from toMags back to Books: {', '.join(restored_files[:3])}",
     }
 
 
@@ -2105,6 +3641,7 @@ def enrich_file_location_on_demand(
             mv_res = move_file_location_to_tomags(file_loc)
             if mv_res.get('ok'):
                 return mv_res
+        cov_issue = evaluate_and_record_item_cover_status(item)
         item_has_complete_meta = bool(
             item.title
             and not re.match(r'^untitled\b', (item.title or '').strip(), re.IGNORECASE)
@@ -2115,6 +3652,7 @@ def enrich_file_location_on_demand(
             and item.publisher
             and item.pub_date
             and (item.cover_thumbnail or item.cover_image_url)
+            and cov_issue is None
         )
         if item_has_complete_meta:
             merged_ids = merge_duplicate_catalog_items_for_item(item)
@@ -2134,6 +3672,7 @@ def enrich_file_location_on_demand(
                 'pub_date': str(item.pub_date) if item.pub_date else '',
                 'description': _strip_html(item.description or ''),
                 'cover_url': item.cover_thumbnail or item.cover_image_url or f'/mylibrary/opds/cover/{item.id}.jpg',
+                'cover_issue': cov_issue or '',
                 'tags': get_file_tags(file_loc.file_path),
                 'merged_item_ids': merged_ids,
             }
@@ -2418,13 +3957,27 @@ def enrich_file_location_on_demand(
             'orig_cover': item.cover_thumbnail or item.cover_image_url or '',
         }
 
-    orig_cover_thumb = item.cover_thumbnail if (item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image')) else ''
+    orig_cover_thumb = ''
+    try:
+        from epubmeta.external_dbs import generate_cover_thumbnail
+        emb_cov_bytes = reader.extract_cover_bytes() if reader else None
+        if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
+            orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
+    except Exception:
+        pass
     if not orig_cover_thumb:
         try:
-            from epubmeta.external_dbs import generate_cover_thumbnail
-            emb_cov_bytes = reader.extract_cover_bytes() if reader else None
-            if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
-                orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes) or ''
+            extracted_orig = extract_original_cover_for_item(item)
+            if extracted_orig and str(extracted_orig).startswith('data:image'):
+                orig_cover_thumb = extracted_orig
+        except Exception:
+            pass
+    if not orig_cover_thumb and item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image'):
+        orig_cover_thumb = item.cover_thumbnail
+    elif orig_cover_thumb and orig_cover_thumb != item.cover_thumbnail:
+        try:
+            item.cover_thumbnail = orig_cover_thumb
+            item.save(update_fields=['cover_thumbnail'])
         except Exception:
             pass
     orig_cover_for_payload = orig_cover_thumb or item.cover_image_url or ''
@@ -2467,6 +4020,20 @@ def enrich_file_location_on_demand(
 
     orig_title_has_alnum = bool(re.search(r'[A-Za-z0-9]{3,}', (item.title or '')))
     if (review_only and force_ai_vision) or (match_result and not match_result.is_confident and not force and orig_title_has_alnum):
+        if not getattr(target_meta, 'cover_url', None) and not orig_cover_for_payload:
+            try:
+                web_covs = search_book_covers_web(
+                    title=target_meta.title or '',
+                    authors=', '.join(target_meta.authors or []),
+                    isbn=target_meta.isbn13 or target_meta.isbn10 or isbn or '',
+                )
+                for wc in web_covs:
+                    cu = wc.get('cover_url') or wc.get('fallback_url') or ''
+                    if cu and wc.get('source') not in ('Original Cover', 'Web Image Search'):
+                        target_meta.cover_url = cu
+                        break
+            except Exception:
+                pass
         if review_only and force_ai_vision:
             msg = (
                 f"✨ Gemini AI Vision identified '{target_meta.title}' by "
@@ -2611,6 +4178,22 @@ def enrich_file_location_on_demand(
                 target_meta.title = str(fallback_cand).strip()
                 break
 
+    orig_payload_issue = classify_cover_image(orig_cover_thumb, item.cover_image_url or '')
+    if not getattr(target_meta, 'cover_url', None) and orig_payload_issue in ('missing', 'text_only'):
+        try:
+            web_covs = search_book_covers_web(
+                title=target_meta.title or '',
+                authors=', '.join(target_meta.authors or []),
+                isbn=target_meta.isbn13 or target_meta.isbn10 or isbn or '',
+            )
+            for wc in web_covs:
+                cu = wc.get('cover_url') or wc.get('fallback_url') or ''
+                if cu and wc.get('source') != 'Original Cover':
+                    target_meta.cover_url = cu
+                    break
+        except Exception:
+            pass
+
     if not getattr(target_meta, 'cover_bytes', None) and getattr(target_meta, 'cover_url', None):
         try:
             import requests as _req
@@ -2624,6 +4207,15 @@ def enrich_file_location_on_demand(
     status = res.get('status', 'FAILED')
     if status == 'SUCCESS':
         get_enriched_paths_set()
+        item, merged_ids = _apply_enriched_metadata_to_catalog_item(
+            item=item,
+            file_loc=file_loc,
+            target_meta=target_meta,
+            isbn_fallback=isbn,
+            file_sha256=res.get('file_sha256'),
+            cover_thumbnail=res.get('cover_thumbnail'),
+            phys_path=phys_path,
+        )
         s_map = _ENRICHED_PATHS_CACHE.get('status_by_path')
         if isinstance(s_map, dict):
             s_map.pop(str(file_loc.file_path or ''), None)
@@ -2662,15 +4254,7 @@ def enrich_file_location_on_demand(
                 _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'].add(item.id)
                 if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids'), list):
                     _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'].append(item.id)
-        merged_ids = _apply_enriched_metadata_to_catalog_item(
-            item=item,
-            file_loc=file_loc,
-            target_meta=target_meta,
-            isbn_fallback=isbn,
-            file_sha256=res.get('file_sha256'),
-            cover_thumbnail=res.get('cover_thumbnail'),
-            phys_path=phys_path,
-        ) or []
+        _save_enriched_cache_to_disk()
         # If after enrichment this file is identified as a Magazine / Periodical, move it to /toMags automatically!
         mag_pub = detect_magazine_publication(
             title=item.title,
@@ -2703,6 +4287,7 @@ def enrich_file_location_on_demand(
             'pub_date': str(item.pub_date) if item.pub_date else '',
             'description': _strip_html(item.description or ''),
             'cover_url': item.cover_thumbnail or item.cover_image_url or f'/mylibrary/opds/cover/{item.id}.jpg',
+            'cover_issue': classify_cover_image(item.cover_thumbnail, item.cover_image_url) or '',
             'tags': [str(s).strip() for s in (getattr(target_meta, 'subjects', None) or []) if str(s).strip()],
             'merged_item_ids': merged_ids,
         }
@@ -2776,6 +4361,17 @@ def enrich_catalog_item_on_demand(
             return 2
         return 3
 
+    initial_files = list(item.files.all())
+    split_cnt = 0
+    if len(initial_files) > 1:
+        try:
+            sp_res = split_unrelated_files_on_catalog_item(item, enrich_split=False)
+            split_cnt = int(sp_res.get('split_count') or 0)
+            if CatalogItem.objects.filter(id=item.id).exists():
+                item.refresh_from_db()
+        except Exception:
+            pass
+
     files_list = sorted(
         list(item.files.all()),
         key=lambda f: (
@@ -2789,7 +4385,7 @@ def enrich_catalog_item_on_demand(
         f for f in files_list
         if (f.file_format or '').upper().lstrip('.') in ENRICHABLE_FORMATS
         or str(f.file_path or '').lower().endswith(ENRICHABLE_EXTENSIONS)
-    ]
+    ][:3]
     if not enrichable:
         return {
             'ok': False,
@@ -2896,15 +4492,24 @@ def enrich_catalog_item_on_demand(
                 'cover_url': item.cover_thumbnail or item.cover_image_url or f'/mylibrary/opds/cover/{item.id}.jpg',
                 'tags': list(merged_tags),
                 'merged_item_ids': list(merged_item_ids),
+                'split_count': split_cnt,
+                'remaining_files_count': item.files.count(),
             })
         return best_success_res
 
-    return best_review_res or last_res or {
+    final_fallback = best_review_res or last_res or {
         'ok': False,
         'status': 'FAILED',
         'already_enriched': False,
         'message': 'All candidate book files failed enrichment.',
     }
+    if isinstance(final_fallback, dict) and CatalogItem.objects.filter(id=item.id).exists():
+        item.refresh_from_db()
+        final_fallback['split_count'] = split_cnt
+        final_fallback['remaining_files_count'] = item.files.count()
+        if split_cnt > 0:
+            final_fallback['cover_url'] = item.cover_thumbnail or item.cover_image_url or ''
+    return final_fallback
 
 
 def revert_catalog_item_enrichment(
@@ -3240,7 +4845,23 @@ def extract_original_cover_for_item(item: Optional[CatalogItem]) -> Optional[str
                     if thumb and thumb.startswith('data:image'):
                         return thumb
             except Exception:
-                continue
+                pass
+            if phys.suffix.lower() == '.pdf':
+                try:
+                    import pymupdf
+                    doc = pymupdf.open(phys)
+                    try:
+                        if (not doc.needs_pass or doc.authenticate("")) and len(doc) > 0:
+                            pix = doc[0].get_pixmap(dpi=150)
+                            png_bytes = pix.tobytes("png")
+                            if png_bytes and len(png_bytes) >= 1000:
+                                thumb = generate_cover_thumbnail(png_bytes, max_size=(360, 540))
+                                if thumb and thumb.startswith('data:image'):
+                                    return thumb
+                    finally:
+                        doc.close()
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -3251,6 +4872,36 @@ def extract_original_cover_for_item(item: Optional[CatalogItem]) -> Optional[str
     return None
 
 
+def _clean_filename_like_cover_query(raw_text: str, isbn_to_strip: str = '') -> str:
+    """
+    Convert filename-style book titles or queries like:
+      - `0192805053.OxfordUnivPress.Why_Read_Marx_Today.Nov.1999.ISBN.0192805053.mobi`
+      - `0192804936.pdf`
+    into a clean human-readable search query (`Why Read Marx Today`).
+    """
+    if not raw_text:
+        return ''
+    s = str(raw_text).strip()
+    # Strip trailing file extensions
+    s = re.sub(r'\.(?:epub|pdf|mobi|azw3?|djvu|cbz|cbr|fb2|txt|rtf|doc|docx|lit|prc|pdb)$', '', s, flags=re.I)
+    # Replace dots and underscores when the string looks like a dotted/underscored filename
+    if ('.' in s and ' ' not in s) or '_' in s or s.count('.') >= 2:
+        s = s.replace('.', ' ').replace('_', ' ')
+    # Strip embedded ISBN tokens and common filename release tags
+    if isbn_to_strip:
+        s = re.sub(re.escape(isbn_to_strip), ' ', s, flags=re.I)
+    s = re.sub(r'\b(?:97[89]\d{10}|\d{9}[\dXx])\b', ' ', s)
+    s = re.sub(
+        r'\b(?:isbn|ebook|retail|epub|mobi|pdf|azw3?|nodrm|ocr|v\d+|oxfordunivpress|oxford\s+university\s+press(?:\s+usa)?)\b(?:-[A-Za-z0-9]+)?',
+        ' ',
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(?:19|20)\d{2}\b', ' ', s, flags=re.I)
+    s = re.sub(r'\s+', ' ', s).strip(' .,-_:')
+    return s
+
+
 def search_book_covers_web(
     query: str = '',
     title: str = '',
@@ -3259,26 +4910,33 @@ def search_book_covers_web(
     item_id: str = '',
 ) -> List[Dict[str, Any]]:
     """
-    Search multiple web book cover sources in parallel (Apple Books, Google Books, Open Library)
-    just like Moon+ Reader's "Download cover from internet" feature, placing the book's
-    original embedded cover first unless missing.
+    Search multiple web book cover sources in parallel (Goodreads, Apple Books, Google Books,
+    Open Library, and Web Image Search) just like Moon+ Reader's "Download cover from internet"
+    feature, placing the book's original embedded cover first unless missing.
     Returns a deduplicated list of candidate cover dicts:
-      `{"cover_url": str, "title": str, "authors": str, "source": str}`
+      `{"cover_url": str, "fallback_url": str, "title": str, "authors": str, "source": str}`
     """
     import concurrent.futures
     import urllib.parse
     import requests
 
     clean_isbn = re.sub(r'[^0-9Xx]', '', str(isbn or '')).upper()
-    clean_title = (title or '').strip()
+    if len(clean_isbn) not in (10, 13):
+        extracted_isbn = _extract_book_isbn_from_text(isbn, query, title)
+        if extracted_isbn:
+            clean_isbn = extracted_isbn
+
+    raw_title = (title or '').strip()
+    clean_title = _clean_filename_like_cover_query(raw_title, clean_isbn)
     clean_authors = (authors or '').strip()
     if clean_authors.lower() in ('unknown', 'unknown author', '..', '.'):
         clean_authors = ''
 
-    search_q = (query or '').strip()
+    raw_q = (query or '').strip()
+    search_q = _clean_filename_like_cover_query(raw_q, clean_isbn) if raw_q else ''
     if not search_q:
-        parts = [p for p in (clean_title, clean_authors) if p]
-        search_q = ' '.join(parts) or clean_isbn
+        parts = [p for p in (clean_title, clean_authors) if p and p != clean_isbn]
+        search_q = ' '.join(parts).strip()
 
     # Shorten overly long subtitle queries so Apple Books / Open Library return fast, accurate matches
     short_title = clean_title.split(':', 1)[0].strip() if ':' in clean_title else clean_title
@@ -3286,22 +4944,48 @@ def search_book_covers_web(
     if len(api_q) > 70 and ':' in api_q:
         api_q = f"{api_q.split(':', 1)[0].strip()} {clean_authors}".strip()
 
+    # If the book only had an ISBN filename (e.g. `0192804936.pdf`), quickly resolve its title/author from Goodreads
+    if (not api_q or api_q == clean_isbn or len(api_q) < 3) and len(clean_isbn) in (10, 13):
+        try:
+            r_gr_isbn = requests.get(
+                f'https://www.goodreads.com/book/auto_complete?format=json&q={urllib.parse.quote(clean_isbn)}',
+                timeout=(1.5, 2.0),
+                headers={'User-Agent': 'Mozilla/5.0'},
+            )
+            if r_gr_isbn.status_code == 200:
+                gr_items = r_gr_isbn.json() or []
+                if gr_items and isinstance(gr_items, list):
+                    first_gr = gr_items[0] or {}
+                    gr_t = (first_gr.get('title') or '').strip()
+                    gr_a = ((first_gr.get('author') or {}).get('name') or '').strip()
+                    if gr_t:
+                        clean_title = gr_t
+                        short_title = gr_t.split(':', 1)[0].strip() if ':' in gr_t else gr_t
+                        if gr_a and not clean_authors:
+                            clean_authors = gr_a
+                        api_q = f"{short_title} {clean_authors}".strip()
+        except Exception:
+            pass
+
     results: List[Dict[str, Any]] = []
     seen_urls: set = set()
 
     def _add(url: str, c_title: str, c_auth: str, source: str, fallback_url: str = ''):
-        if not url:
+        if not url and not fallback_url:
             return
-        u = url.strip()
+        u = (url or fallback_url).strip()
         if u.startswith('http://'):
             u = 'https://' + u[7:]
         norm_u = re.sub(r'&edge=curl', '', u)
         if norm_u in seen_urls:
             return
         seen_urls.add(norm_u)
+        fb = (fallback_url or '').strip()
+        if fb.startswith('http://'):
+            fb = 'https://' + fb[7:]
         results.append({
             'cover_url': norm_u,
-            'fallback_url': (fallback_url or '').strip(),
+            'fallback_url': fb,
             'title': (c_title or clean_title or 'Book Cover').strip(),
             'authors': (c_auth or clean_authors or '').strip(),
             'source': source,
@@ -3326,32 +5010,91 @@ def search_book_covers_web(
     if len(clean_isbn) in (10, 13):
         _add(
             f'https://covers.openlibrary.org/b/isbn/{clean_isbn}-L.jpg?default=false',
-            short_title or clean_title,
+            short_title or clean_title or f'ISBN {clean_isbn}',
             clean_authors,
             'Open Library (ISBN)',
         )
 
+    want_tokens = {
+        w for w in re.findall(r'[a-z0-9]{3,}', (short_title or api_q).lower())
+        if w not in ('the', 'and', 'for', 'with', 'from', 'book', 'cover', 'edition', 'introduction', 'very', 'short')
+    }
+
+    def _fetch_goodreads() -> List[Dict[str, str]]:
+        out = []
+        queries = []
+        if len(clean_isbn) in (10, 13):
+            queries.append(clean_isbn)
+        if api_q and api_q not in queries:
+            queries.append(api_q)
+        for q_str in queries[:2]:
+            try:
+                url = f'https://www.goodreads.com/book/auto_complete?format=json&q={urllib.parse.quote(q_str)}'
+                r = requests.get(url, timeout=(2.0, 2.8), headers={'User-Agent': 'Mozilla/5.0'})
+                if r.status_code == 200:
+                    for it in (r.json() or [])[:6]:
+                        img = (it.get('imageUrl') or '').strip()
+                        if not img or 'nophoto' in img:
+                            continue
+                        hi_img = re.sub(r'\._S[XY]\d+(?:_S[XY]\d+)?_\.', '.', img)
+                        out.append({
+                            'url': hi_img,
+                            'fallback_url': img,
+                            'title': it.get('title') or '',
+                            'authors': ((it.get('author') or {}).get('name') or '').strip(),
+                            'source': 'Goodreads',
+                        })
+            except Exception:
+                pass
+        return out
+
     def _fetch_apple_books() -> List[Dict[str, str]]:
         out = []
-        if not api_q:
+        if not api_q and not clean_isbn:
             return out
         try:
-            url = f'https://itunes.apple.com/search?media=ebook&entity=ebook&limit=8&term={urllib.parse.quote(api_q)}'
-            r = requests.get(url, timeout=(2.0, 2.8), headers={'User-Agent': 'Mozilla/5.0'})
-            if r.status_code == 200:
-                for item in (r.json().get('results') or []):
-                    art = item.get('artworkUrl100') or item.get('artworkUrl60') or ''
-                    if art:
-                        hi_res = re.sub(r'\d+x\d+bb\.jpg', '600x600bb.jpg', art)
-                        out.append({
-                            'url': hi_res,
-                            'title': item.get('trackName') or '',
-                            'authors': item.get('artistName') or '',
-                            'source': 'Apple Books',
-                        })
+            if len(clean_isbn) in (10, 13):
+                r_i = requests.get(
+                    f'https://itunes.apple.com/lookup?isbn={urllib.parse.quote(clean_isbn)}',
+                    timeout=(1.8, 2.5),
+                    headers={'User-Agent': 'Mozilla/5.0'},
+                )
+                if r_i.status_code == 200:
+                    for item in (r_i.json().get('results') or []):
+                        art = item.get('artworkUrl100') or item.get('artworkUrl60') or ''
+                        if art:
+                            hi_res = re.sub(r'\d+x\d+bb\.jpg', '600x600bb.jpg', art)
+                            out.append({
+                                'url': hi_res,
+                                'fallback_url': art,
+                                'title': item.get('trackName') or '',
+                                'authors': item.get('artistName') or '',
+                                'source': 'Apple Books',
+                            })
+            if api_q:
+                url = f'https://itunes.apple.com/search?media=ebook&entity=ebook&limit=8&term={urllib.parse.quote(api_q)}'
+                r = requests.get(url, timeout=(2.0, 2.8), headers={'User-Agent': 'Mozilla/5.0'})
+                if r.status_code == 200:
+                    for item in (r.json().get('results') or []):
+                        art = item.get('artworkUrl100') or item.get('artworkUrl60') or ''
+                        t_name = item.get('trackName') or ''
+                        a_name = item.get('artistName') or ''
+                        if want_tokens:
+                            cand_toks = set(re.findall(r'[a-z0-9]{3,}', f"{t_name} {a_name}".lower()))
+                            if not (want_tokens & cand_toks):
+                                continue
+                        if art:
+                            hi_res = re.sub(r'\d+x\d+bb\.jpg', '600x600bb.jpg', art)
+                            out.append({
+                                'url': hi_res,
+                                'fallback_url': art,
+                                'title': t_name,
+                                'authors': a_name,
+                                'source': 'Apple Books',
+                            })
         except Exception:
             pass
-        return out
+        return out[:6]
 
     def _fetch_google_books() -> List[Dict[str, str]]:
         out = []
@@ -3361,7 +5104,7 @@ def search_book_covers_web(
             epubmeta_cfg = _load_scanner_epubmeta_config()
             g_key = epubmeta_cfg.get('google_api_key') or os.environ.get('GOOGLE_BOOKS_API_KEY') or ''
             q_str = f'isbn:{clean_isbn}' if len(clean_isbn) in (10, 13) else api_q
-            url = f'https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(q_str)}&maxResults=8'
+            url = f'https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(q_str)}&maxResults=6'
             if g_key:
                 url += f'&key={urllib.parse.quote(g_key)}'
             r = requests.get(url, timeout=(2.0, 2.8), headers={'User-Agent': 'Mozilla/5.0'})
@@ -3382,14 +5125,14 @@ def search_book_covers_web(
                         })
         except Exception:
             pass
-        return out
+        return out[:6]
 
     def _fetch_open_library() -> List[Dict[str, str]]:
         out = []
         if not api_q:
             return out
         try:
-            url = f'https://openlibrary.org/search.json?q={urllib.parse.quote(api_q)}&limit=8'
+            url = f'https://openlibrary.org/search.json?q={urllib.parse.quote(api_q)}&limit=6'
             r = requests.get(url, timeout=(2.0, 2.8), headers={'User-Agent': 'Mozilla/5.0'})
             if r.status_code == 200:
                 for doc in (r.json().get('docs') or []):
@@ -3403,47 +5146,61 @@ def search_book_covers_web(
                         })
         except Exception:
             pass
-        return out
+        return out[:6]
 
     def _fetch_web_image_covers() -> List[Dict[str, str]]:
         out = []
-        if not api_q:
+        base_web_q = api_q or clean_isbn
+        if not base_web_q:
             return out
         try:
             import html as _html
-            web_q = f'{api_q} book cover'
+            web_q = f'{base_web_q} book cover'
+            if len(clean_isbn) in (10, 13) and clean_isbn not in web_q and len(base_web_q) < 45:
+                web_q = f'{base_web_q} {clean_isbn} book cover'
             url = f'https://www.bing.com/images/search?q={urllib.parse.quote(web_q)}&form=HDRSC2'
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
             }
-            r = requests.get(url, timeout=(2.0, 2.8), headers=headers)
+            r = requests.get(url, timeout=(2.2, 3.0), headers=headers)
             if r.status_code == 200:
-                murls = re.findall(r'murl&quot;:&quot;(https?://[^&]+?)&quot;', r.text)
-                turls = re.findall(r'turl&quot;:&quot;(https?://[^&]+?)&quot;', r.text)
-                titles = re.findall(r'&quot;t&quot;:&quot;([^&]*?)&quot;', r.text)
-                for idx, raw_u in enumerate(murls[:12]):
-                    u = _html.unescape(raw_u)
-                    fb_u = _html.unescape(turls[idx]) if idx < len(turls) else ''
-                    t_lbl = _html.unescape(titles[idx]) if idx < len(titles) else (short_title or clean_title or api_q)
+                raw_blocks = re.findall(r'\bm="(\{[^"]+\})"', r.text)
+                for b in raw_blocks[:16]:
+                    try:
+                        d = json.loads(_html.unescape(b))
+                    except Exception:
+                        continue
+                    u = (d.get('murl') or '').strip()
+                    fb_u = (d.get('turl') or '').strip()
+                    t_lbl = (d.get('t') or d.get('desc') or short_title or clean_title or base_web_q).strip()
+                    if not u and not fb_u:
+                        continue
+                    # Skip generic vector/stock/template spam
+                    low_Check = f"{u} {t_lbl}".lower()
+                    if any(bad in low_Check for bad in ('template.net', 'freepik.com', 'vecteezy.com', 'dreamstime.com', 'pngtree.com', 'shutterstock.com')):
+                        continue
                     out.append({
-                        'url': u,
+                        'url': u or fb_u,
                         'fallback_url': fb_u,
                         'title': t_lbl,
                         'authors': clean_authors,
                         'source': 'Web Image Search',
                     })
+                    if len(out) >= 12:
+                        break
         except Exception:
             pass
         return out
 
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=5)
     try:
+        f_gr = ex.submit(_fetch_goodreads)
         f_apple = ex.submit(_fetch_apple_books)
         f_google = ex.submit(_fetch_google_books)
         f_ol = ex.submit(_fetch_open_library)
         f_web = ex.submit(_fetch_web_image_covers)
-        futs = (f_apple, f_google, f_ol, f_web)
-        concurrent.futures.wait(futs, timeout=3.2)
+        futs = (f_gr, f_apple, f_google, f_ol, f_web)
+        concurrent.futures.wait(futs, timeout=3.5)
         for fut in futs:
             if fut.done():
                 try:
@@ -3454,10 +5211,21 @@ def search_book_covers_web(
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 
-    return results[:18]
+    return results[:24]
 
 
-def apply_book_cover_to_item(item_or_id: Any, cover_url: str, fallback_url: str = '') -> Dict[str, Any]:
+def apply_book_cover_to_item(
+    item_or_id: Any,
+    cover_url: str,
+    fallback_url: str = '',
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    query: str = '',
+    user_selected: bool = True,
+) -> Dict[str, Any]:
     """
     Download `cover_url` (or `fallback_url` if the primary host blocks or fails),
     convert it into a crisp base64 JPEG thumbnail (`cover_thumbnail`),
@@ -3468,10 +5236,15 @@ def apply_book_cover_to_item(item_or_id: Any, cover_url: str, fallback_url: str 
     import io
     import requests
 
-    if isinstance(item_or_id, CatalogItem):
-        item = item_or_id
-    else:
-        item = CatalogItem.objects.prefetch_related('files').filter(id=item_or_id).first()
+    item = resolve_catalog_item_by_id_or_fallback(
+        item_or_id,
+        file_id=file_id,
+        file_path=file_path,
+        isbn=isbn,
+        title=title,
+        authors=authors,
+        query=query,
+    )
     if not item:
         return {'ok': False, 'error': f'CatalogItem not found: {item_or_id}'}
 
@@ -3547,12 +5320,721 @@ def apply_book_cover_to_item(item_or_id: Any, cover_url: str, fallback_url: str 
     except Exception:
         pass
 
+    # When a user applies a cover via Find Cover, remove/dismiss from Missing / Text Cover shelf
+    needs_cover_cnt = 0
+    try:
+        if user_selected:
+            set_Res = set_book_needs_cover(item.id, needs_cover=False, reason='Cover applied by user')
+            needs_cover_cnt = int(set_Res.get('missing_cover_count', 0))
+        else:
+            evaluate_and_record_item_cover_status(item)
+            needs_cover_cnt = int(get_needs_cover_enriched_shelf().get('count', 0))
+    except Exception:
+        pass
+
     return {
         'ok': True,
         'item_id': str(item.id),
         'cover_url': item.cover_thumbnail or item.cover_image_url or cover_url,
         'external_cover_url': item.cover_image_url or '',
+        'cover_issue': '',
+        'missing_cover_count': needs_cover_cnt,
     }
+
+
+_KNOWN_BOOK_CATALOG_COVER_HOSTS = (
+    'books.google.',
+    'googleapis.com',
+    'mzstatic.com',
+    'openlibrary.org',
+    'goodreads.com',
+    'gr-assets.com',
+    'media-amazon.com',
+    'images-amazon.com',
+    'ssl-images-amazon.com',
+    'amazon.com',
+)
+
+
+_COVER_REPAIR_STATE: Dict[str, Any] = {
+    'running': False,
+    'finished': False,
+    'checked': 0,
+    'skipped_user_selected': 0,
+    'cleared_auto_bing_wallpaper': 0,
+    'repaired_from_catalog_url': 0,
+    'repaired_from_original_pdf': 0,
+    'total_repaired': 0,
+    'details': [],
+    'error': '',
+}
+
+
+_COVER_REPAIR_STATE_FILE = Path('/tmp/mylibrary_cover_repair_state.json')
+
+
+def _save_cover_repair_state(st: Dict[str, Any]) -> None:
+    try:
+        _COVER_REPAIR_STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding='utf-8')
+    except Exception:
+        pass
+
+
+def start_or_get_cover_repair_status(start: bool = False) -> Dict[str, Any]:
+    cur_state = dict(_COVER_REPAIR_STATE)
+    try:
+        if _COVER_REPAIR_STATE_FILE.exists():
+            cur_state = json.loads(_COVER_REPAIR_STATE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    if start:
+        import threading
+        init_state = {
+            'running': True,
+            'finished': False,
+            'checked': 0,
+            'target_total': 0,
+            'skipped_user_selected': 0,
+            'cleared_auto_bing_wallpaper': 0,
+            'repaired_from_catalog_url': 0,
+            'repaired_from_original_pdf': 0,
+            'total_repaired': 0,
+            'details': [],
+            'error': '',
+        }
+        _COVER_REPAIR_STATE.update(init_state)
+        _save_cover_repair_state(init_state)
+        threading.Thread(
+            target=repair_stale_enriched_covers_without_user_override,
+            kwargs={'dry_run': False, 'limit': 200, 'max_repairs': 5000},
+            daemon=True,
+        ).start()
+        return init_state
+    return cur_state
+
+
+def repair_stale_enriched_covers_without_user_override(dry_run: bool = False, limit: int = 200, max_repairs: int = 500) -> Dict[str, Any]:
+    """
+    Background worker that inspects already-enriched CatalogItems in BookDB and repairs ONLY those where:
+      1. The user did NOT manually select a new cover in Find Cover, AND
+      2. Either:
+         a) `cover_image_url` was set during enrichment/approval to an auto-picked Bing Web Image
+            (non-book-catalog host matching `updated_metadata_json.cover_url`), or
+         b) `cover_image_url` is a valid book-catalog URL from enrichment/approval, but `cover_thumbnail`
+            was left on a missing/blank/text-only XObject slice because of the old `if not cat_item.cover_thumbnail:` bug, or
+         c) `cover_image_url` is empty (no external cover selected) and `cover_thumbnail` is missing
+            or a blank/partial XObject slice on a PDF where rendering Page 1 (`extract_original_cover_for_item`)
+            produces a better full-page cover.
+    """
+    from django.db import connection
+    from django.db.models import Q
+
+    try:
+        user_dismissed_ids: set = set()
+        needs_cover_issue_by_id: Dict[str, str] = {}
+        try:
+            _ensure_needs_cover_table()
+            with connection.cursor() as cur:
+                cur.execute("SELECT item_id, cover_issue FROM catalog_needs_cover_books")
+                for r in cur.fetchall():
+                    if not r or not r[0]:
+                        continue
+                    cid = str(r[0])
+                    if cid.startswith('__'):
+                        continue
+                    if r[1] == 'dismissed':
+                        user_dismissed_ids.add(cid)
+                    elif r[1] in ('missing', 'text_only'):
+                        needs_cover_issue_by_id[cid] = str(r[1])
+        except Exception:
+            pass
+
+        # Fast query against scanner_state.db ONLY for rows where updated_metadata_json contains cover_url
+        auto_cover_url_by_path: Dict[str, str] = {}
+        db_paths_with_auto_cover: List[str] = []
+        try:
+            db_path = _get_scanner_db_path()
+            if db_path and db_path.exists():
+                conn = connect_scanner_db(db_path, timeout=5.0)
+                try:
+                    rows = conn.execute(
+                        "SELECT file_path, updated_metadata_json FROM processed_files "
+                        "WHERE status = 'SUCCESS' AND updated_metadata_json LIKE '%http%'"
+                    ).fetchall()
+                    for fp, ujson in rows:
+                        if not fp or not ujson:
+                            continue
+                        try:
+                            um = json.loads(ujson) or {}
+                            cu = str(um.get('cover_url') or '').strip()
+                            if cu:
+                                norm_fp = str(fp).strip().replace('\\', '/')
+                                auto_cover_url_by_path[norm_fp] = cu
+                                db_paths_with_auto_cover.append(norm_fp)
+                                if norm_fp.startswith('/volume1/common/Media/Books/'):
+                                    alt = '/books/' + norm_fp[len('/volume1/common/Media/Books/'):]
+                                    auto_cover_url_by_path[alt] = cu
+                                    db_paths_with_auto_cover.append(alt)
+                                elif norm_fp.startswith('/books/'):
+                                    alt = '/volume1/common/Media/Books/' + norm_fp[len('/books/'):]
+                                    auto_cover_url_by_path[alt] = cu
+                                    db_paths_with_auto_cover.append(alt)
+                        except Exception:
+                            continue
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
+        auto_cov_item_ids: set = set()
+        if db_paths_with_auto_cover:
+            for i in range(0, len(db_paths_with_auto_cover), 300):
+                chunk_p = db_paths_with_auto_cover[i:i + 300]
+                for cid in FileLocation.objects.filter(file_path__in=chunk_p).values_list('catalog_item_id', flat=True):
+                    if cid:
+                        auto_cov_item_ids.add(str(cid))
+
+        target_ids = list(auto_cov_item_ids | {cid for cid in needs_cover_issue_by_id.keys() if cid not in user_dismissed_ids})
+        _COVER_REPAIR_STATE['target_total'] = len(target_ids)
+        _save_cover_repair_state(_COVER_REPAIR_STATE)
+
+        for start_i in range(0, len(target_ids), 80):
+            chunk_ids = target_ids[start_i:start_i + 80]
+            items_batch = list(CatalogItem.objects.filter(id__in=chunk_ids).prefetch_related('files'))
+            for item in items_batch:
+                item_id_str = str(item.id)
+                _COVER_REPAIR_STATE['checked'] += 1
+                if _COVER_REPAIR_STATE['checked'] % 10 == 0:
+                    _save_cover_repair_state(_COVER_REPAIR_STATE)
+                ext_url = str(item.cover_image_url or '').strip()
+                thumb = str(item.cover_thumbnail or '').strip()
+                files = list(item.files.all())
+                f_paths = [str(f.file_path or '').strip().replace('\\', '/') for f in files if f.file_path]
+                has_pdf = any((f.file_format or '').upper() == 'PDF' or str(f.file_path or '').lower().endswith('.pdf') for f in files)
+
+                auto_urls = {auto_cover_url_by_path[p] for p in f_paths if p in auto_cover_url_by_path}
+                is_ext_url_from_auto_enrich = bool(ext_url and ext_url in auto_urls)
+                is_ext_url_book_catalog = bool(ext_url and any(h in ext_url.lower() for h in _KNOWN_BOOK_CATALOG_COVER_HOSTS))
+
+                # Never overwrite a cover where the user manually selected a new cover!
+                if ext_url and not is_ext_url_from_auto_enrich and item_id_str in user_dismissed_ids:
+                    _COVER_REPAIR_STATE['skipped_user_selected'] += 1
+                    continue
+                thumb_issue = needs_cover_issue_by_id.get(item_id_str) or (classify_cover_image(thumb) if thumb else 'missing')
+                if ext_url and not is_ext_url_from_auto_enrich and thumb_issue is None:
+                    _COVER_REPAIR_STATE['skipped_user_selected'] += 1
+                    continue
+
+                # Case 1: Enrichment/approval auto-picked a non-book-catalog Bing Web Image Search URL
+                if ext_url and is_ext_url_from_auto_enrich and not is_ext_url_book_catalog:
+                    if not dry_run:
+                        item.cover_image_url = None
+                        orig_cov = extract_original_cover_for_item(item)
+                        if orig_cov and orig_cov.startswith('data:image'):
+                            item.cover_thumbnail = orig_cov
+                        item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
+                        evaluate_and_record_item_cover_status(item)
+                    _COVER_REPAIR_STATE['cleared_auto_bing_wallpaper'] += 1
+                    _COVER_REPAIR_STATE['total_repaired'] += 1
+                    if len(_COVER_REPAIR_STATE['details']) < limit:
+                        _COVER_REPAIR_STATE['details'].append({
+                            'item_id': item_id_str,
+                            'title': item.title,
+                            'reason': 'auto_bing_web_image_replaced_with_original',
+                            'old_ext_url': ext_url,
+                        })
+                    continue
+
+                # Case 2: Valid book-catalog cover_image_url exists, but cover_thumbnail is missing or still stuck on a text_only/blank XObject slice
+                if ext_url and is_ext_url_book_catalog and thumb_issue in ('missing', 'text_only'):
+                    if not dry_run:
+                        res = apply_book_cover_to_item(item, ext_url, user_selected=False)
+                        if not res.get('ok'):
+                            orig_cov = extract_original_cover_for_item(item)
+                            if orig_cov and orig_cov.startswith('data:image'):
+                                item.cover_thumbnail = orig_cov
+                                item.save(update_fields=['cover_thumbnail', 'updated_at'])
+                                evaluate_and_record_item_cover_status(item)
+                    _COVER_REPAIR_STATE['repaired_from_catalog_url'] += 1
+                    _COVER_REPAIR_STATE['total_repaired'] += 1
+                    if len(_COVER_REPAIR_STATE['details']) < limit:
+                        _COVER_REPAIR_STATE['details'].append({
+                            'item_id': item_id_str,
+                            'title': item.title,
+                            'reason': 'sync_thumbnail_from_catalog_cover_url',
+                            'ext_url': ext_url,
+                        })
+                    continue
+
+                # Case 3: No external cover selected (`not ext_url`), item is a PDF, user never dismissed/selected a cover,
+                # and `cover_thumbnail` is missing or a blank/partial XObject slice where rendering PDF Page 1 yields a better cover
+                if not ext_url and has_pdf and item_id_str not in user_dismissed_ids and thumb_issue in ('missing', 'text_only'):
+                    if _COVER_REPAIR_STATE['total_repaired'] >= max_repairs:
+                        continue
+                    orig_cov = extract_original_cover_for_item(item)
+                    if orig_cov and orig_cov.startswith('data:image') and orig_cov != thumb and (
+                        not thumb
+                        or classify_cover_image(orig_cov) is None
+                        or len(orig_cov) > len(thumb) + 2000
+                    ):
+                        if not dry_run:
+                            item.cover_thumbnail = orig_cov
+                            item.save(update_fields=['cover_thumbnail', 'updated_at'])
+                            evaluate_and_record_item_cover_status(item)
+                        _COVER_REPAIR_STATE['repaired_from_original_pdf'] += 1
+                        _COVER_REPAIR_STATE['total_repaired'] += 1
+                        if len(_COVER_REPAIR_STATE['details']) < limit:
+                            _COVER_REPAIR_STATE['details'].append({
+                                'item_id': item_id_str,
+                                'title': item.title,
+                                'reason': 'rendered_pdf_page1_original_cover',
+                            })
+    except Exception as exc:
+        _COVER_REPAIR_STATE['error'] = str(exc)
+    finally:
+        _COVER_REPAIR_STATE['running'] = False
+        _COVER_REPAIR_STATE['finished'] = True
+        _save_cover_repair_state(_COVER_REPAIR_STATE)
+    return dict(_COVER_REPAIR_STATE)
+
+
+def classify_cover_image(cover_data_or_bytes: Any, cover_image_url: str = '') -> Optional[str]:
+    """
+    Inspect a book's cover image (`cover_thumbnail` data URI or raw `bytes`, plus `cover_image_url`)
+    and return:
+      - `'missing'`: No `cover_thumbnail` and no `cover_image_url`
+      - `'text_only'`: A plain white/paper title page with black/gray text (or blank/monochrome page
+        without cover artwork)
+      - `None`: Has a genuine graphic cover
+    """
+    raw_bytes: Optional[bytes] = None
+    if isinstance(cover_data_or_bytes, (bytes, bytearray)):
+        raw_bytes = bytes(cover_data_or_bytes)
+    elif isinstance(cover_data_or_bytes, str):
+        s_val = cover_data_or_bytes.strip()
+        if s_val.startswith('data:image') and ',' in s_val:
+            try:
+                raw_bytes = base64.b64decode(s_val.split(',', 1)[1])
+            except Exception:
+                raw_bytes = None
+
+    clean_ext_url = str(cover_image_url or '').strip()
+    if not raw_bytes and not clean_ext_url:
+        return 'missing'
+    if not raw_bytes:
+        # External URL exists without decoded thumbnail bytes
+        return None
+    if len(raw_bytes) < 900:
+        return 'missing'
+
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(raw_bytes)).convert('RGB')
+        w, h = im.size
+        if w < 24 or h < 24:
+            return 'missing'
+
+        # Crop 8% outer border to ignore scan borders / shadows, then downsample to 32x45 for sub-millisecond analysis
+        im_crop = im.crop((int(w * 0.08), int(h * 0.08), max(int(w * 0.08) + 1, int(w * 0.92)), max(int(h * 0.08) + 1, int(h * 0.92))))
+        im_small = im_crop.resize((32, 45))
+        if hasattr(im_small, 'get_flattened_data'):
+            px = list(im_small.get_flattened_data())
+        else:
+            px = list(im_small.getdata())
+        n = len(px)
+        if not n:
+            return 'missing'
+
+        white_bg = 0
+        colored = 0
+        dark_ink = 0
+        mid_gray = 0
+        buckets: Dict[Tuple[int, int, int], int] = {}
+
+        for r, g, b in px:
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            sat_diff = mx - mn
+            if mn >= 210 and sat_diff < 20:
+                white_bg += 1
+            if sat_diff >= 26:
+                colored += 1
+            if mx <= 95:
+                dark_ink += 1
+            elif mx < 210 and sat_diff < 26:
+                mid_gray += 1
+            b_key = (r // 28, g // 28, b // 28)
+            buckets[b_key] = buckets.get(b_key, 0) + 1
+
+        white_ratio = white_bg / n
+        color_ratio = colored / n
+        dark_ratio = dark_ink / n
+        mid_ratio = mid_gray / n
+
+        # 1. Plain white/light-paper title page with black/gray text (e.g. Oxford University Press title pages)
+        if white_ratio >= 0.78 and color_ratio <= 0.025 and mid_ratio <= 0.16:
+            return 'text_only'
+
+        # 2. Almost completely blank white or black page
+        if white_ratio >= 0.93 or dark_ratio >= 0.96:
+            return 'text_only'
+
+        # 3. Solid single-color page with sparse text and no illustration/photo gradients
+        sorted_b = sorted(buckets.values(), reverse=True)
+        top1_ratio = sorted_b[0] / n if sorted_b else 0.0
+        top2_ratio = (sorted_b[0] + (sorted_b[1] if len(sorted_b) > 1 else 0)) / n if sorted_b else 0.0
+        if top1_ratio >= 0.87 and top2_ratio >= 0.95 and len(buckets) <= 14:
+            return 'text_only'
+
+        return None
+    except Exception:
+        return None
+
+
+_NEEDS_COVER_TABLE_READY = False
+_NEEDS_COVER_BACKFILL_STARTED = False
+_NEEDS_COVER_SHELF_CACHE: Dict[str, Any] = {
+    'expires_at': 0.0,
+    'item_ids': [],
+    'issue_by_id': {},
+    'count': 0,
+    'missing_count': 0,
+    'text_only_count': 0,
+}
+
+
+def _ensure_needs_cover_table() -> None:
+    global _NEEDS_COVER_TABLE_READY
+    if _NEEDS_COVER_TABLE_READY:
+        return
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_needs_cover_books (
+                    item_id VARCHAR(64) PRIMARY KEY,
+                    cover_issue VARCHAR(32) DEFAULT 'missing',
+                    reason TEXT DEFAULT '',
+                    marked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        _NEEDS_COVER_TABLE_READY = True
+    except Exception:
+        pass
+
+
+def evaluate_and_record_item_cover_status(item: CatalogItem, force_check: bool = False) -> Optional[str]:
+    """
+    Evaluate an enriched `CatalogItem`'s cover (`missing`, `text_only`, or `None`)
+    and persist its status in `catalog_needs_cover_books` so it automatically appears
+    in (or is removed from) the **Missing / Text Cover** shelf (`?shelf=missing_cover`).
+    """
+    if not item or not item.id:
+        return None
+    _ensure_needs_cover_table()
+    item_id_str = str(item.id)
+    issue = classify_cover_image(item.cover_thumbnail, item.cover_image_url)
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            if issue in ('missing', 'text_only'):
+                reason_txt = (
+                    'Enriched book is missing cover artwork'
+                    if issue == 'missing'
+                    else 'Enriched book cover appears to be a text-only title page'
+                )
+                if force_check:
+                    cur.execute(
+                        """
+                        INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (item_id) DO UPDATE SET
+                            cover_issue = EXCLUDED.cover_issue,
+                            reason = EXCLUDED.reason,
+                            marked_at = CURRENT_TIMESTAMP
+                        """,
+                        [item_id_str, issue, reason_txt],
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (item_id) DO UPDATE SET
+                            cover_issue = CASE
+                                WHEN catalog_needs_cover_books.cover_issue = 'dismissed' THEN 'dismissed'
+                                ELSE EXCLUDED.cover_issue
+                            END,
+                            reason = CASE
+                                WHEN catalog_needs_cover_books.cover_issue = 'dismissed' THEN catalog_needs_cover_books.reason
+                                ELSE EXCLUDED.reason
+                            END,
+                            marked_at = CURRENT_TIMESTAMP
+                        """,
+                        [item_id_str, issue, reason_txt],
+                    )
+            else:
+                cur.execute(
+                    "DELETE FROM catalog_needs_cover_books WHERE item_id = %s AND cover_issue != 'dismissed'",
+                    [item_id_str],
+                )
+        _NEEDS_COVER_SHELF_CACHE['expires_at'] = 0.0
+    except Exception:
+        pass
+    return issue
+
+
+def _run_needs_cover_backfill_worker() -> None:
+    """
+    Background worker that scans existing enriched books in `BookDB` once and populates
+    `catalog_needs_cover_books` with any enriched book whose cover is missing or text-only.
+    """
+    try:
+        from django.db import connection
+        from django.db.models import Q
+        _ensure_needs_cover_table()
+        enr_idx = get_enriched_item_ids_index()
+        enr_ids = [str(x) for x in (enr_idx.get('enriched_ids') or []) if x]
+        if not enr_ids:
+            return
+        enr_set = set(enr_ids)
+
+        # 1. Fast check for enriched books with completely empty covers
+        all_missing_ids = [
+            str(x)
+            for x in CatalogItem.objects.filter(
+                (Q(cover_thumbnail__isnull=True) | Q(cover_thumbnail=''))
+                & (Q(cover_image_url__isnull=True) | Q(cover_image_url=''))
+            ).values_list('id', flat=True)
+        ]
+        missing_rows = [mid for mid in all_missing_ids if mid in enr_set]
+        if missing_rows:
+            with connection.cursor() as cur:
+                for mid in missing_rows:
+                    cur.execute(
+                        """
+                        INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                        VALUES (%s, 'missing', 'Enriched book is missing cover artwork', CURRENT_TIMESTAMP)
+                        ON CONFLICT (item_id) DO NOTHING
+                        """,
+                        [str(mid)],
+                    )
+            _NEEDS_COVER_SHELF_CACHE['expires_at'] = 0.0
+
+        # 2. Scan thumbnails in small paced chunks to detect text-only title page covers without GIL contention
+        with connection.cursor() as cur:
+            cur.execute("SELECT item_id FROM catalog_needs_cover_books")
+            already_checked = {str(r[0]) for r in cur.fetchall() if r and r[0]}
+
+        batch_size = 120
+        for start_i in range(0, len(enr_ids), batch_size):
+            time.sleep(0.18)
+            chunk_ids = [cid for cid in enr_ids[start_i:start_i + batch_size] if cid not in already_checked]
+            if not chunk_ids:
+                continue
+            rows = list(
+                CatalogItem.objects.filter(id__in=chunk_ids)
+                .values_list('id', 'cover_thumbnail', 'cover_image_url')
+            )
+            found_issues: List[Tuple[str, str, str]] = []
+            for idx_r, (cid, thumb, ext_url) in enumerate(rows):
+                if idx_r % 15 == 14:
+                    time.sleep(0.005)
+                issue = classify_cover_image(thumb, ext_url or '')
+                if issue in ('missing', 'text_only'):
+                    reason_txt = (
+                        'Enriched book is missing cover artwork'
+                        if issue == 'missing'
+                        else 'Enriched book cover appears to be a text-only title page'
+                    )
+                    found_issues.append((str(cid), issue, reason_txt))
+            if found_issues:
+                with connection.cursor() as cur:
+                    for cid_str, iss, r_txt in found_issues:
+                        cur.execute(
+                            """
+                            INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                            ON CONFLICT (item_id) DO NOTHING
+                            """,
+                            [cid_str, iss, r_txt],
+                        )
+                _NEEDS_COVER_SHELF_CACHE['expires_at'] = 0.0
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                VALUES ('__backfilled_v1__', 'meta', 'Backfill complete', CURRENT_TIMESTAMP)
+                ON CONFLICT (item_id) DO UPDATE SET marked_at = CURRENT_TIMESTAMP
+                """
+            )
+        _NEEDS_COVER_SHELF_CACHE['expires_at'] = 0.0
+    except Exception:
+        pass
+
+
+def _start_needs_cover_backfill_if_needed() -> None:
+    global _NEEDS_COVER_BACKFILL_STARTED
+    if _NEEDS_COVER_BACKFILL_STARTED:
+        return
+    _NEEDS_COVER_BACKFILL_STARTED = True
+    _ensure_needs_cover_table()
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1 FROM catalog_needs_cover_books WHERE item_id IN ('__backfilled_v1__', '__backfill_lock__')")
+            if cur.fetchone() is not None:
+                return
+            cur.execute(
+                """
+                INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                VALUES ('__backfill_lock__', 'meta', 'Backfill in progress', CURRENT_TIMESTAMP)
+                ON CONFLICT (item_id) DO NOTHING
+                """
+            )
+        import threading
+        threading.Thread(target=_run_needs_cover_backfill_worker, daemon=True).start()
+    except Exception:
+        pass
+
+
+def get_needs_cover_enriched_shelf() -> Dict[str, Any]:
+    """
+    Return the cached dictionary of enriched books whose cover is missing or is just a text page:
+      `{"item_ids": [...], "issue_by_id": {id_str: 'missing'|'text_only'}, "count": int, "missing_count": int, "text_only_count": int}`
+    """
+    _ensure_needs_cover_table()
+    _start_needs_cover_backfill_if_needed()
+
+    now_m = time.monotonic()
+    if now_m < _NEEDS_COVER_SHELF_CACHE['expires_at']:
+        return _NEEDS_COVER_SHELF_CACHE
+
+    try:
+        from django.db import connection
+        enr_idx = get_enriched_item_ids_index()
+        enr_set = {str(x) for x in (enr_idx.get('enriched_ids_set') or enr_idx.get('enriched_ids') or []) if x}
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT item_id, cover_issue
+                FROM catalog_needs_cover_books
+                WHERE cover_issue IN ('missing', 'text_only', 'dismissed')
+                ORDER BY marked_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+        item_ids: List[str] = []
+        issue_by_id: Dict[str, str] = {}
+        dismissed_set: set = set()
+        missing_cnt = 0
+        text_cnt = 0
+        for r in rows:
+            if not r or not r[0]:
+                continue
+            cid = str(r[0])
+            if cid.startswith('__'):
+                continue
+            iss = str(r[1] or 'missing')
+            if iss == 'dismissed':
+                dismissed_set.add(cid)
+                continue
+            if enr_set and cid not in enr_set:
+                continue
+            item_ids.append(cid)
+            issue_by_id[cid] = iss
+            if iss == 'text_only':
+                text_cnt += 1
+            else:
+                missing_cnt += 1
+
+        _NEEDS_COVER_SHELF_CACHE.update({
+            'expires_at': now_m + 20.0,
+            'item_ids': item_ids,
+            'issue_by_id': issue_by_id,
+            'dismissed_set': dismissed_set,
+            'count': len(item_ids),
+            'missing_count': missing_cnt,
+            'text_only_count': text_cnt,
+        })
+    except Exception:
+        pass
+    return _NEEDS_COVER_SHELF_CACHE
+
+
+def set_book_needs_cover(
+    item_id: Any,
+    needs_cover: Optional[bool] = None,
+    cover_issue: str = 'text_only',
+    reason: str = '',
+) -> Dict[str, Any]:
+    """
+    Flag or dismiss (`needs_cover=False` -> `cover_issue='dismissed'`) a `CatalogItem`
+    on the **Missing / Text Cover** shelf.
+    """
+    _ensure_needs_cover_table()
+    item_id_str = str(item_id or '').strip()
+    if not item_id_str:
+        return {'ok': False, 'error': 'item_id is required'}
+    issue_clean = cover_issue if cover_issue in ('missing', 'text_only') else 'text_only'
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            if needs_cover is None:
+                cur.execute(
+                    "SELECT cover_issue FROM catalog_needs_cover_books WHERE item_id = %s",
+                    [item_id_str],
+                )
+                row = cur.fetchone()
+                is_active = bool(row and row[0] in ('missing', 'text_only'))
+                target_state = not is_active
+            else:
+                target_state = bool(needs_cover)
+
+            if target_state:
+                cur.execute(
+                    """
+                    INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (item_id) DO UPDATE SET
+                        cover_issue = EXCLUDED.cover_issue,
+                        reason = EXCLUDED.reason,
+                        marked_at = CURRENT_TIMESTAMP
+                    """,
+                    [item_id_str, issue_clean, (reason or 'Flagged as Missing / Text Cover')[:500]],
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO catalog_needs_cover_books (item_id, cover_issue, reason, marked_at)
+                    VALUES (%s, 'dismissed', %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (item_id) DO UPDATE SET
+                        cover_issue = 'dismissed',
+                        reason = EXCLUDED.reason,
+                        marked_at = CURRENT_TIMESTAMP
+                    """,
+                    [item_id_str, (reason or 'Dismissed / Cover kept by user')[:500]],
+                )
+
+        _NEEDS_COVER_SHELF_CACHE['expires_at'] = 0.0
+        shelf_info = get_needs_cover_enriched_shelf()
+        return {
+            'ok': True,
+            'status': 'success',
+            'item_id': item_id_str,
+            'needs_cover': target_state,
+            'cover_issue': issue_clean if target_state else '',
+            'missing_cover_count': shelf_info.get('count', 0),
+        }
+    except Exception as err:
+        return {'ok': False, 'error': str(err)}
 
 
 _INTERESTING_TABLE_READY = False
@@ -3832,9 +6314,12 @@ def _get_amazon_state_file_path() -> Path:
 def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Link incoming Amazon Kindle, Kindle+, and Audible items (and Kindle bookmarks/reading %)
-    against BookDB `CatalogItem` records using fast in-memory indexing, persist to
-    `scanner/amazon_library_state.json`, and invalidate the live Amazon shelf cache.
+    against BookDB `CatalogItem` records using fast indexed batch lookups (never scanning
+    all 1.15M rows), persist to `scanner/amazon_library_state.json`, and invalidate the
+    live Amazon shelf cache.
     """
+    import uuid as _uuid
+
     state_file = _get_amazon_state_file_path()
     existing_by_key: Dict[str, Dict[str, Any]] = {}
     if state_file.exists():
@@ -3848,22 +6333,83 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
             pass
 
     def _short_norm_title(t: str) -> str:
-        base_t = re.split(r'[:(\-–—]', t or '', maxsplit=1)[0].strip()
+        base_t = re.split(r'[:(\-–—\[]', t or '', maxsplit=1)[0].strip()
         return _norm_lookup_str(base_t) if len(base_t) >= 4 else _norm_lookup_str(t)
 
-    # Single-query in-memory index of all CatalogItem rows for sub-second batch matching
+    # 1. Collect candidate ASINs, existing CatalogItem UUIDs, and candidate Title strings
+    #    so we only query indexed rows in BookDB (< 50ms total instead of scanning 1.15M rows).
+    cand_asins: set = set()
+    cand_cids: set = set()
+    cand_titles: set = set()
+
+    for r in existing_by_key.values():
+        if r.get('asin'):
+            a_str = str(r['asin']).strip()
+            cand_asins.add(a_str)
+            cand_asins.add(a_str.upper())
+        if r.get('catalog_item_id'):
+            try:
+                cand_cids.add(_uuid.UUID(str(r['catalog_item_id'])))
+            except Exception:
+                pass
+
+    for item_data in raw_items:
+        asin_val = str(item_data.get('asin') or '').strip()
+        if asin_val:
+            cand_asins.add(asin_val)
+            cand_asins.add(asin_val.upper())
+        t_clean = _clean_single_line(item_data.get('title') or '')
+        if t_clean:
+            cand_titles.add(t_clean[:512])
+            base_t = re.split(r'[:(\-–—\[]', t_clean, maxsplit=1)[0].strip()
+            if len(base_t) >= 3:
+                cand_titles.add(base_t[:512])
+            no_ed = re.sub(r'\s*\([^)]*\)\s*', ' ', t_clean).strip()
+            if len(no_ed) >= 3:
+                cand_titles.add(no_ed[:512])
+
+    ci_by_id: Dict[str, CatalogItem] = {}
     ci_by_asin: Dict[str, CatalogItem] = {}
     ci_by_norm_title: Dict[str, List[CatalogItem]] = {}
     ci_by_short_title: Dict[str, List[CatalogItem]] = {}
-    for ci_obj in CatalogItem.objects.only('id', 'title', 'authors', 'asin', 'cover_image_url', 'item_type'):
+
+    def _index_ci(ci_obj: CatalogItem) -> None:
+        cid_s = str(ci_obj.id)
+        if cid_s in ci_by_id:
+            return
+        ci_by_id[cid_s] = ci_obj
         if ci_obj.asin:
             ci_by_asin[ci_obj.asin.strip().upper()] = ci_obj
-        nt = _norm_lookup_str(ci_obj.title)
-        if nt:
-            ci_by_norm_title.setdefault(nt, []).append(ci_obj)
-        st = _short_norm_title(ci_obj.title)
-        if st and len(st) >= 4:
-            ci_by_short_title.setdefault(st, []).append(ci_obj)
+        nt_val = _norm_lookup_str(ci_obj.title)
+        if nt_val:
+            ci_by_norm_title.setdefault(nt_val, []).append(ci_obj)
+        st_val = _short_norm_title(ci_obj.title)
+        if st_val and len(st_val) >= 4:
+            ci_by_short_title.setdefault(st_val, []).append(ci_obj)
+
+    only_fields = ('id', 'title', 'authors', 'asin', 'cover_image_url', 'item_type')
+
+    # 1a. Existing KINDLE / AUDIBLE items
+    for ci_obj in CatalogItem.objects.filter(item_type__in=['KINDLE', 'AUDIBLE']).only(*only_fields).order_by():
+        _index_ci(ci_obj)
+
+    # 1b. Known UUIDs from previous state file
+    cid_list = list(cand_cids)
+    for i in range(0, len(cid_list), 1000):
+        for ci_obj in CatalogItem.objects.filter(id__in=cid_list[i : i + 1000]).only(*only_fields).order_by():
+            _index_ci(ci_obj)
+
+    # 1c. Candidate ASINs
+    asin_list = [a for a in cand_asins if a]
+    for i in range(0, len(asin_list), 1000):
+        for ci_obj in CatalogItem.objects.filter(asin__in=asin_list[i : i + 1000]).only(*only_fields).order_by():
+            _index_ci(ci_obj)
+
+    # 1d. Candidate Titles (exact indexed B-tree lookup on `title`)
+    title_list = [t for t in cand_titles if t]
+    for i in range(0, len(title_list), 1000):
+        for ci_obj in CatalogItem.objects.filter(title__in=title_list[i : i + 1000]).only(*only_fields).order_by():
+            _index_ci(ci_obj)
 
     kindle_purchased = 0
     kindle_plus = 0
@@ -3871,6 +6417,7 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
     with_bookmarks = 0
     matched_catalog_items = 0
     to_update_map: Dict[Any, CatalogItem] = {}
+    to_create_list: List[CatalogItem] = []
 
     for idx, item_data in enumerate(raw_items, start=1):
         asin = str(item_data.get('asin') or '').strip()
@@ -3908,7 +6455,7 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
         author_tokens = {t for t in na.split() if len(t) >= 2}
 
         ci: Optional[CatalogItem] = None
-        if asin_upper and asin_upper in ci_by_asin:
+        if asin_upper and asin_upper in ci_by_asin and ci_by_asin[asin_upper].item_type == 'BOOK':
             ci = ci_by_asin[asin_upper]
 
         if not ci:
@@ -3926,6 +6473,14 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
                 if ci:
                     break
 
+        if not ci and asin_upper and asin_upper in ci_by_asin:
+            ci = ci_by_asin[asin_upper]
+
+        if not ci:
+            prev_rec = existing_by_key.get(asin or f"{itype}:{title}")
+            if prev_rec and prev_rec.get('catalog_item_id'):
+                ci = ci_by_id.get(str(prev_rec['catalog_item_id']))
+
         if ci:
             if ci.item_type == 'BOOK':
                 matched_catalog_items += 1
@@ -3940,19 +6495,16 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
             if updated:
                 to_update_map[ci.id] = ci
         else:
-            ci = CatalogItem.objects.create(
+            ci = CatalogItem(
+                id=_uuid.uuid4(),
                 title=title[:512],
                 authors=authors[:512],
                 asin=asin[:32] if asin else None,
                 item_type='AUDIBLE' if itype == 'AUDIBLE' else 'KINDLE',
                 cover_image_url=cover_url[:1024] if cover_url else None,
             )
-            if asin_upper:
-                ci_by_asin[asin_upper] = ci
-            if nt:
-                ci_by_norm_title.setdefault(nt, []).append(ci)
-            if st and len(st) >= 4:
-                ci_by_short_title.setdefault(st, []).append(ci)
+            to_create_list.append(ci)
+            _index_ci(ci)
 
         rec = {
             'asin': asin,
@@ -3977,6 +6529,9 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
         }
         key = asin or f"{itype}:{title}"
         existing_by_key[key] = rec
+
+    if to_create_list:
+        CatalogItem.objects.bulk_create(to_create_list, batch_size=500, ignore_conflicts=True)
 
     if to_update_map:
         CatalogItem.objects.bulk_update(list(to_update_map.values()), ['asin', 'cover_image_url'], batch_size=500)
@@ -4003,6 +6558,8 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
 
     state_file.write_text(json.dumps(merged_list, indent=2, ensure_ascii=False), encoding='utf-8')
     _AMAZON_SHELF_CACHE['expires_at'] = 0.0
+    amz_shelf = get_dynamic_amazon_shelf()
+    total_matched_nas = int((amz_shelf.get('counts') or {}).get('amazon_matched') or matched_catalog_items)
     return {
         'ok': True,
         'total_synced': len(merged_list),
@@ -4010,7 +6567,7 @@ def save_and_link_amazon_items(raw_items: List[Dict[str, Any]]) -> Dict[str, Any
         'kindle_plus': kindle_plus,
         'audible_total': audible_total,
         'with_bookmarks': with_bookmarks,
-        'matched_catalog_items': matched_catalog_items,
+        'matched_catalog_items': total_matched_nas,
     }
 
 
@@ -4100,12 +6657,15 @@ def get_dynamic_amazon_shelf() -> Dict[str, Any]:
     ids_with_local_files: set = set()
     if all_ids:
         try:
-            ids_with_local_files = {
-                str(pk)
-                for pk in CatalogItem.objects.filter(id__in=all_ids, files__isnull=False)
-                .values_list('id', flat=True)
-                .distinct()
-            }
+            for i in range(0, len(all_ids), 1000):
+                chunk_ids = all_ids[i : i + 1000]
+                for pk in (
+                    FileLocation.objects.filter(catalog_item_id__in=chunk_ids)
+                    .order_by()
+                    .values_list('catalog_item_id', flat=True)
+                    .distinct()
+                ):
+                    ids_with_local_files.add(str(pk))
         except Exception:
             ids_with_local_files = set()
 
@@ -4468,10 +7028,12 @@ class OPDSRootView(View):
         interesting_count = len(interesting_ids)
         bad_meta_ids = get_bad_metadata_item_ids()
         bad_meta_count = len(bad_meta_ids)
+        missing_cover_count = int(_NEEDS_COVER_SHELF_CACHE.get('count') or 0)
 
         bm_label = f'Bookmarked & Reading in Moon+ ({bm_count:,} Books)' if bm_count else 'Bookmarked & Reading in Moon+'
         interesting_label = f'Interesting Books ({interesting_count:,} Books)' if interesting_count else 'Interesting Books'
         bad_meta_label = f'Bad Metadata Books ({bad_meta_count:,} Books)' if bad_meta_count else 'Bad Metadata Books'
+        missing_cover_label = f'Enriched Books: Missing / Text Cover ({missing_cover_count:,} Books)' if missing_cover_count else 'Enriched Books: Missing / Text Cover'
         amz_label = f'Purchased on Amazon, Kindle+ & Audible ({amz_total:,} Titles)' if amz_total else 'Purchased on Amazon, Kindle+ & Audible'
         tags_label = f'Browse Enriched Books by Tag / Subject ({tags_count:,} Tags)' if tags_count else 'Browse Enriched Books by Tag / Subject'
         enriched_label = (
@@ -4512,6 +7074,13 @@ class OPDSRootView(View):
                 'title': bad_meta_label,
                 'content': 'Books flagged as having Bad Metadata from Moon+ Reader or the web catalog.',
                 'href': f'{base}/bad-metadata/',
+                'kind': 'acquisition',
+            },
+            {
+                'id': 'urn:mylibrary:opds:missing_covers',
+                'title': missing_cover_label,
+                'content': 'Enriched books where the cover is missing or is just a text-only title page.',
+                'href': f'{base}/missing-covers/',
                 'kind': 'acquisition',
             },
             {
@@ -4817,6 +7386,53 @@ class OPDSBadMetadataFeedView(View):
         )
 
 
+class OPDSMissingCoverFeedView(View):
+    """
+    Dynamic Virtual Bookshelf of enriched books whose cover is missing or is just a text page
+    (`/mylibrary/opds/missing-covers/`).
+    """
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        from django.db.models import Case, IntegerField, When
+
+        try:
+            page = max(int(request.GET.get('page', 1)), 1)
+        except ValueError:
+            page = 1
+        page_size = 25
+        offset = (page - 1) * page_size
+
+        shelf_data = get_needs_cover_enriched_shelf()
+        id_list = shelf_data.get('item_ids') or []
+        slice_ids = id_list[offset: offset + page_size + 1]
+        has_next = len(slice_ids) > page_size
+        page_ids = slice_ids[:page_size]
+
+        page_items: List[CatalogItem] = []
+        if page_ids:
+            order_expr = Case(
+                *[When(id=pk, then=pos) for pos, pk in enumerate(page_ids)],
+                default=len(page_ids),
+                output_field=IntegerField(),
+            )
+            page_items = list(
+                CatalogItem.objects.filter(id__in=page_ids)
+                .prefetch_related('files')
+                .annotate(_cov_order=order_expr)
+                .order_by('_cov_order')
+            )
+
+        return _render_acquisition_feed(
+            request,
+            feed_id='urn:mylibrary:opds:missing_covers',
+            title=f'Enriched Books: Missing / Text Cover ({len(id_list):,} Books)',
+            items=page_items,
+            page=page,
+            has_next=has_next,
+            total_count=len(id_list),
+        )
+
+
 class OPDSFlagBadMetadataView(View):
     """
     One-tap endpoint (`/mylibrary/opds/flag-bad-meta/<uuid:item_id>/`) that flags a book
@@ -4917,6 +7533,20 @@ class OPDSBookmarkedFeedView(View):
         slice_items = filtered_items[offset: offset + page_size + 1]
         has_next = len(slice_items) > page_size
         page_items = slice_items[:page_size]
+        if page_items and not isinstance(page_items[0], CatalogItem):
+            moon_meta_map = bm_data.get('moon_meta_by_id') or {}
+            pids = [it.id for it in page_items]
+            by_id = {
+                ci.id: ci
+                for ci in CatalogItem.objects.filter(id__in=pids).prefetch_related('files')
+            }
+            hydrated = []
+            for pid in pids:
+                ci = by_id.get(pid)
+                if ci:
+                    ci.moon_bookmark_info = moon_meta_map.get(str(pid))
+                    hydrated.append(ci)
+            page_items = hydrated
 
         return _render_acquisition_feed(
             request,
@@ -5595,6 +8225,20 @@ def extract_book_preview_data(
                 raw_path = files[0].file_path or ''
 
     phys_path = _resolve_physical_file_path(raw_path) if raw_path else None
+    if (not phys_path or not phys_path.exists()) and resolved_loc and resolved_loc.file_path and resolved_loc.file_path != raw_path:
+        raw_path = resolved_loc.file_path
+        phys_path = _resolve_physical_file_path(raw_path)
+    if (not phys_path or not phys_path.exists()) and item_id:
+        item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
+        if item:
+            for cand in item.files.all():
+                if cand.file_path:
+                    cand_phys = _resolve_physical_file_path(cand.file_path)
+                    if cand_phys and cand_phys.exists():
+                        resolved_loc = cand
+                        raw_path = cand.file_path
+                        phys_path = cand_phys
+                        break
     if not phys_path or not phys_path.exists():
         return {
             'ok': False,

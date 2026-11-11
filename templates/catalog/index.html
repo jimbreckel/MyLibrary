@@ -23,7 +23,7 @@
         </a>
         <a href="{% url 'catalog:dashboard' %}?shelf=enriched" class="stat-badge" title="Books Enriched by epubmeta (Click to view Enriched Books shelf)" style="text-decoration:none; color:inherit; border-color:rgba(74,222,128,0.35);">
             <i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i>
-            <span>Enriched Books: <strong style="color:#4ade80;">{{ shelf_counts.enriched|intcomma }}</strong></span>
+            <span>Enriched Books: <strong id="header-enriched-count" style="color:#4ade80;">{{ enrich_status_counts.enriched|default:0|intcomma }}</strong></span>
         </a>
         <a href="{% url 'catalog:dashboard' %}?type=MAGAZINE" class="stat-badge" title="Magazines &amp; Periodicals" style="text-decoration:none; color:inherit;">
             <i class="fa-solid fa-newspaper green"></i>
@@ -231,6 +231,10 @@
                         <span><i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i> Enriched Books</span>
                         <small id="sidebar-enriched-count" style="color:#4ade80; font-weight:700;">{{ enrich_status_counts.enriched|default:0|intcomma }}</small>
                     </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}#f59e0b{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}rgba(245,158,11,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}rgba(245,158,11,0.42){% else %}transparent{% endif %};" title="Enriched books where the cover is missing or is just a text-only title page (click Find Cover on any book to replace or Keep Cover to dismiss)">
+                        <span><i class="fa-regular fa-image" style="color:#f59e0b;"></i> Missing / Text Cover</span>
+                        <small id="sidebar-missing-cover-count" style="color:#f59e0b; font-weight:700;">{{ missing_cover_count|default:0|intcomma }}</small>
+                    </a>
                     <a href="{% url 'catalog:duplicates_dashboard' %}" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:#38bdf8; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25);" title="Open Enriched Duplicates Manager (same format & verified book content)">
                         <span><i class="fa-solid fa-clone" style="color:#38bdf8;"></i> Enriched Duplicates</span>
                         <small style="color:#38bdf8; font-weight:700;"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.7rem;"></i></small>
@@ -242,6 +246,10 @@
                     <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books flagged In Review, Low Confidence Match, No Match, or Failed during enrichment">
                         <span><i class="fa-solid fa-clipboard-question" style="color:#fbbf24;"></i> In Review</span>
                         <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{ enrich_status_counts.needs_review|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=tomags" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.45){% else %}transparent{% endif %};" title="Files currently in /toMags (verifies files are still in /toMags on disk before listing; click to review, peek inside, or Undo &amp; Enrich as Book)">
+                        <span><i class="fa-solid fa-newspaper" style="color:#38bdf8;"></i> Moved to toMags</span>
+                        <small id="sidebar-tomags-count" style="color:#38bdf8; font-weight:700;">{{ tomags_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=recent_pub" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'recent_pub' %}#34d399{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.38){% else %}transparent{% endif %};" title="Books published within the past 1 year, ordered newest publication date first">
                         <span><i class="fa-solid fa-calendar-days" style="color:#34d399;"></i> Recently Published (1 Yr)</span>
@@ -368,6 +376,13 @@
                     &mdash; <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-highlighter"></i> Books with Highlights &amp; Notes (.an)</span>
                 {% elif selected_shelf == 'enriched' %}
                     &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enriched EPUBs</span>
+                {% elif selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}
+                    &mdash; <span style="color:#f59e0b; font-weight:600;"><i class="fa-regular fa-image"></i> Enriched Books: Missing / Text Cover:</span>
+                    <span style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem;">
+                        <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if not selected_cover_issue %}background:rgba(245,158,11,0.28); border:1px solid rgba(245,158,11,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">All ({{ missing_cover_count|default:0|intcomma }})</a>
+                        <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover&amp;cover_issue=text_only" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_cover_issue == 'text_only' %}background:rgba(245,158,11,0.28); border:1px solid rgba(245,158,11,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fcd34d;{% endif %}"><i class="fa-solid fa-font"></i> Text-Only ({{ text_only_cover_count|default:0|intcomma }})</a>
+                        <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover&amp;cover_issue=missing" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_cover_issue == 'missing' %}background:rgba(244,63,94,0.28); border:1px solid rgba(244,63,94,0.7); color:#ffe4e6;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fda4af;{% endif %}"><i class="fa-regular fa-image"></i> Missing ({{ missing_cover_only_count|default:0|intcomma }})</a>
+                    </span>
                 {% elif selected_shelf == 'recent_pub' %}
                     &mdash; <span style="color:#34d399; font-weight:600;"><i class="fa-solid fa-calendar-days"></i> Recently Published (Past 1 Year &mdash; Newest First)</span>
                 {% elif selected_shelf == 'amazon' %}
@@ -426,9 +441,10 @@
                 <div class="control-group" title="Filter books by Enrichment status (Needs Enriching vs Enriched)">
                     <i class="fa-solid fa-wand-magic-sparkles control-icon" style="color:#c084fc;"></i>
                     <select id="top-enrich-status-select" class="control-select" aria-label="Filter by Enrichment Status">
-                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' %}selected{% endif %}>Enrich: All</option>
+                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' and selected_shelf != 'missing_cover' %}selected{% endif %}>Enrich: All</option>
                         <option value="needs_enriching" {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}selected{% endif %}>⏳ Needs Enriching ({{ enrich_status_counts.needs_enriching|default:0|intcomma }})</option>
                         <option value="enriched" {% if selected_enrich_status == 'enriched' or selected_shelf == 'enriched' %}selected{% endif %}>✨ Enriched ({{ enrich_status_counts.enriched|default:0|intcomma }})</option>
+                        <option value="missing_cover" {% if selected_enrich_status == 'missing_cover' or selected_shelf == 'missing_cover' %}selected{% endif %}>🖼️ Missing / Text Cover ({{ missing_cover_count|default:0|intcomma }})</option>
                         <option value="needs_review" {% if selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}selected{% endif %}>📋 In Review ({{ enrich_status_counts.needs_review|default:0|intcomma }})</option>
                     </select>
                 </div>
@@ -496,7 +512,7 @@
         {% if items %}
             <div class="catalog-grid">
                 {% for item in items %}
-                    <article class="media-card" id="card-{{ item.id }}">
+                    <article class="media-card" id="card-{{ item.id }}" data-enrich-bucket="{% if item.has_tomags_file %}tomags{% elif item.is_enriched %}enriched{% elif selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}needs_enriching{% elif item.enrich_diag %}needs_review{% else %}needs_enriching{% endif %}">
                         <!-- Cover Image / Fallback -->
                         <div class="card-header-image">
                             {% if item.cover_thumbnail %}
@@ -519,6 +535,15 @@
                             {% if item.is_enriched %}
                                 <span class="card-enriched-badge" style="position:absolute; bottom:8px; right:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(74,222,128,0.65); color:#4ade80; font-size:0.66rem; font-weight:700; padding:0.15rem 0.45rem; border-radius:999px; backdrop-filter:blur(4px);" title="Enriched &amp; Verified by epubmeta">
                                     <i class="fa-solid fa-wand-magic-sparkles"></i> Enriched
+                                </span>
+                            {% endif %}
+                            {% if item.cover_issue == 'missing' %}
+                                <span class="card-cover-issue-badge" style="position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(244,63,94,0.7); color:#fda4af; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);" title="Enriched book is missing cover artwork — click Find Cover to pick one">
+                                    <i class="fa-regular fa-image"></i> NO COVER
+                                </span>
+                            {% elif item.cover_issue == 'text_only' %}
+                                <span class="card-cover-issue-badge" style="position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(245,158,11,0.75); color:#fcd34d; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);" title="Enriched book cover appears to be a text-only title page — click Find Cover to pick a cover or Keep Cover to dismiss">
+                                    <i class="fa-solid fa-font"></i> TEXT COVER
                                 </span>
                             {% endif %}
                             {% if item.amazon_ownership_info %}
@@ -701,8 +726,31 @@
                                     </div>
 
                                     <!-- Row 2: Enrichment & Magazine Actions -->
-                                    {% if item.has_enrichable_file %}
-                                    <div style="display:flex; gap:0.4rem; align-items:center; width:100%;">
+                                    {% if item.has_tomags_file %}
+                                    <div class="card-row2-actions" style="display:flex; gap:0.4rem; align-items:center; width:100%;">
+                                        <button
+                                            type="button"
+                                            class="btn-enrich-card"
+                                            onclick="event.stopPropagation(); if(window.undoMoveToMag) window.undoMoveToMag('{{ item.id }}', '', [], this, true);"
+                                            data-item-id="{{ item.id }}"
+                                            title="Restore file(s) from /toMags back to /books and run epubmeta Book Enrichment"
+                                            style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.3rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(250,204,21,0.2); border:1px solid rgba(250,204,21,0.55); color:#fde047; transition:all 0.2s;"
+                                        >
+                                            <i class="fa-solid fa-rotate-left"></i> Undo &amp; Enrich
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn-move-tomag"
+                                            onclick="event.stopPropagation(); if(window.undoMoveToMag) window.undoMoveToMag('{{ item.id }}', '', [], this, false);"
+                                            data-item-id="{{ item.id }}"
+                                            title="Restore file(s) from /toMags back to /books without re-running enrichment"
+                                            style="display:inline-flex; align-items:center; justify-content:center; gap:0.28rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.45); color:#38bdf8;"
+                                        >
+                                            <i class="fa-solid fa-rotate-left"></i> Undo toMag
+                                        </button>
+                                    </div>
+                                    {% elif item.has_enrichable_file %}
+                                    <div class="card-row2-actions" style="display:flex; gap:0.4rem; align-items:center; width:100%;">
                                         <button
                                             type="button"
                                             class="btn-enrich-card"
@@ -745,6 +793,26 @@
                                             style="display:inline-flex; align-items:center; justify-content:center; gap:0.28rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.14); border:1px solid rgba(56,189,248,0.38); color:#38bdf8;"
                                         >
                                             <i class="fa-solid fa-newspaper"></i> toMag
+                                        </button>
+                                    </div>
+                                    {% endif %}
+                                    {% if item.cover_issue %}
+                                    <div class="card-cover-actions-row" style="display:flex; gap:0.38rem; align-items:center; width:100%;">
+                                        <button
+                                            type="button"
+                                            onclick="event.stopPropagation(); if(window.openCardFindCover) window.openCardFindCover('{{ item.id }}');"
+                                            title="Open Web Cover Search for this book (Goodreads, Apple Books, Google Books, Open Library &amp; Web Image Search)"
+                                            style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.3rem; padding:0.4rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.52); color:#7dd3fc; transition:all 0.2s;"
+                                        >
+                                            <i class="fa-regular fa-images"></i> Find Cover
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onclick="event.stopPropagation(); if(window.dismissNeedsCover) window.dismissNeedsCover('{{ item.id }}', this);"
+                                            title="Keep current cover and remove this book from the Missing / Text Cover shelf"
+                                            style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.4rem 0.52rem; border-radius:8px; font-size:0.72rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(148,163,184,0.14); border:1px solid rgba(148,163,184,0.35); color:#cbd5e1;"
+                                        >
+                                            <i class="fa-solid fa-check"></i> Keep Cover
                                         </button>
                                     </div>
                                     {% endif %}
@@ -838,7 +906,7 @@
     .cover-cand-card img {
         width: 100%;
         height: 155px;
-        object-fit: cover;
+        object-fit: contain;
         background: #020617;
     }
     .cover-cand-meta {
@@ -875,7 +943,7 @@
             <!-- Moon+ Reader Style Web Cover Finder Drawer -->
             <div id="modal-cover-finder" style="display:none; background:rgba(15,23,42,0.82); border:1px solid rgba(56,189,248,0.35); border-radius:12px; padding:0.9rem 1rem; margin-bottom:1.4rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.55rem; gap:0.5rem; flex-wrap:wrap;">
-                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-globe"></i> Web Cover Search (Apple Books · Google Books · Open Library)</strong>
+                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-globe"></i> Web &amp; Image Cover Search (Web Images · Goodreads · Apple Books · Google Books · Open Library)</strong>
                     <button type="button" onclick="document.getElementById('modal-cover-finder').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem;">✕ Hide</button>
                 </div>
                 <div style="display:flex; gap:0.5rem; align-items:center;">
@@ -929,6 +997,9 @@
                     <button type="button" id="er-btn-toggle-preview" onclick="window.toggleBookPreviewInReview()" style="background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.5); color:#38bdf8; font-size:0.74rem; font-weight:700; padding:0.2rem 0.65rem; border-radius:999px; cursor:pointer; display:inline-flex; align-items:center; gap:0.35rem;" title="Inspect the actual pages, cover, title page, and copyright text inside this EPUB/PDF file">
                         <i class="fa-solid fa-book-open-reader"></i> Preview Inside Book
                     </button>
+                    <button type="button" id="er-btn-find-cover" onclick="window.toggleReviewCoverFinder()" style="background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.5); color:#38bdf8; font-size:0.74rem; font-weight:700; padding:0.2rem 0.65rem; border-radius:999px; cursor:pointer; display:inline-flex; align-items:center; gap:0.35rem;" title="Search Web Images, Goodreads, Apple Books, Google Books &amp; Open Library for book covers">
+                        <i class="fa-solid fa-images"></i> Find Covers
+                    </button>
                     <a id="er-raw-stream-link" href="#" target="_blank" style="display:none; background:rgba(168,85,247,0.18); border:1px solid rgba(168,85,247,0.45); color:#c084fc; font-size:0.73rem; font-weight:700; padding:0.2rem 0.6rem; border-radius:999px; text-decoration:none; align-items:center; gap:0.35rem;" title="Open the full PDF/EPUB file in a new browser tab">
                         <i class="fa-solid fa-up-right-from-square"></i> Open Full File
                     </a>
@@ -940,6 +1011,22 @@
         </div>
 
         <div id="er-diag-msg" style="background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.3); border-radius:8px; padding:0.55rem 0.8rem; font-size:0.8rem; color:#fde68a; margin-bottom:0.9rem;"></div>
+
+        <!-- Expandable Web & Image Cover Search Drawer inside Enrichment Review Modal -->
+        <div id="er-cover-finder-drawer" style="display:none; background:rgba(15,23,42,0.88); border:1px solid rgba(56,189,248,0.4); border-radius:10px; padding:0.85rem 1rem; margin-bottom:0.95rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; gap:0.5rem; flex-wrap:wrap;">
+                <strong style="font-size:0.78rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-images"></i> Find Covers — Web Image Search · Goodreads · Apple Books · Google Books · Open Library</strong>
+                <button type="button" onclick="document.getElementById('er-cover-finder-drawer').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.78rem;">✕ Hide</button>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <input type="text" id="er-cover-search-input" placeholder="Search title, author, or ISBN for cover images..." onkeydown="if(event.key==='Enter'){event.preventDefault(); window.erRunCoverSearch();}" style="flex:1; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.4rem 0.7rem; color:#f8fafc; font-size:0.82rem;">
+                <button type="button" id="er-btn-run-cover-search" onclick="window.erRunCoverSearch()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.4rem 0.85rem; font-size:0.8rem; font-weight:600; cursor:pointer; white-space:nowrap;">
+                    <i class="fa-solid fa-magnifying-glass"></i> Search Covers
+                </button>
+            </div>
+            <div id="er-cover-finder-status" style="font-size:0.75rem; color:#94a3b8; margin-top:0.4rem;"></div>
+            <div id="er-cover-finder-results" class="cover-finder-grid"></div>
+        </div>
 
         <!-- Expandable Inside-Book Preview Drawer (Pages, Cover Images, Front-Matter Text & Highlight-to-Field) -->
         <div id="er-book-preview-drawer" style="display:none; background:rgba(2,6,23,0.85); border:1px solid rgba(56,189,248,0.4); border-radius:10px; padding:0.85rem 1rem; margin-bottom:0.95rem;">
@@ -1053,24 +1140,31 @@
     </div>
 </div>
 
-<!-- Help, CLI, REST API & MCP Modal -->
+        <!-- Help, CLI, REST API & MCP Modal -->
 <div id="index-help-modal" onclick="if(event.target === this) this.style.display='none';" style="display:none; position:fixed; inset:0; background:rgba(2,6,23,0.8); backdrop-filter:blur(6px); z-index:9999; align-items:center; justify-content:center; padding:1.5rem;">
-    <div style="background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:14px; max-width:920px; max-height:90vh; overflow-y:auto; width:100%; padding:1.5rem; color:#f8fafc; box-shadow:0 20px 50px rgba(0,0,0,0.65);">
+    <div style="background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:14px; max-width:960px; max-height:90vh; overflow-y:auto; width:100%; padding:1.5rem; color:#f8fafc; box-shadow:0 20px 50px rgba(0,0,0,0.65);">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:0.85rem; margin-bottom:1rem;">
             <div>
-                <h2 style="margin:0; font-size:1.2rem;"><i class="fa-solid fa-circle-question" style="color:#f472b6;"></i> MyLibrary Help — Search, Status Dashboard, CLI, API &amp; MCP</h2>
+                <h2 style="margin:0; font-size:1.2rem;"><i class="fa-solid fa-circle-question" style="color:#f472b6;"></i> MyLibrary Help — Search, Shelves, Chrome Extension, Status, CLI, API &amp; MCP</h2>
             </div>
             <button type="button" onclick="document.getElementById('index-help-modal').style.display='none';" style="background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.35); border-radius:6px; padding:0.3rem 0.7rem; cursor:pointer; font-weight:600;">✕ Close</button>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.85rem; font-size:0.83rem; line-height:1.55;">
             <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
-                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">1. Web Catalog, On-Demand Enrichment, OPDS Server &amp; External Security</strong>
-                • <strong>Full-Catalog Search &amp; On-Demand Enrichment (<code>/mylibrary/</code>):</strong> Search across all 1.15M+ books (by title, author, ISBN, ASIN, publisher, or filename). Click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> (or check <em>Enrich search results on demand</em> / append <code>+enrich</code> to your search query) to immediately run <code>epubmeta</code> on the physical EPUB/PDF, rewrite its embedded OPF metadata on the NAS, and update its cover, ISBN, and synopsis in BookDB.<br>
-                • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong> (<em>Net Library &rarr; Add new catalog</em>), KOReader, or Calibre Sync. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV bookmarks (<code>.po</code> / <code>.an</code>). You can also append <code>+enrich</code> to any OPDS search query.<br>
-                • <strong>External Security (<code>/mylibrary/login/</code>):</strong> Zero friction on your home LAN (`192.168.1.x`). Outside your LAN, web pages require login at <code>/mylibrary/login/</code> and OPDS/API endpoints require HTTP Basic Auth (`AUTH_USERNAME` / `AUTH_PASSWORD`).
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">1. Web Catalog, Search Keywords, Virtual Shelves, Duplicates &amp; On-Demand Enrichment</strong>
+                • <strong>Structured Search Keywords &amp; Operators:</strong> Combine free text with <code>author:</code>, <code>title:</code>, <code>cat:</code>, <code>tag:</code>, <code>pub:</code>, <code>isbn:</code>, <code>format:epub</code>, <code>year:2024..2026</code>, <code>is:enriched</code>, <code>is:unenriched</code>, <code>is:interesting</code>, <code>is:badmeta</code>, <code>missing:cover</code>, <code>-exclude</code>, and <code>sort:newest</code> (click <strong>Keywords Guide</strong> under the search bar for all operators).<br>
+                • <strong>Interactive Card &amp; Modal Actions:</strong> Click <strong>✨ Enrich Now</strong> (or <strong>✨ Enrich Page</strong> to batch-enrich the current page), <strong>☆ Interesting</strong> (bookmarks books to read/download next; auto-clears on download), <strong>⚑ Bad Metadata</strong>, <strong>📖 Peek Inside</strong> (inspect front-matter pages, detected ISBNs &amp; run <em>AI Re-Evaluate from Image(s)</em>), <strong>🖼 Find Cover</strong> (search Web Images, Goodreads, Apple Books, Google Books &amp; Open Library), or <strong>📰 toMag</strong> (moves periodicals to <code>/toMags</code>; review or undo on the <em>Moved to toMags</em> shelf).<br>
+                • <strong>Enriched Duplicates Manager (<code>/mylibrary/duplicates/</code>):</strong> Detects duplicate copies of the same format and verified content, automatically scoring the best copy to keep (best category folder above 3-letter folder, oldest file date, no <code>(#)</code> suffix) while protecting unfinished Moon+ Reader bookmarks.<br>
+                • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong>. Downloading any unenriched book automatically enriches it on the fly and migrates Moon+ WebDAV bookmarks (<code>.po</code> / <code>.an</code>).
+            </div>
+            <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(56,189,248,0.28); border-radius:8px; padding:0.75rem 0.9rem;">
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">2. Chrome Extension — Book Sites, Amazon Wishlists &amp; Anna's Archive Checker (<code>chrome_wishlist_extension/</code>)</strong>
+                • <strong>Install in Chrome:</strong> Open <code>chrome://extensions/</code> &rarr; enable <strong>Developer mode</strong> &rarr; click <strong>Load unpacked</strong> &rarr; select <code>U:\MyLibrary\chrome_wishlist_extension</code>.<br>
+                • <strong>Amazon Wishlists (<em>Books (Kindle)</em>, <em>Print Books</em>):</strong> Automatically checks every wishlist book against MyLibrary (with automatic <code>/dp/&lt;ASIN&gt;</code> publication year, edition &amp; ISBN verification to prevent same-title false positives, plus a persistent <strong>✕ False Positive</strong> button), checks Anna's Archive by <strong>ISBN + Title</strong>, and supports <strong>Auto-Scroll</strong> &amp; <strong>Export CSV</strong>.<br>
+                • <strong>Book Product Pages (Amazon, Barnes &amp; Noble, Springer Link, Goodreads, O'Reilly, No Starch + Custom Sites):</strong> Adds an inline <strong>✅ In MyLibrary / ❌ Not in MyLibrary</strong> indicator next to the book title plus a unified panel below the cover with <strong>Open in Anna's Archive (ISBN)</strong>, <strong>Search in Anna's Archive (Title)</strong>, <strong>🔍 Check Anna's Live</strong>, and optional <strong>Open in Z-Library</strong>. Switch Anna's Archive mirrors (<code>.pk</code>, <code>.gl</code>, <code>.li</code>, <code>.se</code>, <code>.org</code>) or add new book sites with 1 click in the extension popup.
             </div>
             <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
-                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">2. CLI (<code>mylibrary_cli.py</code>), Amazon Sync (<code>sync_amazon.py</code>) &amp; Calibre/Moon+ Sync</strong>
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">3. CLI (<code>mylibrary_cli.py</code>), Amazon Sync (<code>sync_amazon.py</code>) &amp; Calibre/Moon+ Sync</strong>
                 <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.65rem; font-size:0.75rem; color:#38bdf8; overflow-x:auto; margin:0.2rem 0 0 0;">python scanner/sync_amazon.py               # Automated Chrome sync for Amazon Kindle, Kindle+, Bookmarks &amp; Audible
 python mylibrary_cli.py status
 python mylibrary_cli.py search "Dune" --type BOOK --format EPUB --limit 10
@@ -1080,12 +1174,12 @@ python calibre_moon_sync.py pass1 --apply   # Snapshot Moon+ bookmarks &amp; tag
 python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write updated Moon+ bookmarks</pre>
             </div>
             <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
-                <strong style="color:#4ade80; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">3. MCP Server (<code>mylibrary_mcp.py</code>)</strong>
+                <strong style="color:#4ade80; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">4. MCP Server (<code>mylibrary_mcp.py</code>)</strong>
                 <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.55rem; font-size:0.71rem; color:#4ade80; overflow-x:auto; margin:0.2rem 0 0 0;">{
   "mcpServers": {
     "mylibrary": {
       "command": "python",
-      "args": ["c:\\Users\\oscar\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"],
+      "args": ["c:\\Users\\jpbr230\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"],
       "env": {
         "MYLIBRARY_URL": "http://192.168.1.43:8080/mylibrary",
         "MYLIBRARY_PATH_PREFIX": "U:\\Media"
@@ -1094,17 +1188,17 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
   }
 }</pre>
             </div>
-            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem; font-family:monospace; font-size:0.74rem;">
-                <strong style="color:#f472b6; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem; font-family:sans-serif;">4. OPDS &amp; REST API Endpoints</strong>
+            <div style="background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem; font-family:monospace; font-size:0.73rem;">
+                <strong style="color:#f472b6; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem; font-family:sans-serif;">5. Key OPDS &amp; REST API Endpoints</strong>
                 POST /mylibrary/api/enrich/ (On-Demand Enrich)<br>
-                POST /mylibrary/api/sync/amazon/<br>
-                GET  /mylibrary/opds/  (OPDS 1.2 Root)<br>
-                GET  /mylibrary/opds/amazon/?filter=amazon_only<br>
-                GET  /mylibrary/opds/search/?q=...+enrich<br>
-                GET  /mylibrary/opds/download/&lt;id&gt;/&lt;file&gt;<br>
-                GET  /mylibrary/api/status/<br>
-                GET  /mylibrary/api/catalog/?q=&amp;type=&amp;format=<br>
-                POST /mylibrary/api/calibre/check-enriched/
+                POST /mylibrary/api/wishlist/check/ (Wishlist/Book Check)<br>
+                POST /mylibrary/api/interesting/toggle/ (☆ Interesting)<br>
+                POST /mylibrary/api/bad-metadata/toggle/ (⚑ Bad Meta)<br>
+                GET|POST /mylibrary/api/cover-search/ (Find Cover)<br>
+                GET|POST /mylibrary/api/book-preview/ (Peek &amp; AI Vision)<br>
+                GET|POST /mylibrary/api/duplicates/ (Duplicates API)<br>
+                GET  /mylibrary/opds/?v=2 (OPDS 1.2 Root)<br>
+                GET  /mylibrary/api/status/ &amp; /api/catalog/
             </div>
         </div>
     </div>
@@ -1112,5 +1206,5 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/search.js' %}?v=20261107i"></script>
+<script src="{% static 'js/search.js' %}?v=20261111a"></script>
 {% endblock %}

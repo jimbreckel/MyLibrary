@@ -529,6 +529,13 @@ def _print_detailed_help() -> None:
    GET|POST     /mylibrary/api/status/items/           Enrichment explorer + approve / ignore / requeue actions
    GET          /mylibrary/api/status/history/         Hourly/daily time-series (?granularity=hour|day)
    GET          /mylibrary/api/logs/                   Tail scanner.log & epubmeta.log (?source=both&lines=60)
+   POST         /mylibrary/api/enrich/                 On-demand epubmeta enrichment for a book or file
+   POST         /mylibrary/api/wishlist/check/         Batch/single book check for Chrome Extension (Wishlists & Book Sites)
+   GET|POST     /mylibrary/api/duplicates/             Enriched Duplicates Manager scan & resolution API
+   POST         /mylibrary/api/interesting/toggle/     Toggle ☆ Interesting book status
+   POST         /mylibrary/api/bad-metadata/toggle/    Toggle ⚑ Bad Metadata status
+   GET|POST     /mylibrary/api/cover-search/           Multi-source web cover search & apply
+   GET|POST     /mylibrary/api/book-preview/           Inside-book page/cover preview & Gemini AI Vision re-evaluation
 
 4. CALIBRE & MOON+ READER SYNC UTILITY (`calibre_moon_sync.py`)
    python calibre_moon_sync.py moon-only --apply       Migrate Moon+ WebDAV .po & .an bookmark filenames

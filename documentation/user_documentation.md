@@ -7,6 +7,7 @@ Welcome to the **MyLibrary** User Documentation. This guide covers the Central W
 ## 1. System Overview
 
 MyLibrary consists of four integrated components:
+
 1. **Central Catalog Web Application (`/mylibrary/`)**: A Django + PostgreSQL web application indexing **1.15M+ unique catalog items** and **1.52M+ physical files** across Books, Magazines, Kindle, Audible, and Audiobooks.
 2. **Conversion & Import Status Dashboard (`/mylibrary/status/`)**: Real-time observability, interactive time-series charts, and manual review/approval workflow for `epubmeta` enrichment and NAS scanning.
 3. **Unified NAS Scanner & Enricher (`nas_scanner`)**: A background container (`docker_scanner_loop.py` + `sync_files.py` + `epubmeta`) that walks `/books` and `/audiobooks` every 4 hours, prioritizes new/modified files first, enriches `.epub` metadata via Open Library, Google Books, Amazon/Goodreads, and Gemini AI (with a hard daily cost cap), and syncs changes to `BookDB`.
@@ -19,6 +20,7 @@ MyLibrary consists of four integrated components:
 Access the main catalog at **`http://192.168.1.43:8080/mylibrary/`**.
 
 ### Search, Filtering & On-Demand Enrichment
+
 - **Full-Catalog Search Across All Books**: Search by title, author, ISBN, ASIN, publisher, or physical filename (`files__file_name`).
 - **One-Click On-Demand Enrichment (`✨ Enrich Now`)**:
   - Click **`✨ Enrich Now`** on any book card or inside **View Details** (or **`✨ Enrich File`** on a specific file location) to immediately run `epubmeta` on the physical `.epub` / `.pdf` file on the NAS, rewrite its embedded OPF metadata, and update its cover, ISBN, author, and synopsis in `BookDB`.
@@ -34,11 +36,13 @@ Access the main catalog at **`http://192.168.1.43:8080/mylibrary/`**.
 Access the live status dashboard at **`http://192.168.1.43:8080/mylibrary/status/`** (or click **Status Dashboard** in the top bar of the main catalog).
 
 ### A. Live Pipeline Activity & Next Scan Countdown
+
 - **Scanner Status Pill**: Shows **`Scanner: Active`** while a scan is running or **`Scanner: Standby`** during the 4-hour sleep window between scans.
 - **Next Scan Pill**: Displays the exact scheduled start time of the next scan in your local browser timezone alongside a **live 1-second ticking countdown** (e.g., `Next Scan: 06:48:59 PM (in 3h 12m 40s)`).
 - **15-Second Auto-Refresh**: Automatically polls `/mylibrary/api/status/` every 15 seconds to update all KPIs, progress counters, and terminal logs without losing your active tab or scroll position.
 
 ### B. Remaining to Catalog & Remaining to Enrich Counters
+
 - **Tracked File States (`SQLite`) Card**:
   - **`Remaining to Catalog`**: Shows `0` when all `1.52M+` discovered NAS files are cataloged in `file_states` and `BookDB`. When new files are discovered and being extracted in chunks, it displays the live remaining count and active chunk (`Chunk X/Y`).
   - **`Discovered on NAS`**: Total valid files found across `/books` and `/audiobooks`.
@@ -49,7 +53,9 @@ Access the live status dashboard at **`http://192.168.1.43:8080/mylibrary/status
 - **Priority Handling for New Books**: Whenever new or modified files are added to `/books` or `/audiobooks`, `sync_files.py` places them in `new_enrich_candidates` ahead of the backfill queue so they are cataloged and enriched **first** on the very next scan cycle.
 
 ### C. Interactive Time-Series History Charts
+
 Click any number on the **`epubmeta Enrichments`** card (`All Processed`, `Enriched`, `Review`, `No ISBN`, `Quarantine`) or the **`Local Metadata Cache`** card to open the interactive **Enrichment & Processing History Over Time** modal:
+
 - **Series Selector Pills**: Switch between `All Processed`, `Enriched`, `Review`, `No ISBN`, `Quarantine`, `Metadata Cache`, or **`Compare All`** (overlays all curves on one chart).
 - **View Mode Toggle**:
   - **Cumulative Total**: Smooth area/line chart showing total enriched books growing over time.
@@ -58,7 +64,9 @@ Click any number on the **`epubmeta Enrichments`** card (`All Processed`, `Enric
 - **Table Jump**: Click **`Browse Matching Files in Table Below ↓`** at the bottom of the chart modal to jump straight to the filtered file list.
 
 ### D. Enrichments & Quarantine Explorer (Review & Mix-and-Match Approval)
+
 In the **Enrichments & Quarantine Explorer** table:
+
 1. **Status Filter Pills**:
    - **`All`** — All processed records in `scanner_state.db`.
    - **`Enriched (`SUCCESS`)`** — Confident matches automatically written to the `.epub` and synced to `BookDB`.
@@ -84,11 +92,13 @@ In the **Enrichments & Quarantine Explorer** table:
 `mylibrary_cli.py` provides terminal access to every function in MyLibrary using only the Python standard library.
 
 ### Environment Variables & Global Flags
+
 - `--url` / `MYLIBRARY_URL`: Base URL (default: `http://192.168.1.43:8080/mylibrary`)
 - `--prefix` / `MYLIBRARY_PATH_PREFIX`: Local path prefix for NAS files (default: `U:\Media`)
 - `--json`: Output raw JSON on any command for scripting or piping
 
 ### Command Reference
+
 ```powershell
 # Show detailed CLI help and examples
 python mylibrary_cli.py help
@@ -136,6 +146,7 @@ python mylibrary_cli.py logs --source both --lines 50 --grep "SUCCESS"
 `mylibrary_mcp.py` exposes all MyLibrary functions as native MCP tools and resources over stdio JSON-RPC 2.0.
 
 ### Configuration (`mcp_config.json` / `claude_desktop_config.json`)
+
 ```json
 {
   "mcpServers": {
@@ -154,19 +165,20 @@ python mylibrary_cli.py logs --source both --lines 50 --grep "SUCCESS"
 ```
 
 ### Available MCP Tools
-| Tool Name | Description |
-| :--- | :--- |
-| `mylibrary_get_status` | Live scanner state, next scan countdown, remaining catalog/enrichment counts, and KPIs |
-| `mylibrary_search_catalog` | Search and filter the 1.15M+ item catalog (`query`, `item_type`, `file_format`, `isbn`, `author`, `limit`, `offset`) |
-| `mylibrary_get_book` | Full book metadata, synopsis, physical file locations, and enrichment history by UUID, ISBN, ASIN, hash, or path |
-| `mylibrary_update_book` | Update `title`, `authors`, `publisher`, `isbn`, `asin`, or `description` in BookDB |
-| `mylibrary_suggest` | Fast title/author autocomplete suggestions |
-| `mylibrary_list_enrichments` | List/search `epubmeta` records (`NEEDS_REVIEW`, `QUARANTINED`, `NO_ISBN`, `SUCCESS`, `FAILED`, `IGNORED`, `ALL`) |
-| `mylibrary_approve_enrichment` | Approve an enrichment item with optional mix-and-match field selection (`title`, `author`, `publisher`, `isbn`, `description`, `cover`) |
-| `mylibrary_ignore_enrichment` | Keep original metadata and mark an item as `IGNORED` |
-| `mylibrary_requeue_enrichment` | Re-queue a file in `scanner_state.db` for the next scan cycle |
-| `mylibrary_get_enrichment_history` | Get hourly or daily time-series enrichment metrics (`per_period` and `cumulative`) |
-| `mylibrary_get_logs` | Tail `scanner.log` and `epubmeta.log` with optional line count and keyword filter |
+
+| Tool Name                          | Description                                                                                                                             |
+| :--------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- |
+| `mylibrary_get_status`             | Live scanner state, next scan countdown, remaining catalog/enrichment counts, and KPIs                                                  |
+| `mylibrary_search_catalog`         | Search and filter the 1.15M+ item catalog (`query`, `item_type`, `file_format`, `isbn`, `author`, `limit`, `offset`)                    |
+| `mylibrary_get_book`               | Full book metadata, synopsis, physical file locations, and enrichment history by UUID, ISBN, ASIN, hash, or path                        |
+| `mylibrary_update_book`            | Update `title`, `authors`, `publisher`, `isbn`, `asin`, or `description` in BookDB                                                      |
+| `mylibrary_suggest`                | Fast title/author autocomplete suggestions                                                                                              |
+| `mylibrary_list_enrichments`       | List/search `epubmeta` records (`NEEDS_REVIEW`, `QUARANTINED`, `NO_ISBN`, `SUCCESS`, `FAILED`, `IGNORED`, `ALL`)                        |
+| `mylibrary_approve_enrichment`     | Approve an enrichment item with optional mix-and-match field selection (`title`, `author`, `publisher`, `isbn`, `description`, `cover`) |
+| `mylibrary_ignore_enrichment`      | Keep original metadata and mark an item as `IGNORED`                                                                                    |
+| `mylibrary_requeue_enrichment`     | Re-queue a file in `scanner_state.db` for the next scan cycle                                                                           |
+| `mylibrary_get_enrichment_history` | Get hourly or daily time-series enrichment metrics (`per_period` and `cumulative`)                                                      |
+| `mylibrary_get_logs`               | Tail `scanner.log` and `epubmeta.log` with optional line count and keyword filter                                                       |
 
 ---
 
@@ -175,6 +187,7 @@ python mylibrary_cli.py logs --source both --lines 50 --grep "SUCCESS"
 MyLibrary includes a built-in **OPDS 1.2 Content Server** and **Calibre Content Server JSON emulator** ([`catalog/opds.py`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/catalog/opds.py)) so physical tablets and e-readers (such as **Moon+ Reader**, KOReader, Calibre Sync, Librera, and PocketBook) can browse, search, and download books directly from the NAS without needing desktop Calibre.
 
 ### A. OPDS Endpoints
+
 - **Root Catalog (Add this URL in Moon+ Reader):** `http://192.168.1.43:8080/mylibrary/opds/`
 - **Enriched EPUBs Shelf (`epubmeta` Verified):** `http://192.168.1.43:8080/mylibrary/opds/enriched/`
 - **Recently Updated & Enriched Books:** `http://192.168.1.43:8080/mylibrary/opds/recent/`
@@ -184,7 +197,9 @@ MyLibrary includes a built-in **OPDS 1.2 Content Server** and **Calibre Content 
 - **OpenSearch Search Feed:** `http://192.168.1.43:8080/mylibrary/opds/search/?q=<query>`
 
 ### B. Automatic On-Demand Enrichment on Download & Moon+ Reader Bookmark Migration
+
 When you download a book from MyLibrary OPDS (`/mylibrary/opds/download/<id>/<Title - Author.epub>`):
+
 1. **Automatic On-Demand Enrichment**: If the `.epub` or `.pdf` file is not already enriched (`status = 'SUCCESS'` in `scanner_state.db`), MyLibrary automatically runs `epubmeta` enrichment on the fly, rewrites the embedded OPF metadata in `/books` (with backup in `/books_bad/bak`), and updates `scanner_state.db` and `BookDB` before streaming the file! You can also tap the explicit **`✨ Enrich & Download`** acquisition link (`?enrich=1`) or append `+enrich` to any OPDS search query (`/mylibrary/opds/search/?q=...+enrich`).
 2. **Calibre-Normalized Filename**: The server streams the physical `.epub` from `/volume1/common/Media/Books` using the exact Calibre filename convention (`<Title> - <FirstAuthor>.epub`).
 3. **Automatic Moon+ Bookmark Migration**: At the moment of download, MyLibrary inspects your Moon+ Reader WebDAV Cache (`/volume1/common/webdav/Apps/Books/.Moon+/Cache`, mapped as `U:\webdav\Apps\Books\.Moon+\Cache`) and automatically copies/rewrites any existing `.po` (reading position) and `zlib`-compressed `.an` (highlights/bookmarks) files to match the new Calibre filename!
@@ -194,6 +209,7 @@ When you download a book from MyLibrary OPDS (`/mylibrary/opds/download/<id>/<Ti
 ## 7. External Network Security (`/mylibrary/login/` & HTTP Basic Auth)
 
 MyLibrary is protected by [`ExternalAccessSecurityMiddleware`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/catalog/security.py):
+
 - **On Your Home LAN (`192.168.1.x` or Tailscale `100.64.x.x`):** By default (`WEB_AUTH_MODE=external`, `OPDS_AUTH_MODE=external`), local requests do not require a login prompt.
 - **Outside Your Home Network (Public Internet / Reverse Proxy / Cloudflare Tunnel):**
   - **Web Pages (`/mylibrary/`, `/mylibrary/status/`)** automatically redirect to `/mylibrary/login/`.
@@ -208,6 +224,7 @@ MyLibrary is protected by [`ExternalAccessSecurityMiddleware`](file:///c:/Users/
 Follow this step-by-step plan to safely transition one of your Android tablets/phones from manual desktop Calibre USB/Wi-Fi syncing to **MyLibrary OPDS + WebDAV**, removing the old local books on the device without losing a single reading position or bookmark:
 
 ### Phase 1: Sync & Back Up Your Current Reading Positions to WebDAV (Before Deleting Anything)
+
 1. **On the Physical Device (Moon+ Reader):**
    - Open **Moon+ Reader** -> tap **Options (Left Menu -> Options)** -> **Cloud Backup / Sync -> WebDAV**.
    - Tap **Sync Now** (or **Upload**) one final time so the device pushes its latest `.po` (reading position) and `.an` (bookmarks/highlights) files to `U:\webdav\Apps\Books\.Moon+\Cache`.
@@ -219,6 +236,7 @@ Follow this step-by-step plan to safely transition one of your Android tablets/p
    - This automatically backs up all current `.po` and `.an` files into `U:\webdav\Apps\Books\.Moon+\Cache\_SyncBackup` and creates updated `.po` and `.an` files for any books whose titles/filenames changed during `epubmeta` enrichment.
 
 ### Phase 2: Remove the Old Books from the Physical Device
+
 1. **In Moon+ Reader (`My Shelf` & `My Files`):**
    - Open **My Shelf** in Moon+ Reader.
    - To remove individual books or all old Calibre-synced books:
@@ -227,15 +245,16 @@ Follow this step-by-step plan to safely transition one of your Android tablets/p
    - **Important Note About WebDAV Bookmarks:** Deleting the `.epub` file on your Android device **does NOT delete** your `.po` or `.an` bookmark files on the NAS WebDAV server (`U:\webdav\Apps\Books\.Moon+\Cache`), and you also have a full backup in `_SyncBackup`.
 
 ### Phase 3: Connect Moon+ Reader to the MyLibrary OPDS Server
+
 1. Open **Moon+ Reader** on your device and go to **Net Library** (in the left navigation drawer).
 2. Tap the **`+` (Add new catalog)** button at the top right:
    - **Catalog title:** `MyLibrary NAS`
    - **Catalog URL (on Home Wi-Fi):** `http://192.168.1.43:8080/mylibrary/opds/`
-     *(If connecting from outside your home network via your router/static IP, enter `http://<YOUR_STATIC_PUBLIC_IP>:8080/mylibrary/opds/` and fill in your `AUTH_USERNAME` and `AUTH_PASSWORD`).*
+     _(If connecting from outside your home network via your router/static IP, enter `http://<YOUR_STATIC_PUBLIC_IP>:8080/mylibrary/opds/` and fill in your `AUTH_USERNAME` and `AUTH_PASSWORD`)._
 3. Tap **OK**, then tap **MyLibrary NAS** to open your server catalog!
 4. You will immediately see your shelves:
-   - **Bookmarked & Reading in Moon+** *(Dynamic virtual shelf of all books with active Moon+ WebDAV bookmarks/reading progress)*
-   - **Browse by Enriched Tags & Collections** *(All subject tags & folder collections from enriched EPUBs)*
+   - **Bookmarked & Reading in Moon+** _(Dynamic virtual shelf of all books with active Moon+ WebDAV bookmarks/reading progress)_
+   - **Browse by Enriched Tags & Collections** _(All subject tags & folder collections from enriched EPUBs)_
    - **Enriched EPUBs (epubmeta Verified)**
    - **Recently Updated & Enriched Books**
    - **Browse by Author (A–Z)**
@@ -244,6 +263,7 @@ Follow this step-by-step plan to safely transition one of your Android tablets/p
    - Plus the **Search (magnifying glass)** icon at the top right to search all 1.15M+ books.
 
 ### Phase 4: Download Books & Resume Reading Seamlessly
+
 1. Browse or search for any book in **Net Library -> MyLibrary NAS** and tap **Download**.
 2. MyLibrary streams the enriched `.epub` to your device as `<Title> - <Author>.epub` and automatically ensures the matching `.po` and `.an` bookmark files exist in `/webdav/Apps/Books/.Moon+/Cache`.
 3. Tap **Read** when the download completes. Moon+ Reader automatically checks your WebDAV cache for `<Title> - <Author>.epub.po` / `.an` and prompts to jump straight to your saved reading position and highlights!
@@ -255,11 +275,13 @@ Follow this step-by-step plan to safely transition one of your Android tablets/p
 Because you have a **fixed public IP**, you can access the MyLibrary Web UI, Status Dashboard, and OPDS Server from anywhere outside your home network while keeping your database and NAS protected.
 
 ### Step 1: Reserve Static LAN IP `192.168.1.43` for Your NAS
+
 1. Log into your Netgear Router admin page (`http://192.168.1.1` or `http://routerlogin.net`).
 2. Go to **Advanced -> Setup -> LAN Setup -> Address Reservation**.
 3. Ensure your NAS MAC address is reserved to **`192.168.1.43`** so its internal IP never changes.
 
 ### Step 2: Add the Port Forwarding Rule on Your Netgear Router
+
 You have two port-forwarding options depending on whether you want to expose **only MyLibrary** or the **DevStack Nginx Gateway**:
 
 - **Option A — Recommended: Forward an External High Port Directly to `mylibrary-web` (or Nginx)**
@@ -271,7 +293,7 @@ You have two port-forwarding options depending on whether you want to expose **o
     - **Internal Port Range:** `8080` (DevStack Nginx, which passes `X-Forwarded-For` to `mylibrary-web`)
     - **Internal IP Address:** `192.168.1.43`
   - Click **Apply**.
-  - *(Security Note: **Never** forward PostgreSQL `5433`, Redis `6379`, pgAdmin `5050`, or SSH `22` to the public internet).*
+  - _(Security Note: **Never** forward PostgreSQL `5433`, Redis `6379`, pgAdmin `5050`, or SSH `22` to the public internet)._
 
 - **Option B — HTTPS with TLS Encryption (Synology Reverse Proxy / Nginx TLS)**
   - If your NAS has Synology **Control Panel -> Login Portal -> Advanced -> Reverse Proxy** (or a Let's Encrypt certificate):
@@ -280,16 +302,40 @@ You have two port-forwarding options depending on whether you want to expose **o
     3. This encrypts your password and book downloads over TLS (`https://<YOUR_FIXED_PUBLIC_IP>:8443/mylibrary/`).
 
 ### Step 3: Set Your External Password in `.env`
+
 In `/volume1/common/MyLibrary/.env`, you can customize your login credentials at any time:
+
 ```ini
 WEB_AUTH_MODE=external
 OPDS_AUTH_MODE=external
 AUTH_USERNAME=oscar
 AUTH_PASSWORD=YourStrongPasswordHere
 ```
-- **On Home Wi-Fi (`192.168.1.x`):** Zero login prompts (`http://192.168.1.43:8080/mylibrary/`).
-- **Outside Your Network (`http://<YOUR_FIXED_PUBLIC_IP>:8080/mylibrary/`):**
-  - Opening the web page in a browser redirects to `/mylibrary/login/`.
-  - Connecting from Moon+ Reader (`http://<YOUR_FIXED_PUBLIC_IP>:8080/mylibrary/opds/`) prompts for your `AUTH_USERNAME` and `AUTH_PASSWORD` via HTTP Basic Auth and blocks any IP for 15 minutes after 8 failed attempts.
 
+## 10. Chrome Extension — Book Sites, Amazon Wishlists & Anna's Archive (`chrome_wishlist_extension/`)
 
+The companion Chrome Extension ([`chrome_wishlist_extension/`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/chrome_wishlist_extension), deployed to `U:\MyLibrary\chrome_wishlist_extension`) checks both **Amazon Wishlists** and **individual book pages** across major bookstores and publishers against your NAS MyLibrary catalog and Anna's Archive.
+
+### A. Installation in Chrome
+
+1. Open **`chrome://extensions/`** and enable **Developer mode**.
+2. Click **Load unpacked** and select **`U:\MyLibrary\chrome_wishlist_extension`** (or `c:\Users\jpbr230\Repo_Pers\notgithub\MyLibrary\chrome_wishlist_extension`).
+
+### B. Supported Book Sites & Features
+
+- **Amazon Wishlists (`Books (Kindle)`, `Print Books`, etc.)**:
+  - Automatically checks every wishlist book against MyLibrary (`POST /mylibrary/api/wishlist/check/`).
+  - Performs automatic `/dp/<ASIN>` verification for title-only matches to extract the true **Publication Year**, **Edition**, **Subtitle**, and **Print ISBN-13/10** so newer editions with the same title as an older book in your library are never falsely marked as owned.
+  - Includes a **`✕ False Positive`** button (with **`↩ Undo`**), filter chips (`Scanned`, `✅ In MyLibrary`, `❌ Not in Library`, `🔎 On Anna's Archive`), **`⏬ Auto-Scroll Entire Wishlist`**, **`📚 Check Anna's Archive (Missing)`** (by ISBN + Title), and **`📥 Export CSV`**.
+- **Book Product Pages (Amazon, Barnes & Noble, Springer Link, Goodreads, O'Reilly, No Starch Press + Custom Sites)**:
+  - Adds an inline **`✅ In MyLibrary` / `❌ Not in MyLibrary`** pill next to the book's `<h1>` title.
+  - Inserts a unified action widget below the book cover with:
+    - Live MyLibrary status, match details, and direct **[Download EPUB/PDF]** links
+    - **`Open in Anna's Archive (<ISBN-13>)`**
+    - **`Search in Anna's Archive`** (by Title)
+    - **`🔍 Check Anna's Live`** (checks Anna's Archive in the background by ISBN + Title)
+    - Optional **`Open in Z-Library`** button (toggleable in the extension popup)
+- **Popup Controls**:
+  - One-click Anna's Archive domain switcher (`.pk`, `.gl`, `.li`, `.se`, `.org`, or any custom mirror URL).
+  - Clickable **Active Book Sites** pills that open each bookstore/publisher in a new tab.
+  - **`➕ Add Another Book Site`** form to add custom book sites by domain and CSS selectors without editing code.

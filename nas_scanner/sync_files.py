@@ -334,16 +334,14 @@ def scan_directory(
     import gc
     gc.collect()
 
-    # 4. Parallel Metadata Extraction (CPU-bound) & Concurrent Uploads (Network/IO-bound) for remaining new/changed files
+    # 4. Parallel Metadata Extraction & Concurrent Uploads (with strict per-file timeout so no file can hang the scanner)
     if files_to_parse:
         print(f"Found {len(files_to_parse)} files needing metadata extraction and syncing.", flush=True)
-        import multiprocessing
-        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
         chunk_size = 250
         total_chunks = (len(files_to_parse) + chunk_size - 1) // chunk_size
         print(f"Processing in {total_chunks} chunks of {chunk_size}...", flush=True)
-        spawn_ctx = multiprocessing.get_context("spawn")
 
         with ThreadPoolExecutor(max_workers=4) as uploader:
             for i in range(0, len(files_to_parse), chunk_size):
@@ -352,37 +350,37 @@ def scan_directory(
                 print(f"\n--- Processing Chunk {chunk_idx}/{total_chunks} ({len(chunk)} files) ---", flush=True)
 
                 parsed_metadata = {}
-                try:
-                    with ProcessPoolExecutor(max_workers=2, mp_context=spawn_ctx) as executor:
-                        tasks = {executor.submit(process_file_metadata, (item[0], item_type)): item for item in chunk}
-                        for future in as_completed(tasks):
-                            item = tasks[future]
-                            abspath, modified_at, size, file_name = item
-                            try:
-                                res_path, meta, error = future.result()
-                                if error:
-                                    print(f"  Error extracting metadata for {file_name}: {error}")
-                                    failed_files += 1
-                                else:
-                                    parsed_metadata[res_path] = (meta, modified_at, size)
-                            except Exception as e:
-                                print(f"  Exception extracting metadata for {file_name}: {e}")
-                                failed_files += 1
-                except Exception as e:
-                    print(f"  Warning: Parallel chunk processing error ({e}). Falling back to safe sequential processing for remaining items in chunk.")
-                    for item in chunk:
-                        abspath, modified_at, size, file_name = item
-                        if abspath not in parsed_metadata:
-                            try:
-                                res_path, meta, error = process_file_metadata((abspath, item_type))
-                                if error:
-                                    print(f"  Error extracting metadata for {file_name}: {error}")
-                                    failed_files += 1
-                                else:
-                                    parsed_metadata[res_path] = (meta, modified_at, size)
-                            except Exception as ex:
-                                print(f"  Skipping corrupt file {file_name}: {ex}")
-                                failed_files += 1
+                for item in chunk:
+                    abspath, modified_at, size, file_name = item
+                    file_pool = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        fut = file_pool.submit(process_file_metadata, (abspath, item_type))
+                        res_path, meta, error = fut.result(timeout=20.0)
+                        if error:
+                            print(f"  Error extracting metadata for {file_name}: {error}", flush=True)
+                            failed_files += 1
+                        else:
+                            parsed_metadata[res_path] = (meta, modified_at, size)
+                    except FuturesTimeoutError:
+                        print(f"  Timeout (20s) extracting metadata for {file_name}; using filename fallback.", flush=True)
+                        fallback_meta = {
+                            'file_name': file_name,
+                            'file_path': abspath,
+                            'file_size': size,
+                            'file_format': os.path.splitext(file_name)[1][1:].upper() or 'BOOK',
+                            'file_hash': '',
+                            'title': os.path.splitext(file_name)[0],
+                            'authors': 'Unknown Author',
+                            'item_type': item_type,
+                            'is_invalid': True,
+                            'has_drm': False,
+                        }
+                        parsed_metadata[abspath] = (fallback_meta, modified_at, size)
+                    except Exception as e:
+                        print(f"  Exception extracting metadata for {file_name}: {e}", flush=True)
+                        failed_files += 1
+                    finally:
+                        file_pool.shutdown(wait=False, cancel_futures=True)
 
                 if not parsed_metadata:
                     continue
@@ -398,14 +396,14 @@ def scan_directory(
                 for future in as_completed(upload_tasks):
                     path = upload_tasks[future]
                     try:
-                        abspath, modified_at, size, file_hash, success = future.result()
+                        abspath, modified_at, size, file_hash, success = future.result(timeout=35.0)
                         if success:
                             success_batch.append((abspath, modified_at, size, file_hash))
                             synced_files += 1
                         else:
                             failed_files += 1
                     except Exception as e:
-                        print(f"  Exception during upload: {e}")
+                        print(f"  Exception during upload: {e}", flush=True)
                         failed_files += 1
 
                 if success_batch:

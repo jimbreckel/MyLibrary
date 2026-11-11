@@ -141,6 +141,16 @@ class FileSyncAPIView(APIView):
             
             # Update the catalog item with enriched metadata from the modified file
             item = file_loc.catalog_item
+            try:
+                from .opds import ensure_isolated_catalog_item_for_file
+                item = ensure_isolated_catalog_item_for_file(
+                    item,
+                    file_loc,
+                    new_title=title or '',
+                    new_authors=authors or '',
+                )
+            except Exception:
+                pass
             updated = False
             if title and title != file_name and item.title != title:
                 item.title = title
@@ -163,11 +173,29 @@ class FileSyncAPIView(APIView):
             if pub_date and item.pub_date != pub_date:
                 item.pub_date = pub_date
                 updated = True
-            if cover_thumbnail and not item.cover_thumbnail:
-                item.cover_thumbnail = cover_thumbnail
-                updated = True
+            if cover_thumbnail:
+                if not item.cover_thumbnail:
+                    item.cover_thumbnail = cover_thumbnail
+                    updated = True
+                else:
+                    try:
+                        from .opds import classify_cover_image
+                        if (
+                            classify_cover_image(item.cover_thumbnail, item.cover_image_url) == 'text_only'
+                            and classify_cover_image(cover_thumbnail) is None
+                        ):
+                            item.cover_thumbnail = cover_thumbnail
+                            updated = True
+                    except Exception:
+                        pass
             if updated:
                 item.save()
+            try:
+                from .opds import evaluate_and_record_item_cover_status, is_file_enriched
+                if orig_file_hash or is_file_enriched(file_path):
+                    evaluate_and_record_item_cover_status(item)
+            except Exception:
+                pass
             return Response({"status": "updated_content", "id": file_loc.id}, status=status.HTTP_200_OK)
 
         # 3. Completely new file instance. Try to find a matching CatalogItem (fuzzy match)
@@ -322,6 +350,8 @@ class AmazonBatchSyncAPIView(APIView):
     to sync Purchased on Amazon, Kindle+ (Kindle Unlimited / Prime Reading),
     Kindle Bookmarks/Highlights, and Audible Audiobooks.
     """
+    authentication_classes = []
+    permission_classes = []
 
     def get(self, request):
         from .opds import get_dynamic_amazon_shelf

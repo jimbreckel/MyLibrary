@@ -1,0 +1,115 @@
+{
+  "manifest_version": 3,
+  "name": "MyLibrary — Book Sites, Wishlist & Anna's Archive Checker",
+  "version": "1.3.0",
+  "description": "Checks Amazon Wishlists & Book Pages, Barnes & Noble, Springer, Pearson, McGraw-Hill, Cengage, Wiley, Manning, and custom book sites against MyLibrary & Anna's Archive.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://192.168.1.43:8080/*",
+    "http://localhost:8000/*",
+    "http://nas:8080/*",
+    "http://nas.local:8080/*",
+    "https://*.amazon.com/*",
+    "https://*.amazon.co.uk/*",
+    "https://*.amazon.ca/*",
+    "https://*.amazon.de/*",
+    "https://*.amazon.fr/*",
+    "https://*.amazon.es/*",
+    "https://*.amazon.it/*",
+    "https://*.amazon.co.jp/*",
+    "https://*.amazon.com.au/*",
+    "https://*.barnesandnoble.com/*",
+    "https://link.springer.com/*",
+    "https://*.goodreads.com/*",
+    "https://*.oreilly.com/*",
+    "https://*.nostarch.com/*",
+    "https://*.pearson.com/*",
+    "https://*.mheducation.com/*",
+    "https://*.cengage.com/*",
+    "https://*.wiley.com/*",
+    "https://*.manning.com/*",
+    "https://annas-archive.pk/*",
+    "https://*.annas-archive.pk/*",
+    "https://annas-archive.gl/*",
+    "https://*.annas-archive.gl/*",
+    "https://annas-archive.li/*",
+    "https://*.annas-archive.li/*",
+    "https://annas-archive.se/*",
+    "https://*.annas-archive.se/*",
+    "https://annas-archive.org/*",
+    "https://*.annas-archive.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "MyLibrary — Book Sites, Wishlist & Anna's Archive Checker",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/hz/wishlist/*",
+        "https://www.amazon.com/gp/registry/wishlist/*",
+        "https://www.amazon.com/*/wishlist/*",
+        "https://www.amazon.co.uk/hz/wishlist/*",
+        "https://www.amazon.ca/hz/wishlist/*",
+        "https://www.amazon.de/hz/wishlist/*"
+      ],
+      "css": ["styles.css"],
+      "js": ["content_amazon.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "exclude_matches": [
+        "https://*.amazon.com/hz/wishlist/*",
+        "https://*.amazon.com/gp/registry/wishlist/*",
+        "https://*.amazon.com/*/wishlist/*",
+        "https://annas-archive.pk/*",
+        "https://annas-archive.gl/*",
+        "https://annas-archive.li/*",
+        "https://annas-archive.se/*",
+        "https://annas-archive.org/*"
+      ],
+      "css": ["styles.css"],
+      "js": ["site_adapters.js", "content_book_sites.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://annas-archive.pk/*",
+        "https://*.annas-archive.pk/*",
+        "https://annas-archive.gl/*",
+        "https://*.annas-archive.gl/*",
+        "https://annas-archive.li/*",
+        "https://*.annas-archive.li/*",
+        "https://annas-archive.se/*",
+        "https://*.annas-archive.se/*",
+        "https://annas-archive.org/*",
+        "https://*.annas-archive.org/*"
+      ],
+      "css": ["styles.css"],
+      "js": ["content_annas.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

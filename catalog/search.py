@@ -276,39 +276,92 @@ def normalize_author(author):
     return author
 
 
+def _is_garbage_or_placeholder_title(title: str) -> bool:
+    if not title:
+        return True
+    s = str(title).strip()
+    if len(s) < 2:
+        return True
+    return bool(
+        re.search(
+            r'^(?:'
+            r'untitled\b|'
+            r'.*\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|doc|docx|pdf|ps|eps|dvi|tex|rtf|tmp)$|'
+            r'\d{2,4}[_\-\s].*(?:ffirs|ftoc|fbetw|flast|fpref|c01|ch01|cover|front|final|title)|'
+            r'0\d\s+cover\b|'
+            r'cover\s+final|'
+            r'\d{3}_[A-Za-z0-9_]+$|'
+            r'microsoft\s+word\s*-|'
+            r'slide\s+\d+$'
+            r')',
+            s,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _is_garbage_or_placeholder_author(authors: str) -> bool:
+    if not authors:
+        return True
+    s = str(authors).strip()
+    low = s.lower()
+    if low in (
+        '', 'unknown', 'unknown author', '..', '.', 'admin', 'administrator',
+        'user', 'owner', 'default', 'root', 'guest', 'author', 'yyepg', 'asura01',
+        'fk', 'jess', 'bartdevries', 'ncargill', 'jturner', 'ldilk',
+    ):
+        return True
+    # Single lowercase token with no spaces (e.g. 'fk', 'ncargill', 'jturner', 'ldilk')
+    if ' ' not in s and re.match(r'^[a-z][a-z0-9_.-]{0,14}$', s):
+        return True
+    return False
+
+
 def find_similar_item(title, authors, isbn=None, asin=None, threshold=0.6):
     """
     Finds an existing CatalogItem that matches the metadata using indexed identifiers,
     exact B-tree lookups, or targeted similarity matching.
+    Never merges items that have garbage DTP production titles (`.indd`, `.qxd`, `ffirs`)
+    or different book titles that merely share a publisher/series tag or a bad ISBN.
     """
+    if _is_garbage_or_placeholder_title(title):
+        return None
+
+    norm_title = normalize_title(title)
+    norm_author = normalize_author(authors) if not _is_garbage_or_placeholder_author(authors) else ""
+
     if isbn:
         item = CatalogItem.objects.filter(isbn=isbn).first()
-        if item:
-            return item
+        if item and not _is_garbage_or_placeholder_title(item.title):
+            cand_norm_title = normalize_title(item.title)
+            if not norm_title or not cand_norm_title or (
+                norm_title == cand_norm_title
+                or norm_title in cand_norm_title
+                or cand_norm_title in norm_title
+            ):
+                return item
 
     if asin:
         item = CatalogItem.objects.filter(asin=asin).first()
-        if item:
+        if item and not _is_garbage_or_placeholder_title(item.title):
             return item
+
+    if _is_garbage_or_placeholder_author(authors):
+        return None
 
     item = CatalogItem.objects.filter(title=title, authors=authors).first()
     if item:
         return item
 
-    if not authors or authors == 'Unknown Author':
-        return None
-
-    norm_title = normalize_title(title)
-    norm_author = normalize_author(authors)
     if norm_title and norm_author:
         same_author_items = list(CatalogItem.objects.filter(authors=authors)[:50])
         for candidate in same_author_items:
-            if normalize_title(candidate.title) == norm_title:
+            if not _is_garbage_or_placeholder_title(candidate.title) and normalize_title(candidate.title) == norm_title:
                 return candidate
 
         same_title_items = list(CatalogItem.objects.filter(title=title)[:20])
         for candidate in same_title_items:
-            if normalize_author(candidate.authors) == norm_author:
+            if not _is_garbage_or_placeholder_author(candidate.authors) and normalize_author(candidate.authors) == norm_author:
                 return candidate
 
     return None
@@ -506,6 +559,9 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
                     'kindleplus': ('kindle_plus', False, 'Kindle+'),
                     'kindle_plus': ('kindle_plus', False, 'Kindle+'),
                     'audible': ('audible', False, 'Audible'),
+                    'tomags': ('tomags', False, 'Moved to toMags'),
+                    'tomag': ('tomags', False, 'Moved to toMags'),
+                    'to_mags': ('tomags', False, 'Moved to toMags'),
                 }
                 if v_low in status_map:
                     canon_st, default_neg, st_label = status_map[v_low]
@@ -911,6 +967,7 @@ def perform_search(query_string, filters=None):
         queryset = queryset.exclude(y_cond) if negated else queryset.filter(y_cond)
 
     # 3. Apply status & completeness flags (`is:...`, `has:...`, `missing:...`)
+    fast_exclude_ids_set = None
     for flag, negated in parsed['status_flags']:
         if flag == 'has_cover':
             cov_cond = (Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail='')) | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url=''))
@@ -934,8 +991,7 @@ def perform_search(query_string, filters=None):
                 if flag == 'enriched':
                     target_ids = enr_idx.get('enriched_ids') or []
                     if negated:
-                        excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or target_ids
-                        queryset = queryset.exclude(id__in=excl_ids)
+                        fast_exclude_ids_set = enr_idx.get('excluded_from_needs_enriching_ids_set') or set(enr_idx.get('excluded_from_needs_enriching_ids') or target_ids)
                     else:
                         queryset = queryset.filter(id__in=target_ids)
                 else:
@@ -955,6 +1011,13 @@ def perform_search(query_string, filters=None):
                 from .opds import get_bad_metadata_item_ids
                 bad_ids = get_bad_metadata_item_ids()
                 queryset = queryset.exclude(id__in=bad_ids) if negated else queryset.filter(id__in=bad_ids)
+            except Exception:
+                pass
+        elif flag == 'tomags':
+            try:
+                from .opds import get_tomags_item_ids
+                tm_ids = get_tomags_item_ids(sync_disk=True)
+                queryset = queryset.exclude(id__in=tm_ids) if negated else queryset.filter(id__in=tm_ids)
             except Exception:
                 pass
         elif flag in ('bookmarked', 'reading', 'read', 'unread', 'annotations'):
@@ -1003,6 +1066,11 @@ def perform_search(query_string, filters=None):
             except Exception:
                 pass
 
+    def _ret(qs_out):
+        if fast_exclude_ids_set is not None:
+            qs_out._fast_exclude_ids_set = fast_exclude_ids_set
+        return qs_out
+
     # 4. Apply negated free-text exclusions (`-term`)
     for neg_term in parsed['neg_free_terms']:
         queryset = queryset.exclude(
@@ -1018,7 +1086,7 @@ def perform_search(query_string, filters=None):
         ):
             exact_qs = queryset.filter(Q(isbn__iexact=clean_q) | Q(asin__iexact=clean_q))
             if exact_qs.exists():
-                return exact_qs
+                return _ret(exact_qs)
 
         if free_q.lower().endswith(('.epub', '.pdf', '.mobi', '.azw3', '.mp3', '.m4b')):
             loc_item_ids = list(
@@ -1026,7 +1094,7 @@ def perform_search(query_string, filters=None):
                 .order_by()
                 .values_list('catalog_item_id', flat=True)[:250]
             )
-            return queryset.filter(id__in=loc_item_ids).order_by('title')
+            return _ret(queryset.filter(id__in=loc_item_ids).order_by('title'))
 
         for term in parsed['free_terms']:
             queryset = queryset.filter(
@@ -1040,24 +1108,24 @@ def perform_search(query_string, filters=None):
     # 6. Apply sort override from `sort:` keyword or relevance ranking
     sort_by = parsed['sort_override']
     if sort_by == 'pubdate_desc':
-        return queryset.order_by(F('pub_date').desc(nulls_last=True), F('created_at').desc(nulls_last=True), 'title')
+        return _ret(queryset.order_by(F('pub_date').desc(nulls_last=True), F('created_at').desc(nulls_last=True), 'title'))
     if sort_by == 'pubdate_asc':
-        return queryset.order_by(F('pub_date').asc(nulls_last=True), F('created_at').asc(nulls_last=True), 'title')
+        return _ret(queryset.order_by(F('pub_date').asc(nulls_last=True), F('created_at').asc(nulls_last=True), 'title'))
     if sort_by == 'added_desc':
-        return queryset.order_by(F('created_at').desc(nulls_last=True), 'title')
+        return _ret(queryset.order_by(F('created_at').desc(nulls_last=True), 'title'))
     if sort_by == 'updated_desc':
-        return queryset.order_by('-updated_at', 'title')
+        return _ret(queryset.order_by('-updated_at', 'title'))
     if sort_by == 'title_asc':
-        return queryset.order_by('title')
+        return _ret(queryset.order_by('title'))
     if sort_by == 'title_desc':
-        return queryset.order_by('-title')
+        return _ret(queryset.order_by('-title'))
     if sort_by == 'author_asc':
-        return queryset.order_by('authors', 'title')
+        return _ret(queryset.order_by('authors', 'title'))
     if sort_by == 'author_desc':
-        return queryset.order_by('-authors', 'title')
+        return _ret(queryset.order_by('-authors', 'title'))
 
     if not free_q:
-        return queryset
+        return _ret(queryset)
 
     relevance_rank = Case(
         When(title__iexact=free_q, then=Value(0)),
@@ -1074,4 +1142,4 @@ def perform_search(query_string, filters=None):
         output_field=IntegerField(),
     )
 
-    return queryset.annotate(_search_rank=relevance_rank).order_by('_search_rank', 'title')
+    return _ret(queryset.annotate(_search_rank=relevance_rank).order_by('_search_rank', 'title'))

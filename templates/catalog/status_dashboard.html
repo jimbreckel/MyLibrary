@@ -313,6 +313,11 @@
             </span>
         </div>
 
+        <button type="button" class="stat-badge action-badge" id="start-scan-now-btn" onclick="triggerScanNow(this);" title="Trigger an immediate NAS library scan &amp; enrichment pass" {% if dashboard.scanner.is_scanning %}style="opacity:0.65;"{% endif %}>
+            <i class="fa-solid fa-play" style="color:#4ade80;" id="start-scan-now-icon"></i>
+            <span id="start-scan-now-label">{% if dashboard.scanner.is_scanning %}Scan Running{% else %}Start Scan Now{% endif %}</span>
+        </button>
+
         <!-- Auto-Refresh Controls -->
         <button type="button" class="stat-badge action-badge" id="toggle-autorefresh-btn" title="Toggle 15-second live auto-refresh">
             <i class="fa-solid fa-rotate cyan" id="refresh-spin-icon"></i>
@@ -947,6 +952,9 @@
                         <button type="button" class="btn-mini-action" onclick="toggleConvBookPreview()" style="background:rgba(56,189,248,0.22); border-color:rgba(56,189,248,0.55); color:#38bdf8;" title="Inspect the actual pages, cover, title page, and copyright text inside this EPUB/PDF file">
                             <i class="fa-solid fa-book-open-reader"></i> Preview Inside Book
                         </button>
+                        <button type="button" class="btn-mini-action" onclick="toggleConvCoverFinder()" style="background:rgba(56,189,248,0.22); border-color:rgba(56,189,248,0.55); color:#38bdf8;" title="Search Web Images, Goodreads, Apple Books, Google Books &amp; Open Library for book covers">
+                            <i class="fa-solid fa-images"></i> Find Covers
+                        </button>
                         <a id="modal-raw-stream-link" href="#" target="_blank" class="btn-mini-action" style="display:none; background:rgba(168,85,247,0.2); border-color:rgba(168,85,247,0.45); color:#c084fc; text-decoration:none;" title="Open the full PDF/EPUB file in a new browser tab">
                             <i class="fa-solid fa-up-right-from-square"></i> Open Full File
                         </a>
@@ -954,6 +962,20 @@
                 </div>
                 <div id="modal-mapped-path" class="td-mono" style="font-size:0.84rem; color:#38bdf8; font-weight:600; margin-bottom:0.25rem;"></div>
                 <div style="font-size:0.73rem; color:#64748b;">Container path: <span id="modal-file-path" class="td-mono"></span></div>
+            </div>
+            <div class="conv-modal-field full" id="conv-cover-finder-drawer" style="display:none; background:rgba(15,23,42,0.88); border:1px solid rgba(56,189,248,0.45);">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; gap:0.5rem; flex-wrap:wrap;">
+                    <strong style="font-size:0.78rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-images"></i> Find Covers — Web Image Search · Goodreads · Apple Books · Google Books · Open Library</strong>
+                    <button type="button" class="btn-mini-action" onclick="document.getElementById('conv-cover-finder-drawer').style.display='none';">✕ Hide</button>
+                </div>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <input type="text" id="conv-cover-search-input" class="merged-input" placeholder="Search title, author, or ISBN for cover images..." onkeydown="if(event.key==='Enter'){event.preventDefault(); runConvCoverSearch();}" style="flex:1;">
+                    <button type="button" class="btn-mini-action" id="conv-btn-run-cover-search" onclick="runConvCoverSearch()" style="background:rgba(56,189,248,0.22); border-color:rgba(56,189,248,0.55); color:#38bdf8; white-space:nowrap;">
+                        <i class="fa-solid fa-magnifying-glass"></i> Search Covers
+                    </button>
+                </div>
+                <div id="conv-cover-finder-status" style="font-size:0.75rem; color:#94a3b8; margin-top:0.4rem;"></div>
+                <div id="conv-cover-finder-results" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(115px, 1fr)); gap:0.65rem; margin-top:0.65rem; max-height:300px; overflow-y:auto;"></div>
             </div>
             <div class="conv-modal-field full" id="conv-book-preview-drawer" style="display:none; background:rgba(2,6,23,0.88); border:1px solid rgba(56,189,248,0.45);">
                 <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.55rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.45rem;">
@@ -1125,24 +1147,31 @@
         <div class="conv-modal-header">
             <div>
                 <span class="status-pill status-success"><i class="fa-solid fa-book-open"></i> QUICK REFERENCE</span>
-                <h3 style="margin-top:0.5rem; font-size:1.15rem;">MyLibrary Help — Dashboard, CLI, REST API &amp; MCP Server</h3>
+                <h3 style="margin-top:0.5rem; font-size:1.15rem;">MyLibrary Help — Dashboard, Chrome Extension, CLI, REST API &amp; MCP Server</h3>
             </div>
             <button type="button" class="btn-mini-action" onclick="closeAppHelpModal()"><i class="fa-solid fa-xmark"></i> Close</button>
         </div>
 
         <div class="conv-modal-grid">
             <div class="conv-modal-field full">
-                <label><i class="fa-solid fa-gauge-high"></i> 1. Status Dashboard, On-Demand Enrichment, OPDS Server &amp; External Security</label>
+                <label><i class="fa-solid fa-gauge-high"></i> 1. Status Dashboard, Enriched Duplicates, On-Demand Enrichment &amp; OPDS Server</label>
                 <div style="font-size:0.82rem; line-height:1.55; color:#cbd5e1;">
-                    • <strong>Time-Series Charts &amp; Mix-and-Match Review:</strong> Click any number on the <strong>epubmeta Enrichments</strong> card or <strong>Local Metadata Cache</strong> to view hourly/daily charts. Click any Explorer row to cherry-pick <strong>Before vs. After</strong> fields (`Approve Selected Fields`, `Keep Original`, or `Re-queue`).<br>
-                    • <strong>On-Demand Enrichment (Web UI &amp; OPDS):</strong> On the Catalog Search page (<code>/mylibrary/</code>), click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> (or check <em>Enrich search results on demand</em> / append <code>+enrich</code> to search) to immediately enrich an EPUB/PDF via <code>POST /mylibrary/api/enrich/</code>.<br>
-                    • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong> (<em>Net Library &rarr; Add new catalog</em>), KOReader, or Calibre Sync. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV `.po`/`.an` bookmarks.<br>
-                    • <strong>External Security (<code>/mylibrary/login/</code>):</strong> Zero friction on your home LAN (`192.168.1.x`). Outside your LAN, web pages redirect to <code>/mylibrary/login/</code> and OPDS/API endpoints require HTTP Basic Auth (`AUTH_USERNAME` / `AUTH_PASSWORD`).
+                    • <strong>Time-Series Charts &amp; Mix-and-Match Review:</strong> Click any number on the <strong>epubmeta Enrichments</strong> card or <strong>Local Metadata Cache</strong> to view hourly/daily charts. Click any Explorer row to cherry-pick <strong>Before vs. After</strong> fields, open <strong>Preview Inside Book</strong> (with <em>AI Re-Evaluate from Image(s)</em>), or search covers with <strong>Find Covers</strong>.<br>
+                    • <strong>Web Catalog &amp; Duplicates Manager (<code>/mylibrary/</code> &amp; <code>/mylibrary/duplicates/</code>):</strong> Search with structured operators (<code>author:</code>, <code>title:</code>, <code>cat:</code>, <code>tag:</code>, <code>isbn:</code>, <code>format:</code>, <code>year:</code>, <code>is:enriched</code>, <code>is:interesting</code>, <code>missing:cover</code>), enrich books on demand (<strong>✨ Enrich Now</strong> / <strong>✨ Enrich Page</strong>), move periodicals to <code>/toMags</code>, and clean up duplicate enriched files safely.<br>
+                    • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong>. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV `.po`/`.an` bookmarks.
                 </div>
             </div>
 
             <div class="conv-modal-field full">
-                <label><i class="fa-solid fa-terminal"></i> 2. CLI (<code>mylibrary_cli.py</code>) &amp; Two-Pass Calibre/Moon+ Sync (<code>calibre_moon_sync.py</code>)</label>
+                <label><i class="fa-brands fa-chrome"></i> 2. Chrome Extension — Book Sites, Amazon Wishlists &amp; Anna's Archive (<code>chrome_wishlist_extension/</code>)</label>
+                <div style="font-size:0.82rem; line-height:1.55; color:#cbd5e1;">
+                    • <strong>Load Unpacked Extension:</strong> In Chrome, open <code>chrome://extensions/</code> &rarr; enable <strong>Developer mode</strong> &rarr; <strong>Load unpacked</strong> &rarr; select <code>U:\MyLibrary\chrome_wishlist_extension</code>.<br>
+                    • <strong>Amazon Wishlists &amp; Book Product Pages (Amazon, Barnes &amp; Noble, Springer Link, Goodreads, O'Reilly, No Starch + Custom Sites):</strong> Displays a live <strong>✅ In MyLibrary / ❌ Not in MyLibrary</strong> indicator (with edition &amp; publication-year verification and a <strong>✕ False Positive</strong> button), plus <strong>Open in Anna's Archive (ISBN)</strong>, <strong>Search in Anna's Archive (Title)</strong>, <strong>🔍 Check Anna's Live (ISBN + Title)</strong>, and optional <strong>Open in Z-Library</strong>. Switch Anna's Archive domains (<code>.pk</code>, <code>.gl</code>, <code>.li</code>, <code>.se</code>, <code>.org</code>) or add custom book sites in 1 click from the extension popup.
+                </div>
+            </div>
+
+            <div class="conv-modal-field full">
+                <label><i class="fa-solid fa-terminal"></i> 3. CLI (<code>mylibrary_cli.py</code>) &amp; Two-Pass Calibre/Moon+ Sync (<code>calibre_moon_sync.py</code>)</label>
                 <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem; font-size:0.75rem; color:#38bdf8; overflow-x:auto; margin:0.25rem 0 0 0;"># CLI status, search, review &amp; history
 python mylibrary_cli.py status
 python mylibrary_cli.py search "Dune" --type BOOK --format EPUB --limit 10
@@ -1156,13 +1185,13 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             </div>
 
             <div class="conv-modal-field">
-                <label><i class="fa-solid fa-plug"></i> 3. MCP Server (<code>mylibrary_mcp.py</code>)</label>
+                <label><i class="fa-solid fa-plug"></i> 4. MCP Server (<code>mylibrary_mcp.py</code>)</label>
                 <pre style="background:rgba(2,6,23,0.75); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.65rem; font-size:0.72rem; color:#4ade80; overflow-x:auto; margin:0.25rem 0 0 0;">{
   "mcpServers": {
     "mylibrary": {
       "command": "python",
       "args": [
-        "c:\\Users\\oscar\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"
+        "c:\\Users\\jpbr230\\Repo_Pers\\notgithub\\MyLibrary\\mylibrary_mcp.py"
       ],
       "env": {
         "MYLIBRARY_URL": "http://192.168.1.43:8080/mylibrary",
@@ -1174,17 +1203,17 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             </div>
 
             <div class="conv-modal-field">
-                <label><i class="fa-solid fa-code"></i> 4. OPDS &amp; REST API Endpoints</label>
-                <div style="font-size:0.75rem; line-height:1.6; color:#cbd5e1; font-family:monospace;">
-                    POST /mylibrary/api/enrich/  (On-Demand Enrich)<br>
-                    POST /mylibrary/api/sync/amazon/<br>
-                    GET  /mylibrary/opds/  (OPDS 1.2 Root)<br>
-                    GET  /mylibrary/opds/amazon/?filter=amazon_only<br>
-                    GET  /mylibrary/opds/search/?q=...+enrich<br>
-                    GET  /mylibrary/opds/download/&lt;id&gt;/&lt;file&gt;<br>
-                    GET  /mylibrary/api/status/<br>
-                    GET  /mylibrary/api/catalog/?q=&amp;type=&amp;format=<br>
-                    POST /mylibrary/api/calibre/check-enriched/
+                <label><i class="fa-solid fa-code"></i> 5. OPDS &amp; REST API Endpoints</label>
+                <div style="font-size:0.74rem; line-height:1.55; color:#cbd5e1; font-family:monospace;">
+                    POST /mylibrary/api/enrich/ (On-Demand Enrich)<br>
+                    POST /mylibrary/api/wishlist/check/ (Wishlist/Book Check)<br>
+                    POST /mylibrary/api/interesting/toggle/ (☆ Interesting)<br>
+                    POST /mylibrary/api/bad-metadata/toggle/ (⚑ Bad Meta)<br>
+                    GET|POST /mylibrary/api/cover-search/ (Find Cover)<br>
+                    GET|POST /mylibrary/api/book-preview/ (Peek &amp; AI Vision)<br>
+                    GET|POST /mylibrary/api/duplicates/ (Duplicates API)<br>
+                    GET  /mylibrary/opds/?v=2 (OPDS 1.2 Root)<br>
+                    GET  /mylibrary/api/status/ &amp; /api/catalog/
                 </div>
             </div>
         </div>
@@ -1820,6 +1849,20 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             prevDrawer.style.display = 'none';
             prevDrawer.dataset.loadedFor = '';
         }
+        const covDrawer = document.getElementById('conv-cover-finder-drawer');
+        if (covDrawer) covDrawer.style.display = 'none';
+        const covInput = document.getElementById('conv-cover-search-input');
+        if (covInput) {
+            const prefT = (item.title || item.orig_title || '').trim();
+            const prefA = (item.author || item.orig_author || '').trim();
+            const cleanA = (prefA && !['unknown', 'unknown author', '..'].includes(prefA.toLowerCase())) ? prefA : '';
+            covInput.value = [prefT, cleanA].filter(Boolean).join(' ').trim();
+        }
+        const covRes = document.getElementById('conv-cover-finder-results');
+        if (covRes) covRes.innerHTML = '';
+        const covSt = document.getElementById('conv-cover-finder-status');
+        if (covSt) covSt.textContent = '';
+
         const rawLink = document.getElementById('modal-raw-stream-link');
         if (rawLink) {
             if (item.file_path) {
@@ -1831,6 +1874,96 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         }
 
         modal.classList.add('open');
+    }
+
+    function toggleConvCoverFinder() {
+        const drawer = document.getElementById('conv-cover-finder-drawer');
+        if (!drawer || !currentModalItem) return;
+        if (drawer.style.display === 'none' || !drawer.style.display) {
+            drawer.style.display = 'block';
+            const covInput = document.getElementById('conv-cover-search-input');
+            if (covInput) {
+                const curT = (document.getElementById('merge-input-title')?.value || '').trim();
+                const curA = (document.getElementById('merge-input-author')?.value || '').trim();
+                const cleanA = (curA && !['unknown', 'unknown author', '..'].includes(curA.toLowerCase())) ? curA : '';
+                if (curT) covInput.value = [curT, cleanA].filter(Boolean).join(' ').trim();
+            }
+            const resGrid = document.getElementById('conv-cover-finder-results');
+            if (resGrid && resGrid.children.length === 0) {
+                runConvCoverSearch();
+            }
+        } else {
+            drawer.style.display = 'none';
+        }
+    }
+
+    async function runConvCoverSearch() {
+        if (!currentModalItem) return;
+        const covInput = document.getElementById('conv-cover-search-input');
+        const statusEl = document.getElementById('conv-cover-finder-status');
+        const resultsEl = document.getElementById('conv-cover-finder-results');
+        const searchBtn = document.getElementById('conv-btn-run-cover-search');
+        if (!resultsEl) return;
+
+        const curTitle = (document.getElementById('merge-input-title')?.value || currentModalItem.title || currentModalItem.orig_title || '').trim();
+        const curAuth = (document.getElementById('merge-input-author')?.value || currentModalItem.author || currentModalItem.orig_author || '').trim();
+        const curIsbn = (document.getElementById('merge-input-isbn')?.value || currentModalItem.isbn || currentModalItem.orig_isbn || '').trim();
+        const q = (covInput ? covInput.value : '').trim() || [curTitle, curAuth].filter(Boolean).join(' ').trim();
+
+        if (statusEl) statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Searching Web Images, Goodreads, Apple Books, Google Books &amp; Open Library for covers...';
+        resultsEl.innerHTML = '';
+        if (searchBtn) searchBtn.disabled = true;
+
+        try {
+            const resp = await fetch('/mylibrary/api/cover-search/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query: q,
+                    title: curTitle,
+                    authors: curAuth,
+                    isbn: curIsbn,
+                })
+            });
+            const resData = await resp.json();
+            if (searchBtn) searchBtn.disabled = false;
+            const covers = resData.covers || [];
+            if (!covers.length) {
+                if (statusEl) statusEl.textContent = 'No covers found for that query. Try editing the search box above and click Search Covers.';
+                return;
+            }
+            if (statusEl) statusEl.textContent = `Found ${covers.length} cover(s) — click any cover below to select it:`;
+            resultsEl.innerHTML = '';
+            covers.forEach(c => {
+                const isOrig = c.source === 'Original Cover';
+                const card = document.createElement('div');
+                card.style.cssText = `background:rgba(15,23,42,0.9); border:1px solid ${isOrig ? '#4ade80' : 'rgba(255,255,255,0.14)'}; border-radius:8px; overflow:hidden; cursor:pointer; display:flex; flex-direction:column;`;
+                card.title = `${c.title} (${c.source}) — Click to use this cover`;
+                card.innerHTML = `
+                    <img src="${escHtml(c.cover_url)}" data-fallback="${escHtml(c.fallback_url || '')}" alt="Cover" loading="lazy" style="width:100%; height:150px; object-fit:cover; background:#020617;" onerror="if(this.dataset.fallback && this.src !== this.dataset.fallback){this.src=this.dataset.fallback;}else{this.parentElement.style.display='none';}">
+                    <div style="padding:0.35rem 0.45rem; font-size:0.68rem; line-height:1.25; color:#cbd5e1;">
+                        <div style="font-weight:700; color:${isOrig ? '#4ade80' : '#38bdf8'}; font-size:0.63rem; text-transform:uppercase;">${isOrig ? '★ ' : ''}${escHtml(c.source)}</div>
+                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600;" title="${escHtml(c.title)}">${escHtml(c.title)}</div>
+                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#94a3b8;">${escHtml(c.authors)}</div>
+                    </div>
+                `;
+                card.addEventListener('click', () => {
+                    const imgEl = card.querySelector('img');
+                    const activeUrl = (imgEl && imgEl.src) ? imgEl.src : c.cover_url;
+                    currentModalItem.new_cover = activeUrl;
+                    const pickNewCov = document.getElementById('pick-new-cover');
+                    if (pickNewCov) {
+                        pickNewCov.innerHTML = `<img src="${escHtml(activeUrl)}" alt="Cover">`;
+                    }
+                    pickField('cover', 'new', true);
+                    if (statusEl) statusEl.innerHTML = `<span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-check"></i> Selected cover from ${escHtml(c.source)} — click Approve Selected Fields below to save!</span>`;
+                });
+                resultsEl.appendChild(card);
+            });
+        } catch (err) {
+            if (searchBtn) searchBtn.disabled = false;
+            if (statusEl) statusEl.textContent = 'Error searching covers: ' + err.message;
+        }
     }
 
     let convPreviewPages = [];
@@ -2313,6 +2446,10 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                     }
                     const statusPill = document.getElementById('scanner-status-pill');
                     const stateLbl = document.getElementById('scanner-state-label');
+                    const startBtnLbl = document.getElementById('start-scan-now-label');
+                    const startBtn = document.getElementById('start-scan-now-btn');
+                    if (startBtnLbl) startBtnLbl.textContent = data.scanner.is_scanning ? 'Scan Running' : 'Start Scan Now';
+                    if (startBtn) startBtn.style.opacity = data.scanner.is_scanning ? '0.65' : '1';
                     if (statusPill && stateLbl) {
                         statusPill.className = 'stat-badge scanner-status-pill ' + (data.scanner.is_scanning ? 'status-active' : 'status-idle');
                         if (data.scanner.is_scanning) {
@@ -2394,6 +2531,29 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         }
 
         window.refreshStatusSummary = fetchLiveStatus;
+
+        window.triggerScanNow = async function(btnEl) {
+            const labelEl = document.getElementById('start-scan-now-label');
+            const iconEl = document.getElementById('start-scan-now-icon');
+            if (btnEl) btnEl.disabled = true;
+            if (iconEl) iconEl.className = 'fa-solid fa-spinner fa-spin';
+            if (labelEl) labelEl.textContent = 'Starting...';
+            try {
+                const resp = await fetch(statusApiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'start_scan' })
+                });
+                if (resp.ok) {
+                    await fetchLiveStatus();
+                }
+            } catch (err) {
+                console.error('Error starting scan:', err);
+            } finally {
+                if (btnEl) btnEl.disabled = false;
+                if (iconEl) iconEl.className = 'fa-solid fa-play';
+            }
+        };
 
         setInterval(() => {
             tickNextScanCountdown();

@@ -64,15 +64,23 @@ class CatalogItem(models.Model):
     def files_json(self):
         import json
         try:
-            from .opds import get_file_enrich_diagnostic, get_file_tags, is_file_enriched
+            from .opds import (
+                _ENRICHED_PATHS_CACHE,
+                get_file_enrich_diagnostic,
+                get_file_tags,
+                is_file_enriched,
+            )
+            excl_set = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set')
+            item_in_processed = (not isinstance(excl_set, set)) or (not excl_set) or (self.id in excl_set)
         except Exception:
             is_file_enriched = lambda p: False
             get_file_tags = lambda p: []
             get_file_enrich_diagnostic = lambda p: None
+            item_in_processed = False
         out = []
         for f in self.files.all():
-            enr = bool(is_file_enriched(f.file_path))
-            diag = None if enr else get_file_enrich_diagnostic(f.file_path)
+            enr = bool(is_file_enriched(f.file_path)) if item_in_processed else False
+            diag = None if (enr or not item_in_processed) else get_file_enrich_diagnostic(f.file_path)
             out.append({
                 'id': str(f.id),
                 'file_name': f.file_name,
@@ -88,7 +96,7 @@ class CatalogItem(models.Model):
                 'is_enriched': enr,
                 'enrich_status': (diag or {}).get('status', ''),
                 'enrich_error': (diag or {}).get('error', ''),
-                'tags': get_file_tags(f.file_path),
+                'tags': get_file_tags(f.file_path) if enr else [],
             })
         return json.dumps(out)
 

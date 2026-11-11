@@ -35,14 +35,41 @@ def run_script(script_name, *args):
             bufsize=1,
             env=env
         )
-        
-        if process.stdout:
-            for line in process.stdout:
-                line_str = line.rstrip('\r\n')
-                logger.info(line_str)
-                # Capture summary and finished markers
-                if any(x in line_str for x in ["Scan Finished", "Sync Finished", "GLOBAL CALIBRE SYNC SUMMARY", "Discovered:", "Synced:", "Failed:", "Skipped:", "[SUMMARY]", "Files to process:", "MyLibrary BookDB:", "[LIMIT REACHED]"]):
-                    summary_lines.append(line_str)
+
+        import threading
+        last_output_ts = [time.monotonic()]
+        watchdog_stop = threading.Event()
+
+        def _stall_watchdog():
+            while not watchdog_stop.wait(30.0):
+                if process.poll() is not None:
+                    break
+                idle_sec = time.monotonic() - last_output_ts[0]
+                if idle_sec > 900.0:  # 15 minutes with zero log output -> hung child
+                    logger.warning(f"[WATCHDOG] {script_name} produced no output for {int(idle_sec)}s; terminating hung process...")
+                    try:
+                        process.terminate()
+                        time.sleep(5)
+                        if process.poll() is None:
+                            process.kill()
+                    except Exception:
+                        pass
+                    break
+
+        wd_thread = threading.Thread(target=_stall_watchdog, daemon=True)
+        wd_thread.start()
+
+        try:
+            if process.stdout:
+                for line in process.stdout:
+                    last_output_ts[0] = time.monotonic()
+                    line_str = line.rstrip('\r\n')
+                    logger.info(line_str)
+                    # Capture summary and finished markers
+                    if any(x in line_str for x in ["Scan Finished", "Sync Finished", "GLOBAL CALIBRE SYNC SUMMARY", "Discovered:", "Synced:", "Failed:", "Skipped:", "[SUMMARY]", "Files to process:", "MyLibrary BookDB:", "[LIMIT REACHED]"]):
+                        summary_lines.append(line_str)
+        finally:
+            watchdog_stop.set()
                     
         return_code = process.wait()
         if return_code != 0:
@@ -154,7 +181,15 @@ def send_status_email(summary_reports):
 
 
 def main():
-    interval_hours = float(os.environ.get('SCAN_INTERVAL_HOURS', '12'))
+    interval_hours = float(os.environ.get('SCAN_INTERVAL_HOURS', '4'))
+    if os.path.exists("config.json"):
+        try:
+            with open("config.json", 'r') as f:
+                c_data = json.load(f)
+                if c_data.get("scan_interval_hours"):
+                    interval_hours = float(c_data["scan_interval_hours"])
+        except Exception:
+            pass
     interval_seconds = interval_hours * 3600
     
     lock_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nas_scanner_loop.lock')
@@ -162,12 +197,7 @@ def main():
         with ScannerLock(lock_file):
             # Check for config path inside container
             config_in_container = "/config/config.json"
-            if os.path.exists(config_in_container):
-                if os.path.exists("config.json"):
-                    try:
-                        os.remove("config.json")
-                    except Exception:
-                        pass
+            if os.path.exists(config_in_container) and not os.path.exists("config.json"):
                 try:
                     os.symlink(config_in_container, "config.json")
                     logger.info(f"Linked config file from {config_in_container}")
@@ -178,7 +208,14 @@ def main():
 
             logger.info(f"Starting MyLibrary Scanner Loop (Interval: {interval_hours} hours)...")
             
+            trigger_file = os.path.join("logs", "trigger_scan.flag")
             while True:
+                if os.path.exists(trigger_file):
+                    try:
+                        os.remove(trigger_file)
+                    except Exception:
+                        pass
+
                 summary_reports = {}
 
                 # Run unified book/magazine scanner + epubmeta enricher (single os.walk pass)
@@ -212,7 +249,17 @@ def main():
                 send_status_email(summary_reports)
                     
                 logger.info(f"\nAll scans finished. Next scan in {interval_hours} hours. Sleeping...")
-                time.sleep(interval_seconds)
+                slept = 0.0
+                while slept < interval_seconds:
+                    if os.path.exists(trigger_file):
+                        try:
+                            os.remove(trigger_file)
+                        except Exception:
+                            pass
+                        logger.info("Manual scan trigger detected! Starting new scan cycle immediately...")
+                        break
+                    time.sleep(2.0)
+                    slept += 2.0
     except LockError as e:
         logger.error(f"Error starting scanner loop: {e}")
         sys.exit(1)
