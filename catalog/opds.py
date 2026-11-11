@@ -1991,15 +1991,23 @@ def ensure_isolated_catalog_item_for_file(
                 clusters.append([sib])
 
         async_hydrate_pairs: List[Tuple[str, str]] = []
+        created_clusters = 0
         for idx, cl in enumerate(clusters):
             rep_loc = cl[0]
+            cl_ids = [fl.id for fl in cl]
+            if not FileLocation.objects.filter(id__in=cl_ids, catalog_item=item).exists():
+                continue
             sib_item = CatalogItem.objects.create(
                 title=(_clean_book_stem_for_grouping(rep_loc.file_name or '') or rep_loc.file_name or 'Untitled')[:512],
                 authors='Unknown Author',
                 publisher='',
                 item_type=item.item_type or 'BOOK',
             )
-            FileLocation.objects.filter(id__in=[fl.id for fl in cl]).update(catalog_item=sib_item)
+            moved_cnt = FileLocation.objects.filter(id__in=cl_ids, catalog_item=item).update(catalog_item=sib_item)
+            if moved_cnt == 0:
+                sib_item.delete()
+                continue
+            created_clusters += 1
             if len(clusters) <= 3:
                 _hydrate_catalog_item_for_single_file(sib_item, rep_loc, enrich_if_needed=False)
             else:
@@ -2611,13 +2619,19 @@ def split_unrelated_files_on_catalog_item(
         if idx == keep_idx:
             continue
         rep_loc = cl[0]
+        cl_ids = [fl.id for fl in cl]
+        if not FileLocation.objects.filter(id__in=cl_ids, catalog_item=item).exists():
+            continue
         new_item = CatalogItem.objects.create(
             title=(_clean_book_stem_for_grouping(rep_loc.file_name or '') or rep_loc.file_name or 'Untitled')[:512],
             authors='Unknown Author',
             publisher=item.publisher or '',
             item_type=item.item_type or 'BOOK',
         )
-        FileLocation.objects.filter(id__in=[fl.id for fl in cl]).update(catalog_item=new_item)
+        moved_cnt = FileLocation.objects.filter(id__in=cl_ids, catalog_item=item).update(catalog_item=new_item)
+        if moved_cnt == 0:
+            new_item.delete()
+            continue
         if len(clusters) <= 4:
             _hydrate_catalog_item_for_single_file(new_item, rep_loc, enrich_if_needed=enrich_split)
         else:
@@ -2637,8 +2651,10 @@ def split_unrelated_files_on_catalog_item(
                 try:
                     si = CatalogItem.objects.filter(id=s_item_id).first()
                     sl = FileLocation.objects.filter(id=s_loc_id).first()
-                    if si and sl:
+                    if si and sl and sl.catalog_item_id == si.id:
                         _hydrate_catalog_item_for_single_file(si, sl, enrich_if_needed=do_enrich)
+                    elif si and not FileLocation.objects.filter(catalog_item=si).exists():
+                        si.delete()
                 except Exception:
                     pass
         threading.Thread(target=_bg_hydrate_split, args=(async_hydrate_pairs, enrich_split), daemon=True).start()
@@ -2651,8 +2667,8 @@ def split_unrelated_files_on_catalog_item(
         if kept_rep.catalog_item_id:
             item = CatalogItem.objects.filter(id=kept_rep.catalog_item_id).first() or item
 
-    # Also clean up any empty orphan CatalogItem rows with 0 files and title == item.title
-    CatalogItem.objects.filter(title=item.title, files__isnull=True).delete()
+    # Always clean up any empty orphan BOOK/MAGAZINE CatalogItem rows with 0 files
+    CatalogItem.objects.filter(item_type__in=['BOOK', 'MAGAZINE'], files__isnull=True).delete()
 
     return {
         'ok': True,
@@ -2703,10 +2719,11 @@ def split_all_multi_book_catalog_items() -> Dict[str, Any]:
                 'split_count': sc,
             })
 
-    if new_items_created > 0:
+    orphans_deleted, _ = CatalogItem.objects.filter(item_type__in=['BOOK', 'MAGAZINE'], files__isnull=True).delete()
+    if new_items_created > 0 or orphans_deleted > 0:
         try:
             from .views import adjust_cached_books_count
-            adjust_cached_books_count(new_items_created)
+            adjust_cached_books_count(new_items_created - orphans_deleted)
         except Exception:
             pass
 
@@ -2715,6 +2732,7 @@ def split_all_multi_book_catalog_items() -> Dict[str, Any]:
         'multi_file_items_checked': len(multi_ids),
         'items_split': items_split,
         'new_items_created': new_items_created,
+        'orphans_deleted': orphans_deleted,
         'details': split_details[:50],
     }
 

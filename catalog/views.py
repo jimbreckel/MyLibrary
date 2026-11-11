@@ -892,6 +892,11 @@ class SuggestAPIView(APIView):
             from .opds import split_all_multi_book_catalog_items
             threading.Thread(target=split_all_multi_book_catalog_items, daemon=True).start()
             return Response({'ok': True, 'started_background_split': True})
+        if request.GET.get('purge_orphans') == '1':
+            deleted_cnt, _ = CatalogItem.objects.filter(item_type__in=['BOOK', 'MAGAZINE'], files__isnull=True).delete()
+            if deleted_cnt:
+                adjust_cached_books_count(-deleted_cnt)
+            return Response({'ok': True, 'orphans_deleted': deleted_cnt})
         from django.db.models import Case, IntegerField, Value, When
 
         raw_query = request.GET.get('q', '')
