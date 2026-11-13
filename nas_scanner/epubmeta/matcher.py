@@ -94,7 +94,15 @@ def score_title(candidate_title: Optional[str], clue_title: Optional[str]) -> fl
     if not (c_words & k_words) and seq_score < 0.70:
         seq_score = 0.0
 
-    return max(word_score, seq_score)
+    raw_score = max(word_score, seq_score)
+
+    # Penalize conflicting numbers (e.g., "50 Things..." vs "100+ Things...", or "Vol 1" vs "Vol 2")
+    c_nums = set(re.findall(r"\b\d+\b", c_norm))
+    k_nums = set(re.findall(r"\b\d+\b", k_norm))
+    if c_nums and k_nums and not (c_nums & k_nums):
+        raw_score *= 0.45
+
+    return raw_score
 
 
 def score_authors(candidate_authors: List[str], clue_authors: List[str]) -> float:

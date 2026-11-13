@@ -667,9 +667,9 @@ class CatalogCacheAPIView(APIView):
             | Q(catalog_item__publisher='')
             | Q(catalog_item__authors='Unknown Author')
             | Q(catalog_item__authors='')
-        ).values_list('file_hash', 'file_path')
+        ).values_list('file_path', flat=True)
         complete_hashes = []
-        complete_paths = [p for _, p in complete_locs if p]
+        complete_paths = [p for p in complete_locs if p]
 
         skip_items = request.query_params.get('skip_items') == '1'
         catalog_items = []

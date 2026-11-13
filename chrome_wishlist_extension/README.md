@@ -1,6 +1,6 @@
 # MyLibrary — Book Sites, Amazon Wishlist & Anna's Archive Chrome Extension
 
-Manifest V3 Chrome Extension that connects **Amazon Wishlists**, **Amazon Book Pages**, **Barnes & Noble**, **Springer Link**, **Goodreads**, **O'Reilly**, **No Starch Press**, and any user-added book site directly to your **NAS MyLibrary Catalog (`http://192.168.1.43:8080/mylibrary`)** and **Anna's Archive**.
+Manifest V3 Chrome Extension that connects **Amazon Wishlists**, **Amazon Book Pages**, **Barnes & Noble**, **Simon & Schuster**, **Springer Link**, **Goodreads**, **O'Reilly**, **No Starch Press**, and any user-added book site directly to your **NAS MyLibrary Catalog (`http://192.168.1.43:8080/mylibrary`)** and **Anna's Archive**.
 
 ---
 
@@ -26,8 +26,12 @@ Manifest V3 Chrome Extension that connects **Amazon Wishlists**, **Amazon Book P
   - When a wishlist item matches `BookDB` only by title/author (for example, a Kindle `B0...` ASIN without a visible print ISBN on the wishlist row), the extension automatically fetches `/dp/<ASIN>` in the background to extract the true **Print ISBN-13/10**, **Publication Year**, **Edition**, and **Subtitle**, and re-verifies with MyLibrary.
   - If MyLibrary only has an older/different edition with the same title, it marks the item **`❌ Not in MyLibrary`** and displays an informational note (`ℹ️ Different book/edition with same title in Library`) with a link to view the older edition.
   - Includes a **`✕ False Positive`** button (with **`↩ Undo`**) saved in `chrome.storage.local` to manually dismiss any match.
+- **Sale & Price-Drop Highlighting (`🏷️ ON SALE`)**:
+  - Automatically detects reduced prices (`Price dropped X%`, strikethrough list prices, savings badges, deals, and coupons) on Amazon Wishlist items.
+  - Highlights sale items with a glowing emerald/amber border and a **`🏷️ ON SALE`** banner showing the discount details.
+  - Adds a **`🏷️ On Sale`** filter chip in the sticky top toolbar to filter the wishlist down to discounted books with one click.
 - **Sticky Top Wishlist Toolbar**:
-  - Filter the wishlist in-place by **`Scanned`**, **`✅ In MyLibrary`**, **`❌ Not in Library`**, or **`🔎 On Anna's Archive`**.
+  - Filter the wishlist in-place by **`Scanned`**, **`✅ In MyLibrary`**, **`❌ Not in Library`**, **`🏷️ On Sale`**, or **`🔎 On Anna's Archive`**.
   - **`🔄 Check Library`**: Re-verify all visible items.
   - **`⏬ Auto-Scroll Entire Wishlist`**: Smoothly scrolls to the bottom of multi-page wishlists and checks every book automatically.
   - **`📚 Check Anna's Archive (Missing)`**: Checks all missing wishlist books on Anna's Archive by **ISBN (if available) AND Title**.
@@ -37,6 +41,7 @@ Manifest V3 Chrome Extension that connects **Amazon Wishlists**, **Amazon Book P
 Automatically activates on supported book pages:
 - **Amazon Books** (`amazon.com`, `.co.uk`, `.ca`, `.de`, etc. on `/dp/*` and `/gp/product/*`)
 - **Barnes & Noble** (`barnesandnoble.com/w/*`)
+- **Simon & Schuster** (`simonandschuster.com/books/*`, `.co.uk`, `.ca`, `.com.au`)
 - **Springer Link** (`link.springer.com/book/*`)
 - **Goodreads**, **O'Reilly Learning**, and **No Starch Press**
 
@@ -54,7 +59,7 @@ On every book page, the extension adds:
 ### C. Popup Settings, One-Click Anna's Archive Mirror Switcher & Custom Book Sites
 Click the extension icon in the Chrome toolbar to:
 - **Switch Anna's Archive Domain with 1 Click**: Click `.pk`, `.gl`, `.li`, `.se`, `.org`, or type any custom mirror URL. Open tabs update immediately.
-- **Click Any Active Book Site Pill**: Clicking **`✓ Amazon Books & Wishlists ↗`**, **`✓ Barnes & Noble ↗`**, **`✓ Springer Link ↗`**, **`✓ Goodreads ↗`**, **`✓ O'Reilly ↗`**, **`✓ No Starch ↗`**, or any custom site badge opens that site in a new tab.
+- **Click Any Active Book Site Pill**: Clicking **`✓ Amazon Books & Wishlists ↗`**, **`✓ Barnes & Noble ↗`**, **`✓ Simon & Schuster ↗`**, **`✓ Springer Link ↗`**, **`✓ Goodreads ↗`**, **`✓ O'Reilly ↗`**, **`✓ No Starch ↗`**, or any custom site badge opens that site in a new tab.
 - **Add Custom Book Sites**: Expand **`➕ Add Another Book Site`** in the popup to add any publisher or bookstore domain by hostname and CSS selectors (sites with `<meta name="citation_isbn">` or Schema.org `Book` JSON-LD extract ISBN-13 automatically).
 - **Or Add Built-In Adapters in Code**: Add a 10-line entry to `BUILTIN_SITE_ADAPTERS` in [`site_adapters.js`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/chrome_wishlist_extension/site_adapters.js).
 

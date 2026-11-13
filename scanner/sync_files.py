@@ -201,40 +201,61 @@ def scan_directory(
 
     print(f"\nScanning: {directory} (Type: {item_type}, Recursive: {recursive})", flush=True)
 
-    # Initialize unified epubmeta session if enabled for BOOK scans
-    enrich_session = None
-    if item_type == 'BOOK' and epubmeta_config and epubmeta_config.get('enabled', False):
-        try:
-            from epubmeta.scanner_integration import EnrichmentSession
-            enrich_session = EnrichmentSession(
-                scanner_db_path=DB_PATH,
-                server_url=server_url,
-                api_token=api_token,
-                epubmeta_config=epubmeta_config,
-                calibre_libraries=calibre_libraries,
-            )
-        except Exception as em_err:
-            print(f"Warning: Could not initialize epubmeta enrichment session: {em_err}", flush=True)
-            enrich_session = None
-
     total_files = 0
     synced_files = 0
     skipped_files = 0
     failed_files = 0
 
-    # 1. Single Directory Walk (collecting both sync and enrichment items at once)
-    scan_items = []  # list of (abspath, name)
+    want_enrich = bool(item_type == 'BOOK' and epubmeta_config and epubmeta_config.get('enabled', False))
+    enrich_allowed_exts = {'.epub', '.pdf'}
+    if epubmeta_config:
+        if epubmeta_config.get('ignore_pdfs', True):
+            enrich_allowed_exts.discard('.pdf')
+        if epubmeta_config.get('pdf_only', False):
+            enrich_allowed_exts = {'.pdf'}
+
+    excluded_dirs = {
+        '_quarantine', 'quarantine', 'bak', 'books_bad', '@eadir', '#recycle',
+        '.recycle', '$recycle.bin', '.appledouble', '.trashes', '.spotlight-v100',
+    }
+    if epubmeta_config:
+        for d in epubmeta_config.get('exclude_dirs', []):
+            if d and str(d).strip():
+                excluded_dirs.add(str(d).strip().lower())
+
+    # 1. Load cached file states first and stream os.walk directly (avoiding a 1.48M-item scan_items list)
+    files_to_parse = []  # list of (abspath, modified_at, size, name)
+    unchanged_for_enrich = []  # list of (abspath, cached_hash) only for enrich_allowed_exts
+    cache = load_all_cached_states()
+
+    def _inspect_entry(abspath: str, name: str):
+        nonlocal total_files, skipped_files, failed_files
+        total_files += 1
+        try:
+            stat = os.stat(abspath)
+            modified_at = str(stat.st_mtime)
+            size = 0 if os.path.isdir(abspath) else stat.st_size
+
+            cached = cache.pop(abspath, None)
+            is_unchanged = (not force and cached and cached['modified_at'] == modified_at and cached['size'] == size)
+
+            if is_unchanged:
+                skipped_files += 1
+                if want_enrich and os.path.splitext(abspath)[1].lower() in enrich_allowed_exts:
+                    unchanged_for_enrich.append((abspath, cached.get('hash')))
+                return
+
+            files_to_parse.append((abspath, modified_at, size, name))
+        except Exception as e:
+            print(f"  Error reading stats for {name}: {e}")
+            failed_files += 1
+
     if item_type == 'AUDIOBOOK':
         for name in os.listdir(directory):
             path = os.path.join(directory, name)
             if os.path.isdir(path):
-                scan_items.append((os.path.abspath(path), name))
+                _inspect_entry(os.path.abspath(path), name)
     else:
-        excluded_dirs = (
-            enrich_session.get_excluded_dirs()
-            if enrich_session
-            else {'_quarantine', 'quarantine', 'bak', 'books_bad', '@eadir', '#recycle', '.recycle', '$recycle.bin', '.appledouble', '.trashes', '.spotlight-v100'}
-        )
         for root, dirs, files in os.walk(directory):
             dirs[:] = [d for d in dirs if d.lower() not in excluded_dirs and not d.startswith('._')]
             print(f"  Walking directory: {root}", flush=True)
@@ -247,42 +268,9 @@ def scan_directory(
                 if ext not in supported_extensions:
                     continue
                 filepath = os.path.join(root, file)
-                scan_items.append((os.path.abspath(filepath), file))
+                _inspect_entry(os.path.abspath(filepath), file)
 
-    # 2. Single stat + cache check (classifying into Sync Queue and Enrichment Queue)
-    files_to_parse = []  # list of (abspath, modified_at, size, name)
-    new_enrich_candidates = []  # new/modified files eligible for inline enrichment before sync
-    backfill_enrich_candidates = []  # already-synced files eligible for background enrichment backfill
-    cache = load_all_cached_states()
-
-    for abspath, name in scan_items:
-        total_files += 1
-        try:
-            stat = os.stat(abspath)
-            modified_at = str(stat.st_mtime)
-            size = 0 if os.path.isdir(abspath) else stat.st_size
-
-            cached = cache.pop(abspath, None)
-            is_unchanged = (not force and cached and cached['modified_at'] == modified_at and cached['size'] == size)
-
-            if is_unchanged:
-                skipped_files += 1
-                if enrich_session and enrich_session.is_eligible_for_enrichment(
-                    abspath, cached_hash=cached.get('hash'), force=False
-                ):
-                    backfill_enrich_candidates.append(abspath)
-                continue
-
-            files_to_parse.append((abspath, modified_at, size, name))
-            if enrich_session and enrich_session.is_eligible_for_enrichment(
-                abspath, cached_hash=None, force=force
-            ):
-                new_enrich_candidates.append(abspath)
-        except Exception as e:
-            print(f"  Error reading stats for {name}: {e}")
-            failed_files += 1
-
-    # Compute deleted paths now from remaining cache entries and free 1.48M-item scan_items & cache
+    # Compute deleted paths now from remaining cache entries and free 1.48M-entry cache BEFORE EnrichmentSession loads
     norm_dir = os.path.abspath(directory)
     dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
     deleted_paths = [
@@ -290,7 +278,33 @@ def scan_directory(
         if (cached_path == norm_dir or cached_path.startswith(dir_prefix))
     ]
     del cache
-    del scan_items
+    import gc
+    gc.collect()
+
+    # 2. Initialize unified epubmeta session after freeing file_states cache
+    enrich_session = None
+    new_enrich_candidates = []
+    backfill_enrich_candidates = []
+    if want_enrich:
+        try:
+            from epubmeta.scanner_integration import EnrichmentSession
+            enrich_session = EnrichmentSession(
+                scanner_db_path=DB_PATH,
+                server_url=server_url,
+                api_token=api_token,
+                epubmeta_config=epubmeta_config,
+                calibre_libraries=calibre_libraries,
+            )
+            for abspath, _, _, _ in files_to_parse:
+                if enrich_session.is_eligible_for_enrichment(abspath, cached_hash=None, force=force):
+                    new_enrich_candidates.append(abspath)
+            for abspath, cached_hash in unchanged_for_enrich:
+                if enrich_session.is_eligible_for_enrichment(abspath, cached_hash=cached_hash, force=False):
+                    backfill_enrich_candidates.append(abspath)
+        except Exception as em_err:
+            print(f"Warning: Could not initialize epubmeta enrichment session: {em_err}", flush=True)
+            enrich_session = None
+    del unchanged_for_enrich
     if enrich_session:
         enrich_session.processed_map.clear()
         if enrich_session.mylibrary_client:
@@ -298,7 +312,6 @@ def scan_directory(
             enrich_session.mylibrary_client.skip_rel_paths.clear()
             enrich_session.mylibrary_client.complete_hashes.clear()
             enrich_session.mylibrary_client.complete_rel_paths.clear()
-    import gc
     gc.collect()
 
     # 3. Unified epubmeta Enrichment Pass (New/changed files prioritized first, then backfill up to max_files)

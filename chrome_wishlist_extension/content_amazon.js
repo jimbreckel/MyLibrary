@@ -156,6 +156,152 @@
     return '';
   }
 
+  function parseCurrencyNumber(str) {
+    if (!str) return null;
+    const cleaned = String(str).replace(/[^0-9.,]/g, '').trim();
+    if (!cleaned) return null;
+    const normalized =
+      cleaned.includes(',') && cleaned.includes('.')
+        ? cleaned.replace(/,/g, '')
+        : cleaned.replace(',', '.');
+    const val = parseFloat(normalized);
+    return Number.isFinite(val) && val > 0 ? val : null;
+  }
+
+  function extractSaleInfoFromContainer(container) {
+    if (!container) return { onSale: false, currentPrice: '', oldPrice: '', dropText: '', discountPct: null, summary: '' };
+
+    // 1. Current active price on the wishlist row
+    let currentPrice = '';
+    const curPriceEl =
+      container.querySelector('span[id^="itemPrice_"] .a-offscreen') ||
+      container.querySelector('.a-price:not([data-a-strike="true"]) .a-offscreen') ||
+      container.querySelector('span[id^="itemPrice_"] .a-price-whole');
+    if (curPriceEl && curPriceEl.textContent) {
+      const txt = curPriceEl.textContent.replace(/\s+/g, ' ').trim();
+      if (/\d/.test(txt)) {
+        const fracEl =
+          curPriceEl.classList && curPriceEl.classList.contains('a-price-whole')
+            ? container.querySelector('span[id^="itemPrice_"] .a-price-fraction')
+            : null;
+        const symEl =
+          curPriceEl.classList && curPriceEl.classList.contains('a-price-whole')
+            ? container.querySelector('span[id^="itemPrice_"] .a-price-symbol')
+            : null;
+        if (fracEl) {
+          const sym = (symEl && symEl.textContent.trim()) || '$';
+          const whole = txt.replace(/[^0-9]/g, '');
+          const frac = (fracEl.textContent || '00').replace(/[^0-9]/g, '');
+          currentPrice = `${sym}${whole}.${frac}`;
+        } else {
+          currentPrice = txt;
+        }
+      }
+    }
+    if (!currentPrice) {
+      const dataPrice = container.getAttribute('data-price');
+      const dpNum = parseFloat(dataPrice || '');
+      if (Number.isFinite(dpNum) && dpNum > 0) {
+        currentPrice = `$${dpNum.toFixed(2)}`;
+      }
+    }
+
+    // 2. Strikethrough / Was / List price on the wishlist row
+    let oldPrice = '';
+    const strikeEl =
+      container.querySelector('.a-price[data-a-strike="true"] .a-offscreen') ||
+      container.querySelector('span.a-text-strike') ||
+      container.querySelector('.a-text-strike');
+    if (strikeEl && strikeEl.textContent) {
+      const stTxt = strikeEl.textContent.replace(/\s+/g, ' ').trim();
+      if (/\d/.test(stTxt)) {
+        oldPrice = stTxt;
+      }
+    }
+
+    // 3. Amazon's "Price dropped X% / $Y since added" callout or Deal badge
+    let dropText = '';
+    const priceDropEl = container.querySelector(
+      '.itemPriceDrop, [id^="itemPriceDrop_"], [class*="itemPriceDrop"], [class*="priceDrop"]'
+    );
+    if (priceDropEl && priceDropEl.textContent) {
+      dropText = priceDropEl.textContent.replace(/\s+/g, ' ').trim();
+    } else {
+      const rowText = (container.innerText || container.textContent || '').replace(/\s+/g, ' ');
+      const mDrop = rowText.match(/\b(Price\s+dropped\s+[^.\n\r]+?)(?:\s+since\s+added[^.\n\r]*|\s*\.|$)/i);
+      if (mDrop) {
+        dropText = mDrop[1].trim();
+      }
+    }
+
+    let dealBadgeText = '';
+    const dealEl = container.querySelector('[id^="dealBadge"], .wl-deal-badge, [data-csa-c-badge-type], .a-badge-text');
+    if (dealEl && dealEl.textContent) {
+      const dTxt = dealEl.textContent.replace(/\s+/g, ' ').trim();
+      if (/deal|save|off|discount|coupon|sale/i.test(dTxt)) {
+        dealBadgeText = dTxt;
+      }
+    } else {
+      const rowText = (container.innerText || container.textContent || '').replace(/\s+/g, ' ');
+      const mDeal = rowText.match(/\b(Limited\s+time\s+deal|Lightning\s+Deal|Deal\s+of\s+the\s+Day|Save\s+\d+%)\b/i);
+      if (mDeal) {
+        dealBadgeText = mDeal[1].trim();
+      }
+    }
+
+    const curNum = parseCurrencyNumber(currentPrice);
+    const oldNum = parseCurrencyNumber(oldPrice);
+    let discountPct = null;
+
+    if (curNum && oldNum && oldNum > curNum) {
+      discountPct = Math.round(((oldNum - curNum) / oldNum) * 100);
+    } else if (dropText) {
+      const mPct = dropText.match(/(\d+)\s*%/);
+      if (mPct) discountPct = parseInt(mPct[1], 10);
+    } else if (dealBadgeText) {
+      const mPct2 = dealBadgeText.match(/(\d+)\s*%/);
+      if (mPct2) discountPct = parseInt(mPct2[1], 10);
+    }
+
+    const hasValidStrikeDiscount = Boolean(oldPrice && (!curNum || !oldNum || oldNum > curNum));
+    const onSale = Boolean(dropText || hasValidStrikeDiscount || dealBadgeText);
+    if (!onSale) {
+      return { onSale: false, currentPrice, oldPrice: '', dropText: '', discountPct: null, summary: '' };
+    }
+
+    const parts = [];
+    if (currentPrice) parts.push(currentPrice);
+    if (oldPrice && hasValidStrikeDiscount) parts.push(`was ${oldPrice}`);
+    if (discountPct && discountPct > 0) parts.push(`-${discountPct}%`);
+    if (dropText && (!discountPct || !/price\s+dropped\s+\d+%\s*$/i.test(dropText))) {
+      const shortDrop = dropText.replace(/\s+since\s+added.*$/i, '').trim();
+      if (!parts.some((p) => p.toLowerCase() === shortDrop.toLowerCase())) {
+        parts.push(shortDrop);
+      }
+    } else if (dealBadgeText && !parts.includes(dealBadgeText)) {
+      parts.push(dealBadgeText);
+    }
+
+    return {
+      onSale: true,
+      currentPrice,
+      oldPrice: hasValidStrikeDiscount ? oldPrice : '',
+      dropText: dropText || dealBadgeText,
+      discountPct,
+      summary: parts.join(' · ') || 'Reduced Price'
+    };
+  }
+
+  function applySaleHighlightToRow(entry) {
+    if (!entry || !entry.el) return;
+    entry.saleInfo = extractSaleInfoFromContainer(entry.el);
+    if (entry.saleInfo && entry.saleInfo.onSale) {
+      entry.el.classList.add('mylib-wishlist-item-on-sale');
+    } else {
+      entry.el.classList.remove('mylib-wishlist-item-on-sale');
+    }
+  }
+
   function extractWishlistItemsFromDom() {
     const wishlistName = detectActiveWishlistName();
     const rows = Array.from(
@@ -209,15 +355,25 @@
           title: rawTitle,
           author: rawAuthor,
           wishlist_name: wishlistName,
+          saleInfo: extractSaleInfoFromContainer(container),
           libResult: null,
           annasResult: null
         };
+        applySaleHighlightToRow(entry);
         itemStateByKey.set(key, entry);
         renderItemPanel(entry);
         newlyFound.push(entry);
+      } else {
+        const existingEntry = itemStateByKey.get(key);
+        if (existingEntry) {
+          applySaleHighlightToRow(existingEntry);
+        }
       }
     });
 
+    if (newlyFound.length > 0) {
+      updateToolbarCounts();
+    }
     return newlyFound;
   }
 
@@ -243,6 +399,9 @@
         <span id="mylib-active-list-name" class="mylib-list-pill">${escapeHtml(detectActiveWishlistName())}</span>
         <button type="button" class="mylib-stat-chip active-filter" data-filter="all" id="mylib-chip-all">
           Scanned: <strong id="mylib-cnt-total">0</strong>
+        </button>
+        <button type="button" class="mylib-stat-chip" data-filter="on_sale" id="mylib-chip-sale" title="Click to show ONLY wishlist books currently on sale / reduced in price">
+          🏷️ On Sale: <strong id="mylib-cnt-sale" style="color:#fbbf24;">0</strong>
         </button>
         <button type="button" class="mylib-stat-chip" data-filter="in_lib" id="mylib-chip-inlib" title="Click to show ONLY wishlist books already in MyLibrary">
           ✅ In MyLibrary: <strong id="mylib-cnt-inlib" style="color:#4ade80;">0</strong>
@@ -304,12 +463,17 @@
   function updateToolbarCounts() {
     ensureTopToolbar();
     let total = 0;
+    let onSale = 0;
     let inLib = 0;
     let missing = 0;
     let onAnnas = 0;
 
     itemStateByKey.forEach((entry) => {
       total += 1;
+      applySaleHighlightToRow(entry);
+      if (entry.saleInfo && entry.saleInfo.onSale) {
+        onSale += 1;
+      }
       if (entry.libResult) {
         if (isEntryInLibrary(entry)) inLib += 1;
         else missing += 1;
@@ -320,10 +484,12 @@
     });
 
     const elTotal = document.getElementById('mylib-cnt-total');
+    const elSale = document.getElementById('mylib-cnt-sale');
     const elInLib = document.getElementById('mylib-cnt-inlib');
     const elMissing = document.getElementById('mylib-cnt-missing');
     const elAnnas = document.getElementById('mylib-cnt-annas');
     if (elTotal) elTotal.textContent = String(total);
+    if (elSale) elSale.textContent = String(onSale);
     if (elInLib) elInLib.textContent = String(inLib);
     if (elMissing) elMissing.textContent = String(missing);
     if (elAnnas) elAnnas.textContent = String(onAnnas);
@@ -333,7 +499,9 @@
     itemStateByKey.forEach((entry) => {
       if (!entry.el || entry.key === 'product_page') return;
       let visible = true;
-      if (activeFilter === 'in_lib') {
+      if (activeFilter === 'on_sale') {
+        visible = Boolean(entry.saleInfo && entry.saleInfo.onSale);
+      } else if (activeFilter === 'in_lib') {
         visible = Boolean(entry.libResult && isEntryInLibrary(entry));
       } else if (activeFilter === 'missing') {
         visible = Boolean(entry.libResult && !isEntryInLibrary(entry));
@@ -370,7 +538,17 @@
     const annasTitleUrl = (lib && lib.annas_title_search_url) || `${annasBaseUrl}/search?q=${encodeURIComponent(titleQ)}`;
     const annasSearchUrl = (annas && annas.searchUrl) || annasIsbnUrl || annasTitleUrl;
 
-    panel.classList.remove('mylib-owned', 'mylib-missing');
+    applySaleHighlightToRow(entry);
+    const sale = entry.saleInfo || { onSale: false };
+
+    panel.classList.remove('mylib-owned', 'mylib-missing', 'mylib-sale');
+    if (sale.onSale) {
+      panel.classList.add('mylib-sale');
+    }
+
+    const saleBadgeHtml = sale.onSale
+      ? `<span class="mylib-badge mylib-badge-sale" title="${escapeHtml(sale.dropText || sale.summary || 'Reduced price on Amazon')}">🔥 ON SALE: ${escapeHtml(sale.summary || 'Reduced Price')}</span>`
+      : '';
 
     let libBadgeHtml = `<span class="mylib-badge" style="background:rgba(148,163,184,0.2); color:#cbd5e1;">⏳ Checking MyLibrary...</span>`;
     let detailsHtml = '';
@@ -476,6 +654,7 @@
 
     panel.innerHTML = `
       <div class="mylib-badges-row">
+        ${saleBadgeHtml}
         ${libBadgeHtml}
         ${annasBadgeHtml}
       </div>
@@ -807,17 +986,21 @@
 
   function exportWishlistCsv() {
     const rows = [
-      ['Wishlist', 'Title', 'Author', 'ASIN', 'ISBNs', 'In MyLibrary', 'MyLibrary Formats', 'On Annas Archive', 'Annas Matches', 'Annas Search URL']
+      ['Wishlist', 'Title', 'Author', 'ASIN', 'ISBNs', 'On Sale', 'Current Price', 'Sale Details', 'In MyLibrary', 'MyLibrary Formats', 'On Annas Archive', 'Annas Matches', 'Annas Search URL']
     ];
     itemStateByKey.forEach((e) => {
       const lib = e.libResult || {};
       const annas = e.annasResult || {};
+      const sale = e.saleInfo || {};
       rows.push([
         e.wishlist_name || '',
         lib.cleaned_title || e.title || '',
         lib.cleaned_author || e.author || '',
         e.asin || '',
         (lib.isbns || []).join(' '),
+        sale.onSale ? 'YES' : 'NO',
+        sale.currentPrice || '',
+        sale.summary || '',
         lib.in_library ? 'YES' : 'NO',
         (lib.formats || []).join('/'),
         annas.found ? 'YES' : (annas.ok ? 'NO' : 'UNCHECKED'),

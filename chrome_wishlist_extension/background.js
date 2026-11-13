@@ -127,11 +127,18 @@ function parseAnnasSearchHtml(html, book, annasBaseUrl, query, queryMode = 'titl
     return { ok: false, found: false, count: 0, formats: [], matches: [], searchUrl };
   }
 
-  // Un-comment HTML comments so lazy-rendered Anna's Archive result cards are visible to parser
-  let uncommented = html.replace(/<!--([\s\S]*?)-->/g, '$1');
-  // Truncate at "partial match" / "more results" divider if present so exact results aren't diluted
-  const partialMarkerIdx = uncommented.search(/Partial\s+matches|No\s+exact\s+matches/i);
-  if (partialMarkerIdx > 0 && queryMode === 'isbn') {
+  // Truncate at "No files found." / "Show N partial matches" / "Partial matches" divider BEFORE uncommenting
+  // so collapsed partial-match blocks are never treated as genuine matches.
+  let mainHtml = html;
+  const rawPartialIdx = mainHtml.search(/No\s+files\s+found\.|Show\s+\d+\s+partial\s+matches|Partial\s+matches|No\s+exact\s+matches/i);
+  if (rawPartialIdx >= 0) {
+    mainHtml = mainHtml.slice(0, rawPartialIdx);
+  }
+
+  // Un-comment HTML comments in the exact-results region so lazy-rendered Anna's Archive result cards are visible
+  let uncommented = mainHtml.replace(/<!--([\s\S]*?)-->/g, '$1');
+  const partialMarkerIdx = uncommented.search(/No\s+files\s+found\.|Show\s+\d+\s+partial\s+matches|Partial\s+matches|No\s+exact\s+matches/i);
+  if (partialMarkerIdx >= 0) {
     uncommented = uncommented.slice(0, partialMarkerIdx);
   }
 
@@ -196,31 +203,35 @@ function parseAnnasSearchHtml(html, book, annasBaseUrl, query, queryMode = 'titl
 
     const hasExplicitIsbn = targetIsbns.some((isbn) => isbn.length >= 10 && upperCombined.includes(isbn));
 
+    const normAnchorWords = new Set(normAnchor.split(' ').filter(Boolean));
+    const normCombinedWords = new Set(normCombined.split(' ').filter(Boolean));
+
     let titleMatched = false;
-    if (targetNormTitle && (normCombined.includes(targetNormTitle) || normAnchor.includes(targetNormTitle))) {
+    if (targetNormTitle && normAnchor.includes(targetNormTitle)) {
       titleMatched = true;
     } else if (targetTitleWords.length >= 2) {
-      const matchedWords = targetTitleWords.filter((w) => normCombined.includes(w));
-      const required = Math.max(2, Math.ceil(targetTitleWords.length * 0.6));
+      // Match against the book's actual title anchor (normAnchor), not upload folder paths in snippet
+      const matchedWords = targetTitleWords.filter((w) => normAnchorWords.has(w) || normAnchor.includes(w));
+      const required = targetTitleWords.length <= 2 ? targetTitleWords.length : Math.ceil(targetTitleWords.length * 0.8);
       if (matchedWords.length >= required) {
         titleMatched = true;
       }
-    } else if (targetTitleWords.length === 1 && normCombined.includes(targetTitleWords[0])) {
+    } else if (targetTitleWords.length === 1 && normAnchorWords.has(targetTitleWords[0])) {
       titleMatched = true;
     }
 
-    const authorMatched = !surname || normCombined.includes(surname);
+    const authorMatched = !surname || normCombinedWords.has(surname) || normCombined.includes(surname);
 
     let isRelevant = false;
     if (queryMode === 'isbn') {
       // When querying Anna's Archive directly by a 10/13-digit ISBN, Anna's index filters by ISBN metadata
       // (even when the ISBN isn't printed in the card text). Accept if ISBN appears, title overlaps, or author overlaps.
-      isRelevant = hasExplicitIsbn || titleMatched || (Boolean(surname) && normCombined.includes(surname)) || byMd5.size <= 5;
+      isRelevant = hasExplicitIsbn || titleMatched || (Boolean(surname) && authorMatched);
     } else {
-      // Title search mode: require title match (and if title is a single common word, also require author surname)
+      // Title search mode: ALWAYS require both title match AND author surname match (when author is known)
       if (hasExplicitIsbn) {
         isRelevant = true;
-      } else if (titleMatched && (targetTitleWords.length >= 2 || authorMatched)) {
+      } else if (titleMatched && authorMatched) {
         isRelevant = true;
       }
     }
@@ -383,13 +394,13 @@ async function checkBookOnAnnasArchive(book) {
     }
   }
 
-  // Step 2: Check by Title (Title + Author, with Title-only fallback if 0 matches)
+  // Step 2: Check by Title + Author surname (only fall back to Title-only when no author surname is known)
   const primaryTitleQ = titleAuthorQuery || titleOnlyQuery;
   if (primaryTitleQ && (!lastErrorResp || !lastErrorResp.needsTabSession)) {
     let titleRes = await runSingleAnnasQuery(primaryTitleQ, book, annasBaseUrl, 'title');
     if (titleRes.ok) {
       anyQueryOk = true;
-      if (!titleRes.found && titleOnlyQuery && titleOnlyQuery.toLowerCase() !== primaryTitleQ.toLowerCase()) {
+      if (!titleRes.found && !surname && titleOnlyQuery && titleOnlyQuery.toLowerCase() !== primaryTitleQ.toLowerCase()) {
         const fallbackTitleRes = await runSingleAnnasQuery(titleOnlyQuery, book, annasBaseUrl, 'title');
         if (fallbackTitleRes.ok && fallbackTitleRes.found) {
           titleRes = fallbackTitleRes;

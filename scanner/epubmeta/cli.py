@@ -27,13 +27,30 @@ load_dotenv()
 
 
 def setup_logging(verbose: bool, log_file: Optional[Path] = None):
+    os.environ.setdefault("TZ", "America/New_York")
+    if hasattr(time, "tzset"):
+        try:
+            time.tzset()
+        except Exception:
+            pass
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _est = _ZoneInfo("America/New_York")
+
+    class _EstFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            dt = _dt.fromtimestamp(record.created, tz=_est)
+            return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S %Z")
+
     level = logging.DEBUG if verbose else logging.INFO
-    format_str = "%(asctime)s [%(levelname)s] %(message)s"
+    formatter = _EstFormatter("%(asctime)s [%(levelname)s] %(message)s")
     handlers: List[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
-    logging.basicConfig(level=level, format=format_str, datefmt="%H:%M:%S", handlers=handlers, force=True)
+    for h in handlers:
+        h.setFormatter(formatter)
+    logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
 def find_supported_files(

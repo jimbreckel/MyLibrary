@@ -113,11 +113,19 @@ MyLibrary/
     - Toggles `interesting_books` and `bad_metadata_books` state in `scanner_state.db` (`csrf_exempt`, `authentication_classes = []`).
 11. **`GET | POST /mylibrary/api/duplicates/` (`DuplicatesAPIView`)**
     - Scans and resolves duplicate enriched files of the same format and verified content, moving redundant copies safely to `/books_bad/duplicates/`.
+12. **`GET | POST /mylibrary/api/cover-search/` (`CoverSearchAPIView`) & `GET /mylibrary/api/suggest/?repair_covers=start|status`**
+    - Searches Web Images, Goodreads, Apple Books, Google Books, and Open Library for book covers (scoring full-color covers ahead of grayscale scans and auto-cropping white borders). `repair_covers=start` launches a background worker (`repair_stale_enriched_covers_without_user_override`) that scans and fixes enriched items with text-only covers or excessive white margins.
+13. **`GET | POST /mylibrary/api/book-preview/` (`BookPreviewAPIView`)**
+    - Extracts front-matter text, page renders, and detected ISBNs from EPUB/PDF files and supports Gemini AI Vision re-evaluation (`POST` with `action: "ai_vision_reevaluate"`).
 
 ### B. OPDS 1.2 & Calibre Content Server Endpoints (`catalog/opds.py`)
 - `GET /mylibrary/opds/` (`OPDSRootView`) — Root OPDS 1.2 navigation catalog.
 - `GET /mylibrary/opds/opensearch.xml` (`OPDSOpenSearchView`) — OpenSearch XML descriptor.
 - `GET /mylibrary/opds/search/?q=<query>` (`OPDSSearchView`) — OPDS acquisition search feed.
+- `GET /mylibrary/opds/interesting/` (`OPDSInterestingFeedView`) — Starred Interesting Books feed.
+- `GET /mylibrary/opds/bad-metadata/` (`OPDSBadMetadataFeedView`) — Flagged Bad Metadata feed.
+- `GET /mylibrary/opds/bookmarked/` (`OPDSBookmarkedFeedView`) — Moon+ Reader Bookmarked & Reading feed.
+- `GET /mylibrary/opds/packt/` (`OPDSPacktFeedView`) — Packt Books (`Computer Mags & FAQ/978`) feed, ordered by most recent file modification date (`st_mtime`) first.
 - `GET /mylibrary/opds/enriched/` (`OPDSEnrichedFeedView`) — Acquisition feed of `epubmeta`-enriched books.
 - `GET /mylibrary/opds/recent/` (`OPDSRecentFeedView`) — Recently updated books feed.
 - `GET /mylibrary/opds/authors/` (`OPDSAuthorsIndexView`) — A–Z author navigation & per-author acquisition feeds.

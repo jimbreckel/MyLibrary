@@ -71,6 +71,127 @@ def _is_text_only_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
         return False
 
 
+def _cover_colorfulness_score_bytes(raw_bytes: Optional[bytes]) -> float:
+    """Return a [0.0, 1.0] colorfulness score for `raw_bytes` (grayscale/B&W < 0.045, color >= 0.08)."""
+    if not raw_bytes or len(raw_bytes) < 900:
+        return 0.0
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        w, h = im.size
+        if w < 24 or h < 24:
+            return 0.0
+        im_crop = im.crop((int(w * 0.08), int(h * 0.08), max(int(w * 0.08) + 1, int(w * 0.92)), max(int(h * 0.08) + 1, int(h * 0.92))))
+        im_small = im_crop.resize((48, 64))
+        px = list(im_small.get_flattened_data() if hasattr(im_small, "get_flattened_data") else im_small.getdata())
+        n = len(px)
+        if not n:
+            return 0.0
+        chroma_sum = 0
+        colored = 0
+        for r, g, b in px:
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            ch = mx - mn
+            chroma_sum += ch
+            if ch >= 24 and mx >= 35:
+                colored += 1
+        return 0.55 * (chroma_sum / (n * 255.0)) + 0.45 * (colored / n)
+    except Exception:
+        return 0.0
+
+
+def _are_covers_same_design_bytes(bytes_a: Optional[bytes], bytes_b: Optional[bytes]) -> Tuple[bool, float]:
+    """
+    Compare two covers in grayscale + gradient-edge space to determine if they are the same cover design
+    (e.g. a black-and-white cover vs. the same cover in color).
+    """
+    if not bytes_a or not bytes_b or len(bytes_a) < 900 or len(bytes_b) < 900:
+        return False, 0.0
+    try:
+        import io
+        import math
+        from PIL import Image
+
+        GW, GH = 24, 32
+
+        def _prep(raw: bytes) -> Tuple[List[float], List[float]]:
+            im = Image.open(io.BytesIO(raw)).convert("L")
+            w, h = im.size
+            im_c = im.crop((int(w * 0.06), int(h * 0.06), max(int(w * 0.06) + 1, int(w * 0.94)), max(int(h * 0.06) + 1, int(h * 0.94))))
+            im_s = im_c.resize((GW, GH))
+            px = [float(v) for v in (im_s.get_flattened_data() if hasattr(im_s, "get_flattened_data") else im_s.getdata())]
+            ed = [0.0] * (GW * GH)
+            for r in range(1, GH - 1):
+                row_off = r * GW
+                for c in range(1, GW - 1):
+                    dx = abs(px[row_off + c + 1] - px[row_off + c - 1])
+                    dy = abs(px[row_off + GW + c] - px[row_off - GW + c])
+                    ed[row_off + c] = dx + dy
+            return px, ed
+
+        pa, ea = _prep(bytes_a)
+        pb, eb = _prep(bytes_b)
+
+        def _zncc_shifted(xa: List[float], xb: List[float], dx: int, dy: int) -> float:
+            r0 = max(1, 1 - dy)
+            r1 = min(GH - 1, GH - 1 - dy)
+            c0 = max(1, 1 - dx)
+            c1 = min(GW - 1, GW - 1 - dx)
+            va: List[float] = []
+            vb: List[float] = []
+            for r in range(r0, r1):
+                ra = r * GW
+                rb = (r + dy) * GW
+                for c in range(c0, c1):
+                    va.append(xa[ra + c])
+                    vb.append(xb[rb + c + dx])
+            n = len(va)
+            if n < 64:
+                return 0.0
+            ma = sum(va) / n
+            mb = sum(vb) / n
+            sa = sum((v - ma) ** 2 for v in va)
+            sb = sum((v - mb) ** 2 for v in vb)
+            if sa <= 1e-6 or sb <= 1e-6:
+                return 0.0
+            return sum((va[i] - ma) * (vb[i] - mb) for i in range(n)) / math.sqrt(sa * sb)
+
+        best_sim = 0.0
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                gz = _zncc_shifted(pa, pb, dx, dy)
+                ez = _zncc_shifted(ea, eb, dx, dy)
+                sim = max(gz, 0.45 * gz + 0.55 * ez, ez * 0.90)
+                if sim > best_sim:
+                    best_sim = sim
+        return best_sim >= 0.55, best_sim
+    except Exception:
+        return False, 0.0
+
+
+def _should_prefer_candidate_cover_bytes(orig_bytes: Optional[bytes], cand_bytes: Optional[bytes]) -> bool:
+    """
+    Return True if `cand_bytes` should replace `orig_bytes`:
+      1. `orig_bytes` is missing or text-only and `cand_bytes` is a graphic cover, OR
+      2. `cand_bytes` is the same cover design as `orig_bytes` (or `orig_bytes` is B&W/grayscale)
+         and `cand_bytes` is in color while `orig_bytes` has significantly lower color saturation.
+    """
+    if not cand_bytes or len(cand_bytes) < 1000 or _is_text_only_cover_bytes(cand_bytes):
+        return False
+    if not orig_bytes or len(orig_bytes) < 1000 or _is_text_only_cover_bytes(orig_bytes):
+        return True
+    orig_col = _cover_colorfulness_score_bytes(orig_bytes)
+    cand_col = _cover_colorfulness_score_bytes(cand_bytes)
+    if cand_col >= 0.065 and cand_col >= orig_col + 0.045:
+        same_design, _ = _are_covers_same_design_bytes(orig_bytes, cand_bytes)
+        if same_design:
+            return True
+    return False
+
+
 class BookProcessor:
     """Orchestrates end-to-end processing for a single ebook or PDF file."""
 
@@ -218,7 +339,16 @@ class BookProcessor:
                 fallback_title = clue_title if len(clue_title) > len(emb_title) else emb_title
         else:
             fallback_title = emb_title or clue_title
-        fallback_author = valid_emb_authors[0] if valid_emb_authors else (file_clues["authors"][0] if file_clues["authors"] else None)
+        fn_primary_author = file_clues["authors"][0] if file_clues.get("authors") else None
+        if valid_emb_authors and fn_primary_author:
+            emb_a0 = valid_emb_authors[0].strip()
+            # If embedded author is a single-word OS username (e.g. 'Axel') while filename has a multi-part author ('W. Calvin'), prefer filename author
+            if " " not in emb_a0 and " " in fn_primary_author and emb_a0.lower() not in fn_primary_author.lower():
+                fallback_author = fn_primary_author
+            else:
+                fallback_author = emb_a0
+        else:
+            fallback_author = valid_emb_authors[0] if valid_emb_authors else fn_primary_author
 
         if precomputed_ai_result is not None:
             if precomputed_ai_result:
@@ -309,8 +439,11 @@ class BookProcessor:
                 logger.info("Reusing cached metadata for '%s' (skipping Gemini AI & catalog lookups).", reader.file_path.name)
                 return pre_ai_cached.isbn13 or pre_ai_cached.isbn10, fallback_title, fallback_author, pre_ai_cached
 
-        # In Batch Mode, defer Gemini AI inspection until after checking if title/author already yields a confident catalog match
+        # In Batch Mode, or on the initial pass when we already have a descriptive title clue to query in catalogs first,
+        # defer Gemini AI inspection until after checking if title/author already yields a confident catalog match.
         if self.ai_extractor and getattr(self.ai_extractor, "batch_mode", False):
+            return None, fallback_title, fallback_author, None
+        if not force_ai and fallback_title and len(fallback_title.strip()) >= 4 and (fallback_author or len(fallback_title.split()) >= 2):
             return None, fallback_title, fallback_author, None
 
         # Strategy 3: Synchronous AI-based document inspection (Gemini)
@@ -321,9 +454,10 @@ class BookProcessor:
                 logger.debug("Front text is sparse; rendering front pages for AI vision...")
                 images = reader.extract_front_images(max_pages=3)
 
+            ai_input_text = f"FILENAME CLUE: {reader.file_path.name}\n\n{front_text or ''}".strip()
             from .exceptions import RateLimitExceededError
             try:
-                ai_result = self.ai_extractor.extract(text=front_text, images=images)
+                ai_result = self.ai_extractor.extract(text=ai_input_text, images=images)
             except RateLimitExceededError as exc:
                 logger.warning(
                     "Gemini AI rate/quota limit reached (%s); disabling Gemini fallback for the rest of this cycle and continuing with catalog/cache lookup.",
@@ -337,7 +471,19 @@ class BookProcessor:
                     ai_isbn = None
                 if ai_isbn:
                     self._front_matter_isbns.add(ai_isbn)
-                ai_title = ai_result.get("title") or fallback_title
+                raw_ai_title = (ai_result.get("title") or "").strip()
+                # Do not overwrite a descriptive multi-word filename/embedded title with a 1-word running header (e.g. 'Psyx')
+                if (
+                    raw_ai_title
+                    and len(raw_ai_title.split()) == 1
+                    and len(raw_ai_title) <= 6
+                    and fallback_title
+                    and len(fallback_title.split()) >= 3
+                    and raw_ai_title.lower() not in fallback_title.lower()
+                ):
+                    ai_title = fallback_title
+                else:
+                    ai_title = raw_ai_title or fallback_title
                 ai_authors = ai_result.get("authors", [])
                 ai_author = ai_authors[0] if ai_authors else fallback_author
                 ai_pub = ai_result.get("publisher")
@@ -500,8 +646,8 @@ class BookProcessor:
                         fallback_meta = self.aggregator.fetch_by_query(candidate_title, candidate_author)
                         if fallback_meta and not fallback_meta.is_empty():
                             fetched_meta = fallback_meta
-                        elif ":" in candidate_title:
-                            short_title = candidate_title.split(":", 1)[0].strip()
+                        elif ":" in candidate_title or " - " in candidate_title:
+                            short_title = _re_t.split(r"\s*(?::| - )\s*", candidate_title, maxsplit=1)[0].strip()
                             logger.info("Searching with short title '%s'...", short_title)
                             short_meta = self.aggregator.fetch_by_query(short_title, candidate_author)
                             if short_meta and not short_meta.is_empty():
@@ -582,11 +728,13 @@ class BookProcessor:
                 if ai_meta and (ai_meta.isbn13 == isbn or fetched_meta == ai_meta or force_ai):
                     target_meta.ai_used = True
 
-                # Preserve subtitle: if target_meta.title is just the short title but clue/filename has full subtitle
+                # Preserve subtitle and proper Title Case from clue/filename when catalog title is lowercase or shorter prefix
                 if target_meta.title and candidate_title:
                     t_lower = target_meta.title.strip().lower()
                     c_lower = candidate_title.strip().lower()
                     if c_lower.startswith(t_lower) and len(candidate_title) > len(target_meta.title):
+                        target_meta.title = candidate_title
+                    elif t_lower == c_lower and sum(1 for ch in candidate_title if ch.isupper()) > sum(1 for ch in target_meta.title if ch.isupper()):
                         target_meta.title = candidate_title
 
                 was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
@@ -600,12 +748,12 @@ class BookProcessor:
                     existing_meta=embedded_meta,
                     isbn_matched_in_front_matter=from_front_matter,
                     min_confidence=self.min_confidence,
-                    content_meta=ai_meta,
+                    content_meta=None if (fetched_meta == ai_meta or (target_meta.source or "").startswith("gemini-ai")) else ai_meta,
                 )
 
                 if best_match_result is None or match_result.score > best_match_result.score:
                     best_target_meta = target_meta
-                    best_isbn = isbn
+                    best_isbn = isbn or target_meta.isbn13 or target_meta.isbn10
                     best_match_result = match_result
                     self._match_scores[str(file_path)] = match_result.score
 
@@ -692,21 +840,26 @@ class BookProcessor:
                         best_match_result = q_match
                         self._match_scores[str(file_path)] = q_match.score
 
-            # Guard against replacing a book's valid embedded metadata (title + authors + ISBN) with a low-confidence
-            # match from a cited 'About the Author' or wrong filename ISBN (e.g. 'Data Fabric and Data Mesh Approaches with AI'
-            # ISBN 9781484292532 vs cited 'Enterprise Master Data Management' ISBN 9780132366250).
+            # Guard against replacing a book's valid embedded metadata (title + authors + ISBN or publisher/description)
+            # with a low-confidence match from a cited 'About the Author'/'Also By' or wrong filename ISBN
+            # (e.g. 'Data Fabric and Data Mesh Approaches with AI', 'Helidon' by Nikki Mottram, or 'Java Basics' by Madison Giroux).
             from .matcher import score_title
+            emb_has_rich_meta = bool(
+                embedded_meta.isbn13
+                or (embedded_meta.description and len(embedded_meta.description.strip()) >= 30)
+                or (embedded_meta.publisher and embedded_meta.published_date)
+            )
             if (
                 (best_match_result is None or not best_match_result.is_confident or best_match_result.title_score < 0.50)
                 and embedded_meta.title
                 and embedded_meta.authors
-                and embedded_meta.isbn13
-                and (not fn_info.get("title") or score_title(embedded_meta.title, fn_info.get("title")) >= 0.75)
+                and emb_has_rich_meta
+                and (not fn_info.get("title") or score_title(embedded_meta.title, fn_info.get("title")) >= 0.70)
             ):
                 logger.info(
                     "External catalogs did not match '%s' (ISBN %s); preserving verified embedded OPF metadata instead of low-confidence candidate '%s'.",
                     embedded_meta.title,
-                    embedded_meta.isbn13,
+                    embedded_meta.isbn13 or "none",
                     best_target_meta.title if best_target_meta else "none",
                 )
                 verified_self_meta = BookMetadata(
@@ -958,7 +1111,7 @@ class BookProcessor:
                     except Exception:
                         orig_cover_bytes = None
                     if orig_cover_bytes and len(orig_cover_bytes) >= 1000:
-                        if target_meta.cover_bytes and len(target_meta.cover_bytes) >= 1000 and _is_text_only_cover_bytes(orig_cover_bytes) and not _is_text_only_cover_bytes(target_meta.cover_bytes):
+                        if _should_prefer_candidate_cover_bytes(orig_cover_bytes, target_meta.cover_bytes):
                             cover_bytes = target_meta.cover_bytes
                         else:
                             cover_bytes = orig_cover_bytes

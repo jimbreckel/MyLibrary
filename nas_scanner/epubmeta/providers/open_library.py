@@ -74,7 +74,10 @@ class OpenLibraryProvider(BaseProvider):
         work_key = None
         search_doc = None
         try:
-            search_url = f"https://openlibrary.org/search.json?isbn={cleaned}"
+            search_url = (
+                f"https://openlibrary.org/search.json?isbn={cleaned}"
+                "&fields=key,title,subtitle,author_name,first_publish_year,isbn,publisher,subject,cover_i"
+            )
             s_resp = self.session.get(search_url, timeout=self.timeout)
             if s_resp.status_code == 200:
                 docs = s_resp.json().get("docs", [])
@@ -162,15 +165,29 @@ class OpenLibraryProvider(BaseProvider):
         """Search Open Library by title and author."""
         if not title:
             return None
-        params = {"title": title}
+        import re as _re
+        fields_str = "key,title,subtitle,author_name,first_publish_year,isbn,publisher,subject,cover_i"
+        params = {"title": title, "fields": fields_str}
         if author:
             params["author"] = author
 
         try:
             resp = self.session.get("https://openlibrary.org/search.json", params=params, timeout=self.timeout)
-            if resp.status_code == 200:
+            docs = resp.json().get("docs", []) if resp.status_code == 200 else []
+            if not docs and (":" in title or " - " in title or (author and "." in author)):
+                short_title = _re.split(r"\s*(?::| - )\s*", title, maxsplit=1)[0].strip() or title
+                alt_author = author
+                if author and "." in author and len(author.split()) >= 2:
+                    alt_author = author.split()[-1].strip()
+                alt_params = {"title": short_title, "fields": fields_str}
+                if alt_author:
+                    alt_params["author"] = alt_author
+                if alt_params != params:
+                    resp2 = self.session.get("https://openlibrary.org/search.json", params=alt_params, timeout=self.timeout)
+                    if resp2.status_code == 200:
+                        docs = resp2.json().get("docs", [])
+            if docs:
                 from ..matcher import score_title, score_authors
-                docs = resp.json().get("docs", [])
                 if docs:
                     merged: Optional[BookMetadata] = None
                     for doc in docs[:5]:
@@ -211,6 +228,11 @@ class OpenLibraryProvider(BaseProvider):
                                 if doc.get("cover_i")
                                 else None
                             )
+                            doc_i13, doc_i10 = (None, None)
+                            for raw_i in isbns:
+                                doc_i13, doc_i10 = normalize_isbn(raw_i)
+                                if doc_i13 or doc_i10:
+                                    break
                             doc_meta = BookMetadata(
                                 title=doc_title,
                                 authors=authors,
@@ -218,6 +240,8 @@ class OpenLibraryProvider(BaseProvider):
                                 subjects=subjects,
                                 publisher=doc.get("publisher", [None])[0] if doc.get("publisher") else None,
                                 published_date=str(doc.get("first_publish_year")) if doc.get("first_publish_year") else None,
+                                isbn13=doc_i13,
+                                isbn10=doc_i10,
                                 cover_url=cov_url,
                                 source="open-library-search",
                             )

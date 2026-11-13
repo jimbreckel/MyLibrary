@@ -472,7 +472,7 @@
             </div>
         </div>
         <div class="kpi-submetrics">
-            <span class="text-green clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('SUCCESS');" title="Click to view Enriched graph over time"><i class="fa-solid fa-check-double"></i> Enriched: <strong id="kpi-sub-enriched">{{ dashboard.conversion.status_counts.SUCCESS|intcomma }}</strong> ({{ dashboard.conversion.success_rate }}%) <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
+            <span class="text-green clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('SUCCESS');" title="Click to view Enriched graph over time ({{ dashboard.conversion.enriched_files_count|default:dashboard.conversion.status_counts.SUCCESS|intcomma }} enriched files across {{ dashboard.conversion.status_counts.SUCCESS|intcomma }} catalog books)"><i class="fa-solid fa-check-double"></i> Enriched: <strong id="kpi-sub-enriched">{{ dashboard.conversion.status_counts.SUCCESS|intcomma }}</strong> ({{ dashboard.conversion.success_rate }}%) <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
             <span class="text-amber clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('NEEDS_REVIEW');" title="Click to view Needs Review graph over time"><i class="fa-solid fa-clipboard-question"></i> Review: <strong id="kpi-sub-review">{{ dashboard.conversion.status_counts.NEEDS_REVIEW|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
             <span class="clickable-submetric" style="color:#94a3b8;" onclick="event.stopPropagation(); openHistoryChartModal('NO_ISBN');" title="Click to view No ISBN graph over time"><i class="fa-solid fa-barcode"></i> No ISBN: <strong id="kpi-sub-noisbn">{{ dashboard.conversion.status_counts.NO_ISBN|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
             <span class="text-red clickable-submetric" onclick="event.stopPropagation(); openHistoryChartModal('QUARANTINED');" title="Click to view Quarantine graph over time"><i class="fa-solid fa-shield-virus"></i> Quarantine: <strong id="kpi-sub-quarantine">{{ dashboard.conversion.status_counts.QUARANTINED|intcomma }}</strong> <i class="fa-solid fa-chart-line" style="font-size:0.65rem; opacity:0.75;"></i></span>
@@ -760,7 +760,7 @@
             <table class="dash-table">
                 <thead>
                     <tr>
-                        <th>Updated (UTC)</th>
+                        <th>Updated (EST)</th>
                         <th>Status</th>
                         <th>File Name</th>
                         <th>Metadata Enrichment (Before &rarr; After) / Reason</th>
@@ -870,7 +870,7 @@
             <table class="dash-table">
                 <thead>
                     <tr>
-                        <th>Scanned At</th>
+                        <th>Scanned At (EST)</th>
                         <th>Catalog Title &amp; Author</th>
                         <th>File Name &amp; Format</th>
                         <th>Library</th>

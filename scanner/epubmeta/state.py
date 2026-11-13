@@ -91,7 +91,17 @@ class StateTracker:
         finally:
             conn.close()
 
+    _PG_INIT_DONE: bool = False
+
     def _init_db(self) -> None:
+        from .pg_scanner_db import is_postgres_scanner_enabled
+        if (
+            self.db_path.name.lower() in ("scanner_state.db", ".epubmeta_state.db")
+            and is_postgres_scanner_enabled()
+        ):
+            if StateTracker._PG_INIT_DONE:
+                return
+            StateTracker._PG_INIT_DONE = True
         with self._get_connection() as conn:
             try:
                 conn.execute("PRAGMA journal_mode=DELETE")

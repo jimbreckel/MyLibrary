@@ -523,10 +523,15 @@
     const mylibBase = currentSettings.mylibraryBaseUrl;
     const searchQ = (lib && lib.search_query) || card.isbnDigits || card.title;
     const mylibUrl = `${mylibBase}/?q=${encodeURIComponent(searchQ)}`;
-    const annasQuery = card.isbnDigits || card.title;
+    const isbnQuery = card.isbnRaw || card.isbnDigits || '';
+    const annasQuery = isbnQuery || card.title;
     const annasUrl = `${annasBase}/search?q=${encodeURIComponent(annasQuery)}`;
+    const annasTitleUrl = (isbnQuery && card.title)
+      ? `${annasBase}/search?q=${encodeURIComponent(card.title)}`
+      : '';
     const firstAuthor = card.author ? card.author.split(/\s*(?:,|;|&|\band\b)\s*/i)[0].trim() : '';
     const annasAuthorUrl = firstAuthor ? `${annasBase}/search?q=${encodeURIComponent(firstAuthor)}` : '';
+    const mylibAuthorUrl = firstAuthor ? `${mylibBase}/?q=${encodeURIComponent('author:"' + firstAuthor + '"')}` : '';
 
     let statusHtml = `<span style="color:#94a3b8; font-weight:600;">⏳ Checking MyLibrary...</span>`;
     let borderColor = 'rgba(56,189,248,0.35)';
@@ -538,15 +543,24 @@
         const fmts = (lib.formats && lib.formats.length > 0) ? lib.formats.join(', ') : 'BOOK';
         borderColor = 'rgba(34,197,94,0.6)';
         statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" style="cursor:pointer; border:1px solid rgba(74,222,128,0.5); background:rgba(34,197,94,0.22); color:#4ade80; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">✅ In MyLibrary (${escapeHtml(fmts)}) ↗</button>`;
+      } else if (Array.isArray(lib.other_editions) && lib.other_editions.length > 0) {
+        borderColor = 'rgba(250,204,21,0.55)';
+        statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" title="A different edition/year with this title is in MyLibrary" style="cursor:pointer; border:1px solid rgba(250,204,21,0.5); background:rgba(234,179,8,0.2); color:#fde047; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">⚠️ Diff. Edition in MyLibrary ↗</button>`;
       } else {
         borderColor = 'rgba(248,113,113,0.45)';
         statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" style="cursor:pointer; border:1px solid rgba(248,113,113,0.4); background:rgba(239,68,68,0.16); color:#fca5a5; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">❌ Not in MyLibrary ↗</button>`;
       }
     }
 
-    const annasBtnHtml = `<button type="button" data-open-url="${escapeHtml(annasUrl)}" title="Search Title/ISBN on Anna's Archive" style="cursor:pointer; border:1px solid rgba(56,189,248,0.45); background:rgba(56,189,248,0.18); color:#7dd3fc; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">🔍 Anna's ↗</button>`;
+    const annasBtnLabel = isbnQuery ? `🔍 Anna's (${escapeHtml(isbnQuery)}) ↗` : `🔍 Anna's ↗`;
+    const annasBtnHtml = `<button type="button" data-open-url="${escapeHtml(annasUrl)}" title="Search ${escapeHtml(annasQuery)} on Anna's Archive" style="cursor:pointer; border:1px solid rgba(56,189,248,0.45); background:rgba(56,189,248,0.18); color:#7dd3fc; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">${annasBtnLabel}</button>`;
+    const annasTitleBtnHtml = annasTitleUrl
+      ? `<button type="button" data-open-url="${escapeHtml(annasTitleUrl)}" title="Search Title (${escapeHtml(card.title)}) on Anna's Archive" style="cursor:pointer; border:1px solid rgba(56,189,248,0.35); background:rgba(14,165,233,0.14); color:#bae6fd; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">📖 Title in Anna's ↗</button>`
+      : '';
+    const shortAuthor = firstAuthor ? (firstAuthor.length > 18 ? firstAuthor.slice(0, 16) + '…' : firstAuthor) : '';
     const authorBtnHtml = firstAuthor
-      ? `<button type="button" data-open-url="${escapeHtml(annasAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) on Anna's Archive" style="cursor:pointer; border:1px solid rgba(192,132,252,0.45); background:rgba(168,85,247,0.18); color:#d8b4fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">👤 ${escapeHtml(firstAuthor.length > 18 ? firstAuthor.slice(0, 16) + '…' : firstAuthor)} ↗</button>`
+      ? `<button type="button" data-open-url="${escapeHtml(annasAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) on Anna's Archive" style="cursor:pointer; border:1px solid rgba(192,132,252,0.45); background:rgba(168,85,247,0.18); color:#d8b4fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">👤 ${escapeHtml(shortAuthor)} (Anna's) ↗</button>` +
+        `<button type="button" data-open-url="${escapeHtml(mylibAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) in MyLibrary" style="cursor:pointer; border:1px solid rgba(129,140,248,0.45); background:rgba(99,102,241,0.18); color:#c7d2fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">📚 ${escapeHtml(shortAuthor)} (MyLib) ↗</button>`
       : '';
 
     const badgeBoxClass = 'mylib-search-card-bar';
@@ -561,7 +575,7 @@
         mountEl.appendChild(bar);
       }
       bar.style.borderColor = borderColor;
-      bar.innerHTML = `${statusHtml}${annasBtnHtml}${authorBtnHtml}`;
+      bar.innerHTML = `${statusHtml}${annasBtnHtml}${annasTitleBtnHtml}${authorBtnHtml}`;
       bar.querySelectorAll('button[data-open-url]').forEach((btn) => {
         btn.addEventListener('click', (e) => {
           e.preventDefault();

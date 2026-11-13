@@ -235,7 +235,8 @@ def parse_pdf(filepath, include_cover=False):
         import pymupdf
         doc = pymupdf.open(filepath)
         try:
-            if doc.is_encrypted:
+            needs_pass = bool(getattr(doc, 'needs_pass', False))
+            if doc.is_encrypted or needs_pass:
                 has_drm = True
             meta = doc.metadata or {}
             title = str(meta.get('title') or '').strip()
@@ -253,7 +254,7 @@ def parse_pdf(filepath, include_cover=False):
             try:
                 from epubmeta.isbn.extractor import extract_isbns_from_text
                 corpus = f"{keywords} {description} {title}"
-                if not has_drm and len(doc) > 0:
+                if not needs_pass and len(doc) > 0:
                     for p_idx in range(min(4, len(doc))):
                         corpus += ' ' + (doc[p_idx].get_text() or '')[:4000]
                 found_isbns = extract_isbns_from_text(corpus)
@@ -262,7 +263,7 @@ def parse_pdf(filepath, include_cover=False):
             except Exception:
                 pass
 
-            if include_cover and not has_drm and len(doc) > 0:
+            if include_cover and not needs_pass and len(doc) > 0:
                 try:
                     pix = doc[0].get_pixmap(dpi=72)
                     cover_bytes = pix.tobytes('jpeg')

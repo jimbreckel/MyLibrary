@@ -238,6 +238,12 @@ const initCatalogSearch = () => {
             : cleanedModalTitle;
         const covInput = document.getElementById('cover-search-input');
         if (covInput) covInput.value = [shortSearchTitle, cleanAuth].filter(Boolean).join(' ').trim();
+        const covBtn = document.getElementById('btn-run-cover-search');
+        if (covBtn) covBtn.disabled = false;
+        if (window._activeCoverSearchAbort) {
+            try { window._activeCoverSearchAbort.abort(); } catch (_) {}
+            window._activeCoverSearchAbort = null;
+        }
         const covRes = document.getElementById('cover-finder-results');
         if (covRes) covRes.innerHTML = '';
         const covSt = document.getElementById('cover-finder-status');
@@ -465,15 +471,21 @@ const initCatalogSearch = () => {
                 });
             }
         });
-        const tagsWrap = document.createElement('div');
-        tagsWrap.id = 'modal-tags-wrap';
-        tagsWrap.style.cssText = 'width:100%; display:flex; flex-wrap:wrap; gap:0.35rem; margin-top:0.35rem;';
-        if (allTagsSet.size > 0) {
-            tagsWrap.innerHTML = Array.from(allTagsSet).map(t =>
-                `<a href="${BASE_PREFIX}/?tag=${encodeURIComponent(t)}" style="background:rgba(56,189,248,0.13); border:1px solid rgba(56,189,248,0.38); color:#38bdf8; border-radius:999px; padding:0.15rem 0.55rem; font-size:0.73rem; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:0.25rem;" title="Filter catalog by tag: ${escapeHtml(t)}"><i class="fa-solid fa-tag" style="font-size:0.65rem;"></i> ${escapeHtml(t)}</a>`
+        const allTagsArr = Array.from(allTagsSet);
+        const renderReadOnlyTagsHtml = (tagsList) => {
+            const clean = Array.isArray(tagsList) ? tagsList.filter(Boolean) : [];
+            if (!clean.length) {
+                return `<span style="font-size:0.78rem; color:#64748b; font-style:italic;">No tags recorded for this item.</span>`;
+            }
+            return clean.map(t =>
+                `<span style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.32); color:#cbd5e1; border-radius:999px; padding:0.18rem 0.6rem; font-size:0.74rem; font-weight:600; display:inline-flex; align-items:center; gap:0.3rem; user-select:text;"><i class="fa-solid fa-tag" style="font-size:0.65rem; color:#38bdf8;"></i> ${escapeHtml(t)}</span>`
             ).join('');
+        };
+        window._renderReadOnlyTagsHtml = renderReadOnlyTagsHtml;
+        const bottomTagsEl = document.getElementById('modal-bottom-tags-list');
+        if (bottomTagsEl) {
+            bottomTagsEl.innerHTML = renderReadOnlyTagsHtml(allTagsArr);
         }
-        badgeContainer.appendChild(tagsWrap);
 
         // Add prominent Amazon / Kindle+ / Audible Ownership & Bookmark banner when opened
         if (amazonBadge) {
@@ -539,7 +551,11 @@ const initCatalogSearch = () => {
                     badges += ` <span class="modal-badge file-enriched-badge" style="background:rgba(74,222,128,0.16); border-color:rgba(74,222,128,0.45); color:#4ade80; padding:0.15rem 0.45rem; font-size:0.7rem; margin-left:0.5rem;"><i class="fa-solid fa-check" style="margin-right:0.2rem;"></i>Enriched</span>`;
                 }
                 if (file.has_drm) {
-                    badges += ` <span class="modal-badge" style="background:rgba(251,191,36,0.15); border-color:rgba(251,191,36,0.3); color:#fbbf24; padding:0.15rem 0.4rem; font-size:0.7rem; margin-left:0.5rem;"><i class="fa-solid fa-lock" style="margin-right:0.2rem;"></i>DRM Protected</span>`;
+                    if (file.drm_lock_state === 'unlocked') {
+                        badges += ` <span class="modal-badge" style="background:rgba(56,189,248,0.14); border-color:rgba(56,189,248,0.35); color:#38bdf8; padding:0.15rem 0.45rem; font-size:0.7rem; margin-left:0.5rem;" title="Has publisher permission restrictions or font obfuscation, but opens and reads normally"><i class="fa-solid fa-lock-open" style="margin-right:0.2rem;"></i>Permissions Only (Openable)</span>`;
+                    } else {
+                        badges += ` <span class="modal-badge" style="background:rgba(251,191,36,0.15); border-color:rgba(251,191,36,0.3); color:#fbbf24; padding:0.15rem 0.45rem; font-size:0.7rem; margin-left:0.5rem;" title="Locked by password or DRM — cannot be opened"><i class="fa-solid fa-lock" style="margin-right:0.2rem;"></i>DRM / Password Locked</span>`;
+                    }
                 }
                 if (file.is_invalid) {
                     badges += ` <span class="modal-badge" style="background:rgba(239,68,68,0.15); border-color:rgba(239,68,68,0.3); color:#fca5a5; padding:0.15rem 0.4rem; font-size:0.7rem; margin-left:0.5rem;"><i class="fa-solid fa-triangle-exclamation" style="margin-right:0.2rem;"></i>Corrupted</span>`;
@@ -593,7 +609,7 @@ const initCatalogSearch = () => {
                 const fileTagsHtml = fileTagsList.length > 0 ? `
                     <div class="file-tags-row" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.3rem; margin-top:0.35rem; font-size:0.73rem; color:#94a3b8;">
                         <span><i class="fa-solid fa-tags" style="color:#38bdf8;"></i> File Tags:</span>
-                        ${fileTagsList.map(t => `<a href="${BASE_PREFIX}/?tag=${encodeURIComponent(t)}" style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.32); color:#38bdf8; border-radius:999px; padding:0.08rem 0.45rem; font-size:0.69rem; text-decoration:none;">${escapeHtml(t)}</a>`).join('')}
+                        ${fileTagsList.map(t => `<span style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.32); color:#cbd5e1; border-radius:999px; padding:0.08rem 0.45rem; font-size:0.69rem; user-select:text;">${escapeHtml(t)}</span>`).join('')}
                     </div>
                 ` : `<div class="file-tags-row" style="display:none;"></div>`;
 
@@ -1053,8 +1069,21 @@ const initCatalogSearch = () => {
             if (fileId) params.set('file_id', fileId);
             if (targetItemId) params.set('item_id', targetItemId);
 
-            fetch(`${BASE_PREFIX}/api/book-preview/?${params.toString()}`)
-                .then(r => r.json())
+            const fetchPeekWithRetry = (attempt = 1) => fetch(`${BASE_PREFIX}/api/book-preview/?${params.toString()}`)
+                .then(async r => {
+                    const text = await r.text();
+                    try {
+                        return JSON.parse(text);
+                    } catch (e) {
+                        if (attempt < 2) {
+                            await new Promise(res => setTimeout(res, 1500));
+                            return fetchPeekWithRetry(attempt + 1);
+                        }
+                        throw new Error(`Server returned HTTP ${r.status} (please click Peek Inside again)`);
+                    }
+                });
+
+            fetchPeekWithRetry()
                 .then(res => {
                     if (!res.ok) {
                         if (textBody) textBody.textContent = res.error || 'Could not load book preview.';
@@ -1662,20 +1691,128 @@ const initCatalogSearch = () => {
 
     let activeReviewCtx = null;
 
-    function renderAuthorLinksHtml(authorsStr) {
-        const raw = (authorsStr || '').trim() || 'Unknown Author';
-        const parts = [];
+    const AUTHOR_SUFFIXES_SET = new Set([
+        'jr', 'sr', 'ii', 'iii', 'iv', 'v', 'phd', 'md', 'ed', 'eds',
+        'inc', 'ltd', 'llc', 'plc', 'corp', 'co', 'press', 'staff', 'team'
+    ]);
+    const SURNAME_PARTICLES_SET = new Set([
+        'van', 'von', 'de', 'del', 'della', 'da', 'di', 'le', 'la', 'du',
+        'st', 'st.', 'san', 'santa', 'mac', 'mc', 'bin', 'ibn', 'al', 'el'
+    ]);
+    const ORG_KEYWORDS_SET = new Set([
+        'united', 'nations', 'national', 'council', 'committee', 'institute',
+        'association', 'society', 'university', 'department', 'ministry',
+        'commission', 'foundation', 'corporation', 'board', 'office', 'center',
+        'centre', 'group', 'press', 'publishing', 'publications', 'organization',
+        'organisation', 'agency', 'bureau', 'library', 'academy', 'college'
+    ]);
+
+    function isAuthorSuffix(tok) {
+        return AUTHOR_SUFFIXES_SET.has(String(tok || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+    }
+
+    function isOrgSegment(s) {
+        return String(s || '').split(/\s+/).some(w => ORG_KEYWORDS_SET.has(w.toLowerCase().replace(/[^a-z0-9]/g, '')));
+    }
+
+    function isLikelySurnameToken(s) {
+        const clean = String(s || '').trim();
+        if (!clean || isOrgSegment(clean)) return false;
+        if (!clean.includes(' ')) return true;
+        const firstWord = clean.split(/\s+/)[0].toLowerCase().replace(/\.$/, '');
+        return SURNAME_PARTICLES_SET.has(firstWord);
+    }
+
+    function isLikelyGivenName(s) {
+        const clean = String(s || '').trim();
+        if (!clean || isAuthorSuffix(clean) || isOrgSegment(clean)) return false;
+        const words = clean.split(/\s+/);
+        if (words.length === 1) return true;
+        if (words.length === 2 && (words[1].replace(/\.$/, '').length === 1 || words[0].replace(/\.$/, '').length === 1)) return true;
+        return false;
+    }
+
+    function parseAndNormalizeAuthors(authorsStr) {
+        const raw = (authorsStr || '').trim();
+        if (!raw) return ['Unknown Author'];
+        const segments = [];
         raw.split(';').forEach(semi => {
             const s = semi.trim();
             if (!s) return;
-            const cParts = s.split(',').map(p => p.trim()).filter(Boolean);
-            if (cParts.length > 1 && cParts.every(p => p.includes(' '))) {
-                parts.push(...cParts);
-            } else {
-                parts.push(s);
+            if (isOrgSegment(s)) {
+                segments.push(s);
+                return;
+            }
+            s.split(/\s+(?:&|and)\s+/i).forEach(sub => {
+                if (sub && sub.trim()) segments.push(sub.trim());
+            });
+        });
+
+        const result = [];
+        segments.forEach(seg => {
+            if (isOrgSegment(seg)) {
+                result.push(seg);
+                return;
+            }
+            const cParts = seg.split(',').map(p => p.trim()).filter(Boolean);
+            if (!cParts.length) return;
+            if (cParts.length === 1) {
+                result.push(cParts[0]);
+                return;
+            }
+            if (cParts.length === 2) {
+                const [p0, p1] = cParts;
+                if (isAuthorSuffix(p1)) {
+                    result.push(`${p0}, ${p1}`);
+                } else if (isLikelySurnameToken(p0) && !isOrgSegment(p1) && p1.split(/\s+/).length <= 3) {
+                    result.push(`${p1} ${p0}`);
+                } else if (isLikelyGivenName(p1) && !isOrgSegment(p0)) {
+                    result.push(`${p1} ${p0}`);
+                } else {
+                    result.push(p0, p1);
+                }
+                return;
+            }
+            let i = 0;
+            const n = cParts.length;
+            while (i < n) {
+                const cur = cParts[i];
+                const nxt = i + 1 < n ? cParts[i + 1] : null;
+                const nxt2 = i + 2 < n ? cParts[i + 2] : null;
+                if (nxt && isAuthorSuffix(nxt)) {
+                    result.push(`${cur}, ${nxt}`);
+                    i += 2;
+                    continue;
+                }
+                if (nxt && isLikelySurnameToken(cur) && !isOrgSegment(nxt) && nxt.split(/\s+/).length <= 3) {
+                    if (nxt2 && isAuthorSuffix(nxt2)) {
+                        result.push(`${nxt} ${cur}, ${nxt2}`);
+                        i += 3;
+                    } else {
+                        result.push(`${nxt} ${cur}`);
+                        i += 2;
+                    }
+                    continue;
+                }
+                result.push(cur);
+                i += 1;
             }
         });
-        const list = parts.length ? parts : [raw];
+
+        const dedup = [];
+        const seen = new Set();
+        result.forEach(a => {
+            const clean = a.replace(/\s+/g, ' ').replace(/^[\s,;]+|[\s,;]+$/g, '');
+            if (clean && !seen.has(clean.toLowerCase())) {
+                seen.add(clean.toLowerCase());
+                dedup.push(clean);
+            }
+        });
+        return dedup.length ? dedup : [raw];
+    }
+
+    function renderAuthorLinksHtml(authorsStr) {
+        const list = parseAndNormalizeAuthors(authorsStr);
         return 'by ' + list.map(a =>
             `<a href="?author=${encodeURIComponent(a)}&sort=pubdate_desc" class="author-filter-link" title="Filter by author: ${escapeHtml(a)} (Sorted by Newest First)">${escapeHtml(a)}</a>`
         ).join(', ');
@@ -1862,11 +1999,9 @@ const initCatalogSearch = () => {
                 topRevBtn.style.display = 'inline-flex';
             }
             if (Array.isArray(data.tags) && data.tags.length > 0) {
-                const tagsWrap = document.getElementById('modal-tags-wrap');
-                if (tagsWrap) {
-                    tagsWrap.innerHTML = data.tags.map(t =>
-                        `<a href="${BASE_PREFIX}/?tag=${encodeURIComponent(t)}" style="background:rgba(56,189,248,0.13); border:1px solid rgba(56,189,248,0.38); color:#38bdf8; border-radius:999px; padding:0.15rem 0.55rem; font-size:0.73rem; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:0.25rem;" title="Filter catalog by tag: ${escapeHtml(t)}"><i class="fa-solid fa-tag" style="font-size:0.65rem;"></i> ${escapeHtml(t)}</a>`
-                    ).join('');
+                const bottomTagsEl = document.getElementById('modal-bottom-tags-list');
+                if (bottomTagsEl && typeof window._renderReadOnlyTagsHtml === 'function') {
+                    bottomTagsEl.innerHTML = window._renderReadOnlyTagsHtml(data.tags);
                 }
             }
             // Update file rows inside #modal-files-list to reflect Enriched status and tags
@@ -1892,7 +2027,7 @@ const initCatalogSearch = () => {
                     if (fTagsRow) {
                         fTagsRow.style.cssText = 'display:flex; flex-wrap:wrap; align-items:center; gap:0.3rem; margin-top:0.35rem; font-size:0.73rem; color:#94a3b8;';
                         fTagsRow.innerHTML = `<span><i class="fa-solid fa-tags" style="color:#38bdf8;"></i> File Tags:</span>` +
-                            data.tags.map(t => `<a href="${BASE_PREFIX}/?tag=${encodeURIComponent(t)}" style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.32); color:#38bdf8; border-radius:999px; padding:0.08rem 0.45rem; font-size:0.69rem; text-decoration:none;">${escapeHtml(t)}</a>`).join('');
+                            data.tags.map(t => `<span style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.32); color:#cbd5e1; border-radius:999px; padding:0.08rem 0.45rem; font-size:0.69rem; user-select:text;">${escapeHtml(t)}</span>`).join('');
                     }
                 }
             });
@@ -1913,13 +2048,23 @@ const initCatalogSearch = () => {
         }
     };
 
-    window.runWebCoverSearch = function () {
+    window.runWebCoverSearch = function (isRetry = false) {
         const ctx = window._activeModalItem || {};
         const covInput = document.getElementById('cover-search-input');
         const statusEl = document.getElementById('cover-finder-status');
         const resultsEl = document.getElementById('cover-finder-results');
         const searchBtn = document.getElementById('btn-run-cover-search');
         if (!resultsEl) return;
+
+        if (window._activeCoverSearchAbort) {
+            try { window._activeCoverSearchAbort.abort(); } catch (_) {}
+            window._activeCoverSearchAbort = null;
+        }
+        const ctrl = new AbortController();
+        window._activeCoverSearchAbort = ctrl;
+        const timeoutId = setTimeout(() => {
+            try { ctrl.abort(); } catch (_) {}
+        }, 9000);
 
         const q = (covInput ? covInput.value : '').trim();
         if (statusEl) statusEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Searching Web Images, Goodreads, Apple Books, Google Books &amp; Open Library for covers...`;
@@ -1928,6 +2073,7 @@ const initCatalogSearch = () => {
 
         fetch(`${BASE_PREFIX}/api/cover-search/`, {
             method: 'POST',
+            signal: ctrl.signal,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': getCookie('csrftoken')
@@ -1940,8 +2086,12 @@ const initCatalogSearch = () => {
                 item_id: ctx.itemId || '',
             })
         })
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
             .then(data => {
+                clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
                 const covers = data.covers || [];
                 if (covers.length === 0) {
@@ -1952,17 +2102,22 @@ const initCatalogSearch = () => {
                 resultsEl.innerHTML = '';
                 covers.forEach(c => {
                     const isOrig = c.source === 'Original Cover';
+                    const isColorMatch = Boolean(c.same_cover_in_color);
                     const card = document.createElement('div');
                     card.className = 'cover-cand-card';
-                    if (isOrig) {
+                    if (isColorMatch) {
+                        card.style.borderColor = '#f59e0b';
+                        card.style.boxShadow = '0 0 0 2px rgba(245, 158, 11, 0.55)';
+                    } else if (isOrig) {
                         card.style.borderColor = '#4ade80';
                         card.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.45)';
                     }
+                    const badgeColor = isColorMatch ? '#fbbf24' : (isOrig ? '#4ade80' : '#38bdf8');
                     card.title = `${c.title} (${c.source}) — Click to apply this cover`;
                     card.innerHTML = `
                     <img src="${escapeHtml(c.cover_url)}" data-fallback="${escapeHtml(c.fallback_url || '')}" alt="Cover candidate" loading="lazy" onerror="if(this.dataset.fallback && this.src !== this.dataset.fallback){this.src=this.dataset.fallback;}else{this.closest('.cover-cand-card').style.display='none';}">
                     <div class="cover-cand-meta">
-                        <div style="font-weight:700; color:${isOrig ? '#4ade80' : '#38bdf8'}; font-size:0.64rem; text-transform:uppercase;">${isOrig ? '★ ' : ''}${escapeHtml(c.source)}</div>
+                        <div style="font-weight:700; color:${badgeColor}; font-size:0.64rem; text-transform:uppercase;">${isOrig && !isColorMatch ? '★ ' : ''}${escapeHtml(c.source)}</div>
                         <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600;" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</div>
                         <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#94a3b8;">${escapeHtml(c.authors)}</div>
                     </div>
@@ -1972,7 +2127,16 @@ const initCatalogSearch = () => {
                 });
             })
             .catch(err => {
+                clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
+                if (err && err.name === 'AbortError') {
+                    if (!isRetry) {
+                        window.runWebCoverSearch(true);
+                        return;
+                    }
+                    if (statusEl) statusEl.innerHTML = `Cover search timed out. <button type="button" onclick="window.runWebCoverSearch()" style="margin-left:6px; background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.5); color:#38bdf8; border-radius:5px; padding:2px 8px; cursor:pointer; font-size:0.75rem;">Retry Search</button>`;
+                    return;
+                }
                 if (statusEl) statusEl.textContent = 'Error searching covers: ' + err.message;
             });
     };
@@ -2258,6 +2422,18 @@ const initCatalogSearch = () => {
         if (forceBtn) {
             forceBtn.style.display = data.candidate_title ? 'inline-block' : 'none';
         }
+        const erTagsBox = document.getElementById('er-readonly-tags-box');
+        if (erTagsBox) {
+            const combinedTags = Array.from(new Set([
+                ...(Array.isArray(data.candidate_tags) ? data.candidate_tags : []),
+                ...(Array.isArray(data.orig_tags) ? data.orig_tags : []),
+            ].filter(Boolean)));
+            if (typeof window._renderReadOnlyTagsHtml === 'function') {
+                erTagsBox.innerHTML = window._renderReadOnlyTagsHtml(combinedTags);
+            } else {
+                erTagsBox.textContent = combinedTags.length ? combinedTags.join(', ') : 'No tags recorded for this item.';
+            }
+        }
 
         // Reset Inside Book Preview drawer & Cover Finder drawer for this item
         const prevDrawer = document.getElementById('er-book-preview-drawer');
@@ -2317,7 +2493,7 @@ const initCatalogSearch = () => {
         }
     };
 
-    window.erRunCoverSearch = function () {
+    window.erRunCoverSearch = function (isRetry = false) {
         if (!activeReviewCtx) return;
         const { data, itemId } = activeReviewCtx;
         const covInput = document.getElementById('er-cover-search-input');
@@ -2325,6 +2501,16 @@ const initCatalogSearch = () => {
         const resultsEl = document.getElementById('er-cover-finder-results');
         const searchBtn = document.getElementById('er-btn-run-cover-search');
         if (!resultsEl) return;
+
+        if (window._activeErCoverSearchAbort) {
+            try { window._activeErCoverSearchAbort.abort(); } catch (_) {}
+            window._activeErCoverSearchAbort = null;
+        }
+        const ctrl = new AbortController();
+        window._activeErCoverSearchAbort = ctrl;
+        const timeoutId = setTimeout(() => {
+            try { ctrl.abort(); } catch (_) {}
+        }, 9000);
 
         const curTitle = (document.getElementById('er-input-title')?.value || data?.candidate_title || data?.orig_title || '').trim();
         const curAuth = (document.getElementById('er-input-author')?.value || data?.candidate_authors || data?.orig_authors || '').trim();
@@ -2337,6 +2523,7 @@ const initCatalogSearch = () => {
 
         fetch(`${BASE_PREFIX}/api/cover-search/`, {
             method: 'POST',
+            signal: ctrl.signal,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': getCookie('csrftoken')
@@ -2349,8 +2536,12 @@ const initCatalogSearch = () => {
                 item_id: itemId || data?.item_id || '',
             })
         })
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
             .then(resData => {
+                clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
                 const covers = resData.covers || [];
                 if (covers.length === 0) {
@@ -2385,7 +2576,16 @@ const initCatalogSearch = () => {
                 });
             })
             .catch(err => {
+                clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
+                if (err && err.name === 'AbortError') {
+                    if (!isRetry) {
+                        window.erRunCoverSearch(true);
+                        return;
+                    }
+                    if (statusEl) statusEl.innerHTML = `Cover search timed out. <button type="button" onclick="window.erRunCoverSearch()" style="margin-left:6px; background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.5); color:#38bdf8; border-radius:5px; padding:2px 8px; cursor:pointer; font-size:0.75rem;">Retry Search</button>`;
+                    return;
+                }
                 if (statusEl) statusEl.textContent = 'Error searching covers: ' + err.message;
             });
     };
@@ -2501,8 +2701,21 @@ const initCatalogSearch = () => {
         if (fileId || (data && data.file_id)) params.set('file_id', fileId || data.file_id);
         if (itemId || (data && data.item_id)) params.set('item_id', itemId || data.item_id);
 
-        fetch(`${BASE_PREFIX}/api/book-preview/?${params.toString()}`)
-            .then(r => r.json())
+        const fetchReviewPeekWithRetry = (attempt = 1) => fetch(`${BASE_PREFIX}/api/book-preview/?${params.toString()}`)
+            .then(async r => {
+                const text = await r.text();
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    if (attempt < 2) {
+                        await new Promise(res => setTimeout(res, 1500));
+                        return fetchReviewPeekWithRetry(attempt + 1);
+                    }
+                    throw new Error(`Server returned HTTP ${r.status} (please click Peek Inside again)`);
+                }
+            });
+
+        fetchReviewPeekWithRetry()
             .then(res => {
                 if (!res.ok) {
                     if (textBody) textBody.textContent = res.error || 'Could not load book preview.';
@@ -3236,8 +3449,10 @@ const initCatalogSearch = () => {
                             coverImg.style.display = 'block';
                         }
                     }
-                    const tagsWrap = document.getElementById('modal-tags-wrap');
-                    if (tagsWrap) tagsWrap.innerHTML = '';
+                    const bottomTagsEl = document.getElementById('modal-bottom-tags-list');
+                    if (bottomTagsEl && typeof window._renderReadOnlyTagsHtml === 'function') {
+                        bottomTagsEl.innerHTML = window._renderReadOnlyTagsHtml([]);
+                    }
                     const errBanner = document.getElementById('modal-enrich-error-banner');
                     if (errBanner) {
                         errBanner.style.display = 'none';

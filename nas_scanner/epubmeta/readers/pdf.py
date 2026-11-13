@@ -115,10 +115,15 @@ class PdfReader(BaseReader):
         """Extract metadata from PDF Document Info and XMP stream."""
         doc = pymupdf.open(self.file_path)
         try:
-            from ..filename_parser import is_garbage_embedded_title, is_garbage_embedded_author
+            from ..filename_parser import is_garbage_embedded_title, is_garbage_embedded_author, parse_filename
             meta = doc.metadata or {}
             raw_title = (meta.get("title") or "").strip()
             title = raw_title if (raw_title and not is_garbage_embedded_title(raw_title)) else None
+            if title and len(title.split()) == 1 and len(title) <= 6:
+                fn_clues = parse_filename(self.file_path.name)
+                fn_title = (fn_clues.get("title") or "").strip()
+                if len(fn_title.split()) >= 3 and title.lower() not in fn_title.lower():
+                    title = None
             author_str = meta.get("author") or ""
             authors = [
                 a.strip()
@@ -182,6 +187,84 @@ class PdfReader(BaseReader):
                 pix = doc[i].get_pixmap(dpi=150)
                 images.append(pix.tobytes("png"))
             return images
+        finally:
+            doc.close()
+
+    def extract_cover_bytes(self) -> Optional[bytes]:
+        """
+        Extract cover image bytes from Page 1 of the PDF.
+        If Page 1 is a cover/title page (`< 300` chars of text) with a single cover-proportioned raster image
+        floating inside wide white page margins (e.g. Liquid Silver Books / Boson Books PDFs where a 240x360 or
+        510x680 cover JPEG is placed on a blank 8.5x11" page), extract that embedded cover image directly so it
+        fills the cover frame without an excessive white page border.
+        """
+        doc = pymupdf.open(self.file_path)
+        try:
+            if len(doc) == 0:
+                return None
+            p0 = doc[0]
+            p_rect = p0.rect
+            p_area = max(1.0, float(p_rect.width * p_rect.height))
+            p_text = (p0.get_text() or "").strip()
+            imgs = p0.get_images(full=True)
+            if len(imgs) == 1 and len(p_text) < 300:
+                xref = imgs[0][0]
+                try:
+                    extracted = doc.extract_image(xref)
+                    raw_img = extracted.get("image") if extracted else None
+                    iw = int(extracted.get("width") or 0) if extracted else 0
+                    ih = int(extracted.get("height") or 0) if extracted else 0
+                    if raw_img and len(raw_img) >= 2000 and iw >= 120 and ih >= 150 and 0.42 <= (iw / ih) <= 1.20:
+                        rects = p0.get_image_rects(xref)
+                        if not rects:
+                            return raw_img
+                        r0 = rects[0] & p_rect
+                        r_area = float(r0.width * r0.height)
+                        if 0.04 <= (r_area / p_area) <= 0.94:
+                            return raw_img
+                except Exception:
+                    pass
+            pix = p0.get_pixmap(dpi=150)
+            return pix.tobytes("png")
+        finally:
+            doc.close()
+
+    def extract_cover_bytes(self) -> Optional[bytes]:
+        """
+        Extract cover image bytes from Page 1 of the PDF.
+        If Page 1 is a cover/title page (`< 300` chars of text) with a single cover-proportioned raster image
+        floating inside wide white page margins (e.g. Liquid Silver Books / Boson Books PDFs where a 240x360 or
+        510x680 cover JPEG is placed on a blank 8.5x11" page), extract that embedded cover image directly so it
+        fills the cover frame without an excessive white page border.
+        """
+        doc = pymupdf.open(self.file_path)
+        try:
+            if len(doc) == 0:
+                return None
+            p0 = doc[0]
+            p_rect = p0.rect
+            p_area = max(1.0, float(p_rect.width * p_rect.height))
+            p_text = (p0.get_text() or "").strip()
+            imgs = p0.get_images(full=True)
+            if len(imgs) == 1 and len(p_text) < 300:
+                xref = imgs[0][0]
+                try:
+                    extracted = doc.extract_image(xref)
+                    raw_img = extracted.get("image") if extracted else None
+                    iw = int(extracted.get("width") or 0) if extracted else 0
+                    ih = int(extracted.get("height") or 0) if extracted else 0
+                    if raw_img and len(raw_img) >= 2000 and iw >= 120 and ih >= 150 and 0.42 <= (iw / ih) <= 1.20:
+                        rects = p0.get_image_rects(xref)
+                        if not rects:
+                            return raw_img
+                        r0 = rects[0] & p_rect
+                        r_area = float(r0.width * r0.height)
+                        if 0.04 <= (r_area / p_area) <= 0.94:
+                            return raw_img
+                except Exception:
+                    pass
+            pix = p0.get_pixmap(dpi=150)
+            return pix.tobytes("png")
         finally:
             doc.close()
 

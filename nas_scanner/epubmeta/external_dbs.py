@@ -40,6 +40,91 @@ def compute_full_sha256(file_path: Path) -> str:
         return ""
 
 
+def _autocrop_white_border_around_cover(img: Any) -> Any:
+    """
+    If `img` has an excessive white/light page border around a smaller centered graphic cover
+    (for example, a small cover image rendered on a blank 8.5x11" white page, or an 850x1100 EPUB
+    cover canvas with light side margins and a blank white bottom half), crop to the cover artwork rectangle.
+    """
+    try:
+        rgb = img.convert("RGB")
+        w, h = rgb.size
+        if w < 80 or h < 100:
+            return img
+        SW, SH = 100, 140
+        small = rgb.resize((SW, SH))
+        px = list(small.get_flattened_data() if hasattr(small, "get_flattened_data") else small.getdata())
+
+        pad_mask = [[False] * SW for _ in range(SH)]
+        total_colored = 0
+        for r in range(SH):
+            ro = r * SW
+            lp = px[ro + 0]
+            rp = px[ro + (SW - 1)]
+            row_bg = lp if (min(lp) >= 205 and max(abs(lp[i] - rp[i]) for i in range(3)) <= 20) else (255, 255, 255)
+            for c in range(SW):
+                p = px[ro + c]
+                mx = max(p)
+                mn = min(p)
+                if (mx - mn) >= 24 and mx >= 35:
+                    total_colored += 1
+                is_white = mn >= 225 and (mx - mn) <= 18
+                matches_row_bg = min(row_bg) >= 205 and max(abs(p[i] - row_bg[i]) for i in range(3)) <= 16
+                if is_white or matches_row_bg:
+                    pad_mask[r][c] = True
+
+        if total_colored < 40:
+            return img
+
+        row_fg = [sum(1 for c in range(SW) if not pad_mask[r][c]) for r in range(SH)]
+        active_rows = [r for r in range(SH) if row_fg[r] >= 18]
+        if not active_rows:
+            return img
+        r0, r1 = min(active_rows), max(active_rows)
+
+        col_fg_in_rows = [sum(1 for r in range(r0, r1 + 1) if not pad_mask[r][c]) for c in range(SW)]
+        min_col_hits = max(8, int((r1 - r0 + 1) * 0.25))
+        active_cols = [c for c in range(SW) if col_fg_in_rows[c] >= min_col_hits]
+        if not active_cols:
+            return img
+        c0, c1 = min(active_cols), max(active_cols)
+
+        box_w = (c1 - c0 + 1) / SW
+        box_h = (r1 - r0 + 1) / SH
+        box_area = box_w * box_h
+        if not (0.08 <= box_area <= 0.82 and box_w >= 0.22 and box_h >= 0.22):
+            return img
+
+        in_fg, in_tot, out_pad, out_tot = 0, 0, 0, 0
+        for r in range(SH):
+            for c in range(SW):
+                if r0 <= r <= r1 and c0 <= c <= c1:
+                    in_tot += 1
+                    if not pad_mask[r][c]:
+                        in_fg += 1
+                else:
+                    out_tot += 1
+                    if pad_mask[r][c]:
+                        out_pad += 1
+        if in_tot == 0 or out_tot == 0:
+            return img
+        if (in_fg / in_tot) < 0.70 or (out_pad / out_tot) < 0.94:
+            return img
+
+        crop_w = int((c1 - c0 + 1) * w / SW)
+        crop_h = int((r1 - r0 + 1) * h / SH)
+        if crop_w < 60 or crop_h < 80 or not (0.42 <= (crop_w / crop_h) <= 1.25):
+            return img
+
+        x0 = max(0, int(c0 * w / SW))
+        y0 = max(0, int(r0 * h / SH))
+        x1 = min(w, int((c1 + 1) * w / SW))
+        y1 = min(h, int((r1 + 1) * h / SH))
+        return img.crop((x0, y0, x1, y1))
+    except Exception:
+        return img
+
+
 def generate_cover_thumbnail(
     image_bytes: Optional[bytes],
     max_size: Tuple[int, int] = (200, 300),
@@ -53,6 +138,7 @@ def generate_cover_thumbnail(
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes))
+        img = _autocrop_white_border_around_cover(img)
         img.thumbnail(max_size)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")

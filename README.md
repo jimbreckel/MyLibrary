@@ -12,12 +12,12 @@
 | **Pipeline & Status Dashboard** | `http://192.168.1.43:8080/mylibrary/status/` | Live scanner status, next-scan countdown, remaining queues, interactive time-series charts, and `epubmeta` review explorer |
 | **OPDS 1.2 & Calibre Content Server** | `http://192.168.1.43:8080/mylibrary/opds/?v=2` | Native e-reader catalog for **Moon+ Reader**, KOReader, Calibre Sync, and PocketBook with **automatic on-demand enrichment on download** and Moon+ WebDAV bookmark migration |
 | **Enriched Duplicates Manager** | `http://192.168.1.43:8080/mylibrary/duplicates/` | Finds duplicate copies of the same format and verified content, automatically scoring the best copy to keep while protecting unfinished Moon+ Reader bookmarks |
-| **Chrome Extension (Book Sites, Wishlists & Anna's Archive)** | [`chrome_wishlist_extension/`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/chrome_wishlist_extension) | Checks Amazon Wishlists & Book Pages, Barnes & Noble, Springer Link, Goodreads, O'Reilly, No Starch Press, and custom sites against MyLibrary and Anna's Archive |
+| **Chrome Extension (Book Sites, Wishlists & Anna's Archive)** | [`chrome_wishlist_extension/`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/chrome_wishlist_extension) | Checks Amazon Wishlists (highlighting `🏷️ ON SALE` price drops) & Book Pages across Amazon, Barnes & Noble, Simon & Schuster, Springer Link, Goodreads, O'Reilly, No Starch Press, and custom sites against MyLibrary and Anna's Archive |
 | **Amazon Kindle, Kindle+ & Audible Sync** | [`scanner/sync_amazon.py`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/scanner/sync_amazon.py) | Automated Google Chrome sync for Amazon Kindle purchases, Kindle+ (KU/Prime), Kindle Bookmarks/Highlights, and Audible Audiobooks |
 | **External Web Login** | `http://192.168.1.43:8080/mylibrary/login/` | Automatic security guard when accessing MyLibrary outside your home LAN (with HTTP Basic Auth for OPDS/APIs) |
-| **Calibre & Moon+ Sync Utility** | [`calibre_moon_sync.py`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/calibre_moon_sync.py) | Standalone utility (`moon-only`, `pass1`, `pass2`, `status`, `inspect-an`) for syncing desktop `I:\Calibre Library` and `U:\webdav\Apps\Books\.Moon+\Cache` |
-| **CLI & Python SDK** | [`mylibrary_cli.py`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/mylibrary_cli.py) | Terminal commands (`status`, `search`, `book`, `update-book`, `suggest`, `enrichments`, `approve`, `ignore`, `requeue`, `history`, `logs`, `help`) |
-| **MCP Server** | [`mylibrary_mcp.py`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/mylibrary_mcp.py) | 11 MCP Tools & 2 Resources over stdio JSON-RPC 2.0 for AI agents (Antigravity, Claude Desktop, Cursor) |
+| **Calibre & Moon+ Sync Utility** | [`calibre_moon_sync.py`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/calibre_moon_sync.py) | Standalone utility (`moon-only`, `pass1`, `pass2`, `status`, `inspect-an`) for syncing desktop `I:\Calibre Library` and `U:\webdav\Apps\Books\.Moon+\Cache` |
+| **CLI & Python SDK** | [`mylibrary_cli.py`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/mylibrary_cli.py) | Terminal commands (`status`, `search`, `book`, `update-book`, `suggest`, `enrichments`, `approve`, `ignore`, `requeue`, `history`, `logs`, `help`) |
+| **MCP Server** | [`mylibrary_mcp.py`](file:///c:/Users/jpbr230/Repo_Pers/notgithub/MyLibrary/mylibrary_mcp.py) | 11 MCP Tools & 2 Resources over stdio JSON-RPC 2.0 for AI agents (Antigravity, Claude Desktop, Cursor) |
 | **REST API** | `/mylibrary/api/...` | JSON endpoints for catalog search, book details/editing, pipeline status, enrichment review, batch Calibre/Moon+ lookup, history curves, and logs |
 
 ---
@@ -25,12 +25,16 @@
 ## 1. Web Dashboards & External Security
 
 ### A. Catalog Search & On-Demand Enrichment (`/mylibrary/`)
-- **Full-Catalog Search Across All Books:** Search across titles, authors, ISBN/ASINs, publishers, and physical filenames (`files__file_name`) with instant autocomplete (`/mylibrary/api/suggest/`).
+- **Full-Catalog Search Across All Books:** Search across titles, authors, ISBN/ASINs, publishers, and physical filenames (`files__file_name`) with instant autocomplete (`/mylibrary/api/suggest/`) and structured search operators (`author:`, `title:`, `cat:`, `tag:`, `pub:`, `isbn:`, `format:`, `year:`, `is:enriched`, `is:unenriched`, `is:interesting`, `is:badmeta`, `missing:cover`, `-exclude`, `sort:newest`).
 - **One-Click On-Demand Enrichment (`✨ Enrich Now`):**
   - Click **`✨ Enrich Now`** directly on any book card or inside **View Details** (or click **`✨ Enrich File`** on a specific file location) to run `epubmeta` on demand (`POST /mylibrary/api/enrich/`).
   - Or check **"Enrich search results on demand"** beneath the search bar (or append `+enrich` to your search query) to automatically enrich top unenriched search results as you search!
   - Rewrites the `.epub` OPF / `.pdf` XMP metadata on the NAS (with backup in `/books_bad/bak`), records `SUCCESS` in `scanner_state.db`, and updates the card's title, author, ISBN, cover, and synopsis in-place.
-- **Virtual Bookshelves:** Browse `Bookmarked & Reading in Moon+`, `Highlights & Notes (.an)`, `Enriched EPUBs`, `Purchased on Amazon`, `Kindle+ (KU / Prime)`, `Amazon Bookmarked`, `Purchased on Audible`, `Amazon Only (Not on NAS)`, and `Matched to NAS Books`.
+- **Cover Intelligence & White-Border Auto-Crop:**
+  - Automatically detects and crops excessive white/light borders around book covers in PDFs, EPUBs, and downloaded web covers (with background batch repair available via `GET /mylibrary/api/suggest/?repair_covers=start`).
+  - Automatically prefers **full-color covers** over grayscale/black-and-white scans during Web Cover Search (`🖼 Find Cover`) and `epubmeta` enrichment.
+  - Displays read-only **Tags** at the bottom of both the **Book Details Modal** and the **Enrichment Review Modal**.
+- **Virtual Bookshelves:** Browse `Interesting Books`, `Bad Metadata`, `Bookmarked & Reading in Moon+` (with `100% Read`, `Unread <100%`, and `Reading 1–99%` progress filters), `Highlights & Notes (.an)`, `Enriched Books`, `Missing / Text Cover`, `Enriched Duplicates`, `Needs Enriching`, `In Review`, `Removed Protection (nodrm)`, **`Packt Books`** (`Computer Mags & FAQ/978`, sorted by most recent file modification date first), `Moved to toMags`, `Recently Published (1 Yr)`, `Purchased on Amazon`, `Kindle+ (KU / Prime)`, `Amazon Bookmarked`, `Purchased on Audible`, `Amazon Only (Not on NAS)`, and `Matched to NAS Books`.
 - **Comma-Formatted Metrics & Faceted Sidebar Filters:** Filter by **Catalog Type** (`BOOK`, `MAGAZINE`, `KINDLE`, `AUDIBLE`, `AUDIOBOOK`), **File Format** (`EPUB`, `PDF`, `MOBI`, `AZW3`, `MP3`, `M4B`), **Enriched Tags**, and **Enriched Collections**.
 
 ### B. Conversion & Import Status Dashboard (`/mylibrary/status/`)
@@ -62,8 +66,11 @@
 
 MyLibrary natively emulates an **OPDS 1.2 Catalog** and **Calibre Content Server** ([`catalog/opds.py`](file:///c:/Users/oscar/Repo_Pers/notgithub/MyLibrary/catalog/opds.py)) so physical tablets/phones running **Moon+ Reader** can browse, search all books, and download books directly from the NAS without needing desktop Calibre:
 - **OPDS Shelves:**
+  - `Interesting Books (Starred to Read/Download)` (`/mylibrary/opds/interesting/`)
+  - `Flagged: Bad Metadata` (`/mylibrary/opds/bad-metadata/`)
   - `Bookmarked & Reading in Moon+` (`/mylibrary/opds/bookmarked/`)
   - `Purchased on Amazon, Kindle+ & Audible` (`/mylibrary/opds/amazon/`, including `Amazon Only (Not on NAS)` and `Matched to NAS Books`)
+  - `Packt Books (Computer Mags & FAQ / 978 — Most Recent File Date First)` (`/mylibrary/opds/packt/`)
   - `Browse Enriched Books by Tag / Subject` (`/mylibrary/opds/tags/`)
   - `Enriched EPUBs (epubmeta Verified)` (`/mylibrary/opds/enriched/`)
   - `Recently Updated & Enriched Books` (`/mylibrary/opds/recent/`)

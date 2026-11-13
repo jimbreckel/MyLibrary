@@ -6,17 +6,29 @@ import logging
 import json
 import smtplib
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.header import Header
 from utils.lock import ScannerLock, LockError
 from utils.logger import setup_logging
 
+os.environ.setdefault("TZ", "America/New_York")
+if hasattr(time, "tzset"):
+    try:
+        time.tzset()
+    except Exception:
+        pass
+
+_EST_TZ = ZoneInfo("America/New_York")
+
 # Configure logging to write to both stdout and logs/scanner.log with a line limit of 100,000 lines
 logger = setup_logging('logs/scanner.log')
 
 def run_script(script_name, *args):
+    now_est = datetime.now(tz=_EST_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')
     logger.info("=========================================")
-    logger.info(f"Starting {script_name} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Starting {script_name} at {now_est}")
     logger.info("=========================================")
     summary_lines = []
     process = None
@@ -192,7 +204,10 @@ def main():
             pass
     interval_seconds = interval_hours * 3600
     
-    lock_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nas_scanner_loop.lock')
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    logs_dir = os.path.join(base_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    lock_file = os.path.join(logs_dir, 'nas_scanner_loop.lock')
     try:
         with ScannerLock(lock_file):
             # Check for config path inside container

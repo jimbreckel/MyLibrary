@@ -499,7 +499,11 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
             if k in ('is', 'has', 'missing'):
                 v_low = v.lower().replace('-', '_')
                 is_neg = negated or (k == 'missing')
-                if k in ('has', 'missing') or v_low in ('cover', 'isbn', 'asin', 'desc', 'description', 'synopsis', 'author', 'notes', 'highlights', 'annotations', 'bookmark', 'bookmarks'):
+                if k in ('has', 'missing') or v_low in ('cover', 'isbn', 'asin', 'desc', 'description', 'synopsis', 'author', 'notes', 'highlights', 'annotations', 'bookmark', 'bookmarks', 'drm', 'encrypted'):
+                    if v_low in ('drm', 'encrypted'):
+                        parsed['status_flags'].append(('has_drm', is_neg))
+                        parsed['active_badges'].append({'raw': tok, 'label': 'No DRM' if is_neg else 'Has DRM / Encryption', 'kind': 'status'})
+                        continue
                     if v_low in ('cover', 'thumbnail', 'art'):
                         parsed['status_flags'].append(('has_cover', is_neg))
                         parsed['active_badges'].append({'raw': tok, 'label': 'Missing Cover' if is_neg else 'Has Cover', 'kind': 'meta'})
@@ -851,7 +855,7 @@ def perform_search(query_string, filters=None):
             }
             mapped_t = t_map.get(val.lower(), val.upper())
             if negated:
-                queryset = queryset.exclude(item_type__iexact=mapped_t)
+                queryset = queryset.exclude(item_type=mapped_t)
             else:
                 item_types.append(mapped_t)
         elif canon_field == 'format':
@@ -864,7 +868,8 @@ def perform_search(query_string, filters=None):
             q_cond = Q(title__icontains=val)
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'author':
-            q_cond = Q(authors__icontains=val)
+            from .models import build_author_q_filter
+            q_cond = build_author_q_filter(val)
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'publisher':
             q_cond = Q(publisher__icontains=val)
@@ -889,7 +894,7 @@ def perform_search(query_string, filters=None):
         elif canon_field == 'tag':
             try:
                 from .opds import get_enriched_tags_and_folders_index
-                tags_idx = get_enriched_tags_and_folders_index()
+                tags_idx = get_enriched_tags_and_folders_index(need_paths=True)
                 tag_to_titles = tags_idx.get('tag_to_titles') or {}
                 matched_titles: set = set()
                 val_low = val.lower()
@@ -982,8 +987,19 @@ def perform_search(query_string, filters=None):
             desc_cond = Q(description__isnull=False) & ~Q(description='')
             queryset = queryset.exclude(desc_cond) if negated else queryset.filter(desc_cond)
         elif flag == 'has_author':
-            unk_cond = Q(authors__isnull=True) | Q(authors='') | Q(authors__iexact='Unknown Author') | Q(authors__iexact='Unknown')
+            unk_cond = (
+                Q(authors__isnull=True)
+                | Q(authors='')
+                | Q(authors__in=['Unknown Author', 'unknown author', 'UNKNOWN AUTHOR', 'Unknown', 'unknown', 'UNKNOWN'])
+            )
             queryset = queryset.filter(unk_cond) if negated else queryset.exclude(unk_cond)
+        elif flag == 'has_drm':
+            drm_ids = list(
+                FileLocation.objects.filter(has_drm=True)
+                .order_by()
+                .values_list('catalog_item_id', flat=True)[:3500]
+            )
+            queryset = queryset.exclude(id__in=drm_ids) if negated else queryset.filter(id__in=drm_ids)
         elif flag in ('enriched', 'needs_review'):
             try:
                 from .opds import get_enriched_item_ids_index
@@ -1084,7 +1100,8 @@ def perform_search(query_string, filters=None):
         if (clean_q.isdigit() and len(clean_q) in (10, 13)) or (
             len(clean_q) == 10 and clean_q.upper().startswith('B0')
         ):
-            exact_qs = queryset.filter(Q(isbn__iexact=clean_q) | Q(asin__iexact=clean_q))
+            c_cands = list({clean_q, clean_q.upper(), clean_q.lower()})
+            exact_qs = queryset.filter(Q(isbn__in=c_cands) | Q(asin__in=c_cands))
             if exact_qs.exists():
                 return _ret(exact_qs)
 
@@ -1097,13 +1114,10 @@ def perform_search(query_string, filters=None):
             return _ret(queryset.filter(id__in=loc_item_ids).order_by('title'))
 
         for term in parsed['free_terms']:
-            queryset = queryset.filter(
-                Q(title__icontains=term)
-                | Q(authors__icontains=term)
-                | Q(isbn__icontains=term)
-                | Q(asin__icontains=term)
-                | Q(publisher__icontains=term)
-            )
+            q_term = Q(title__icontains=term) | Q(authors__icontains=term)
+            if any(ch.isdigit() for ch in term):
+                q_term |= Q(isbn__icontains=term) | Q(asin__icontains=term)
+            queryset = queryset.filter(q_term)
 
     # 6. Apply sort override from `sort:` keyword or relevance ranking
     sort_by = parsed['sort_override']

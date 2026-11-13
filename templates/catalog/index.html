@@ -243,9 +243,17 @@
                         <span><i class="fa-solid fa-hourglass-half" style="color:#c084fc;"></i> Needs Enriching</span>
                         <small id="sidebar-needs-enriching-count" style="color:#c084fc; font-weight:700;">{{ enrich_status_counts.needs_enriching|default:0|intcomma }}</small>
                     </a>
-                    <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books flagged In Review, Low Confidence Match, No Match, or Failed during enrichment">
+                    <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books flagged In Review ({{ strict_in_review_count|default:0|intcomma }} Review + {{ no_isbn_review_count|default:0|intcomma }} No ISBN)">
                         <span><i class="fa-solid fa-clipboard-question" style="color:#fbbf24;"></i> In Review</span>
                         <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{ enrich_status_counts.needs_review|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=removed_protection" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}#10b981{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.38){% else %}transparent{% endif %};" title="Books with 'nodrm' in the filename, sorted newest first">
+                        <span><i class="fa-solid fa-lock-open" style="color:#10b981;"></i> Removed Protection</span>
+                        <small id="sidebar-removed-protection-count" style="color:#10b981; font-weight:700;">{{ removed_protection_count|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=packt" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}#f97316{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}rgba(249,115,22,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}rgba(249,115,22,0.38){% else %}transparent{% endif %};" title="Books in Computer Mags &amp; FAQ/978 (978* ISBN computer books), sorted by most recent file modification date first">
+                        <span><i class="fa-solid fa-laptop-code" style="color:#f97316;"></i> Packt Books</span>
+                        <small id="sidebar-packt-books-count" style="color:#f97316; font-weight:700;">{{ packt_books_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=tomags" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.45){% else %}transparent{% endif %};" title="Files currently in /toMags (verifies files are still in /toMags on disk before listing; click to review, peek inside, or Undo &amp; Enrich as Book)">
                         <span><i class="fa-solid fa-newspaper" style="color:#38bdf8;"></i> Moved to toMags</span>
@@ -385,6 +393,10 @@
                     </span>
                 {% elif selected_shelf == 'recent_pub' %}
                     &mdash; <span style="color:#34d399; font-weight:600;"><i class="fa-solid fa-calendar-days"></i> Recently Published (Past 1 Year &mdash; Newest First)</span>
+                {% elif selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}
+                    &mdash; <span style="color:#10b981; font-weight:600;"><i class="fa-solid fa-lock-open"></i> Removed Protection (nodrm &mdash; Newest First)</span>
+                {% elif selected_shelf == 'packt' or selected_shelf == 'packt_books' %}
+                    &mdash; <span style="color:#f97316; font-weight:600;"><i class="fa-solid fa-laptop-code"></i> Packt Books (Computer Mags &amp; FAQ / 978 &mdash; Most Recent File Date First)</span>
                 {% elif selected_shelf == 'amazon' %}
                     &mdash; <span style="color:#fb923c; font-weight:600;"><i class="fa-brands fa-amazon"></i> Purchased on Amazon (Read in Kindle App)</span>
                 {% elif selected_shelf == 'kindle_plus' %}
@@ -575,7 +587,7 @@
                         <!-- Card Details -->
                         <div class="card-body">
                             <h2 class="card-title" title="{{ item.title }}">{{ item.title }}</h2>
-                            <p class="card-author" title="by {{ item.authors }}">
+                            <p class="card-author" title="by {{ item.author_list|join:', ' }}">
                                 by
                                 {% for author_name in item.author_list %}
                                     <a href="?author={{ author_name|urlencode }}&amp;sort=pubdate_desc" class="author-filter-link" title="Filter by author: {{ author_name }} (Sorted by Newest First)">{{ author_name }}</a>{% if not forloop.last %}, {% endif %}
@@ -635,7 +647,11 @@
                                                 <span class="file-format-tag">
                                                     {{ file.file_format }}
                                                     {% if file.has_drm %}
-                                                        <i class="fa-solid fa-lock" style="color: #fbbf24; font-size: 0.65rem; margin-left: 0.25rem;" title="DRM Protected"></i>
+                                                        {% if file.drm_lock_state == 'unlocked' %}
+                                                            <i class="fa-solid fa-lock-open" style="color: #38bdf8; font-size: 0.65rem; margin-left: 0.25rem;" title="Restrictions Only (Openable — has publisher permission restrictions or font obfuscation, but opens and reads normally)"></i>
+                                                        {% else %}
+                                                            <i class="fa-solid fa-lock" style="color: #fbbf24; font-size: 0.65rem; margin-left: 0.25rem;" title="DRM / Password Locked (Cannot open without password or DRM key)"></i>
+                                                        {% endif %}
                                                     {% endif %}
                                                     {% if file.is_invalid %}
                                                         <i class="fa-solid fa-triangle-exclamation" style="color: #ef4444; font-size: 0.65rem; margin-left: 0.25rem;" title="Corrupted / Invalid File"></i>
@@ -676,10 +692,10 @@
                                             data-is-enriched="{{ item.is_enriched|yesno:'true,false' }}"
                                             data-has-enrichable="{{ item.has_enrichable_file|yesno:'true,false' }}"
                                             data-title="{{ item.title }}"
-                                            data-authors="{{ item.authors }}"
+                                            data-authors="{{ item.author_list|join:', ' }}"
                                             data-desc="{{ item.description|default:'' }}"
                                             data-type="{{ item.item_type }}"
-                                            data-cover="{{ item.cover_thumbnail|default:item.cover_image_url|default:'' }}"
+                                            data-cover="{% if item.cover_thumbnail %}/mylibrary/opds/cover/{{ item.id }}.jpg{% else %}{{ item.cover_image_url|default:'' }}{% endif %}"
                                             data-publisher="{{ item.publisher|default:'' }}"
                                             data-pubdate="{{ item.pub_date|date:'Y-m-d'|default:'' }}"
                                             data-filedate="{{ item.file_date|date:'Y-m-d'|default:'' }}"
@@ -982,6 +998,9 @@
             
             <div class="modal-section-title">Physical & Digital Files</div>
             <ul id="modal-files-list" class="modal-files-list"></ul>
+
+            <div class="modal-section-title" style="margin-top:1.1rem;">Tags <span style="font-size:0.7rem; font-weight:500; color:#64748b; text-transform:none;">(Read-Only)</span></div>
+            <div id="modal-bottom-tags-list" style="display:flex; flex-wrap:wrap; gap:0.4rem; padding:0.55rem 0.75rem; background:rgba(15,23,42,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; min-height:2.2rem; align-items:center;"></div>
         </div>
     </div>
 </div>
@@ -1103,6 +1122,10 @@
                     <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Description / Synopsis</label>
                     <textarea id="er-input-desc" rows="2" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.8rem; resize:vertical;"></textarea>
                 </div>
+                <div style="grid-column:1 / -1;">
+                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Tags (Read-Only)</label>
+                    <div id="er-readonly-tags-box" style="display:flex; flex-wrap:wrap; gap:0.35rem; padding:0.42rem 0.6rem; background:rgba(15,23,42,0.65); border:1px solid rgba(255,255,255,0.1); border-radius:6px; min-height:2rem; align-items:center;"></div>
+                </div>
             </div>
         </div>
 
@@ -1151,17 +1174,18 @@
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.85rem; font-size:0.83rem; line-height:1.55;">
             <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
-                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">1. Web Catalog, Search Keywords, Virtual Shelves, Duplicates &amp; On-Demand Enrichment</strong>
+                <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">1. Web Catalog, Search Keywords, Virtual Shelves, Cover Intelligence &amp; On-Demand Enrichment</strong>
                 • <strong>Structured Search Keywords &amp; Operators:</strong> Combine free text with <code>author:</code>, <code>title:</code>, <code>cat:</code>, <code>tag:</code>, <code>pub:</code>, <code>isbn:</code>, <code>format:epub</code>, <code>year:2024..2026</code>, <code>is:enriched</code>, <code>is:unenriched</code>, <code>is:interesting</code>, <code>is:badmeta</code>, <code>missing:cover</code>, <code>-exclude</code>, and <code>sort:newest</code> (click <strong>Keywords Guide</strong> under the search bar for all operators).<br>
-                • <strong>Interactive Card &amp; Modal Actions:</strong> Click <strong>✨ Enrich Now</strong> (or <strong>✨ Enrich Page</strong> to batch-enrich the current page), <strong>☆ Interesting</strong> (bookmarks books to read/download next; auto-clears on download), <strong>⚑ Bad Metadata</strong>, <strong>📖 Peek Inside</strong> (inspect front-matter pages, detected ISBNs &amp; run <em>AI Re-Evaluate from Image(s)</em>), <strong>🖼 Find Cover</strong> (search Web Images, Goodreads, Apple Books, Google Books &amp; Open Library), or <strong>📰 toMag</strong> (moves periodicals to <code>/toMags</code>; review or undo on the <em>Moved to toMags</em> shelf).<br>
-                • <strong>Enriched Duplicates Manager (<code>/mylibrary/duplicates/</code>):</strong> Detects duplicate copies of the same format and verified content, automatically scoring the best copy to keep (best category folder above 3-letter folder, oldest file date, no <code>(#)</code> suffix) while protecting unfinished Moon+ Reader bookmarks.<br>
-                • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong>. Downloading any unenriched book automatically enriches it on the fly and migrates Moon+ WebDAV bookmarks (<code>.po</code> / <code>.an</code>).
+                • <strong>Virtual Bookshelves:</strong> Browse <em>Interesting Books</em>, <em>Bad Metadata</em>, <em>Bookmarked &amp; Reading</em> (with <code>100% Read</code>, <code>Unread &lt;100%</code>, <code>Reading 1–99%</code> pills), <em>Highlights &amp; Notes (.an)</em>, <em>Enriched Books</em>, <em>Missing / Text Cover</em>, <em>Enriched Duplicates</em>, <em>Needs Enriching</em>, <em>In Review</em>, <em>Removed Protection (nodrm)</em>, <em>Packt Books</em> (<code>Computer Mags &amp; FAQ/978</code> sorted by most recent file modification date first), <em>Moved to toMags</em>, <em>Recently Published (1 Yr)</em>, and <em>Amazon / Kindle+ / Audible</em> shelves.<br>
+                • <strong>Interactive Card &amp; Modal Actions:</strong> Click <strong>✨ Enrich Now</strong> (or <strong>✨ Enrich Page</strong> to batch-enrich the current page), <strong>☆ Interesting</strong> (bookmarks books to read/download next; auto-clears on download), <strong>⚑ Bad Metadata</strong>, <strong>📖 Peek Inside</strong> (inspect front-matter pages, detected ISBNs &amp; run <em>AI Re-Evaluate from Image(s)</em>), <strong>🖼 Find Cover</strong> (searches Web Images, Goodreads, Apple Books, Google Books &amp; Open Library; automatically prefers <strong>full-color covers</strong> over grayscale scans and auto-crops excessive white margins), or <strong>📰 toMag</strong>. Read-only <strong>Tags</strong> are displayed at the bottom of both the Book Details and Review modals.<br>
+                • <strong>Enriched Duplicates Manager (<code>/mylibrary/duplicates/</code>):</strong> Detects duplicate copies of the same format and verified content, automatically scoring the best copy to keep while protecting unfinished Moon+ Reader bookmarks.<br>
+                • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong> (includes <code>/mylibrary/opds/packt/</code> for Packt Books). Downloading any unenriched book automatically enriches it on the fly and migrates Moon+ WebDAV bookmarks (<code>.po</code> / <code>.an</code>).
             </div>
             <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(56,189,248,0.28); border-radius:8px; padding:0.75rem 0.9rem;">
                 <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">2. Chrome Extension — Book Sites, Amazon Wishlists &amp; Anna's Archive Checker (<code>chrome_wishlist_extension/</code>)</strong>
                 • <strong>Install in Chrome:</strong> Open <code>chrome://extensions/</code> &rarr; enable <strong>Developer mode</strong> &rarr; click <strong>Load unpacked</strong> &rarr; select <code>U:\MyLibrary\chrome_wishlist_extension</code>.<br>
-                • <strong>Amazon Wishlists (<em>Books (Kindle)</em>, <em>Print Books</em>):</strong> Automatically checks every wishlist book against MyLibrary (with automatic <code>/dp/&lt;ASIN&gt;</code> publication year, edition &amp; ISBN verification to prevent same-title false positives, plus a persistent <strong>✕ False Positive</strong> button), checks Anna's Archive by <strong>ISBN + Title</strong>, and supports <strong>Auto-Scroll</strong> &amp; <strong>Export CSV</strong>.<br>
-                • <strong>Book Product Pages (Amazon, Barnes &amp; Noble, Springer Link, Goodreads, O'Reilly, No Starch + Custom Sites):</strong> Adds an inline <strong>✅ In MyLibrary / ❌ Not in MyLibrary</strong> indicator next to the book title plus a unified panel below the cover with <strong>Open in Anna's Archive (ISBN)</strong>, <strong>Search in Anna's Archive (Title)</strong>, <strong>🔍 Check Anna's Live</strong>, and optional <strong>Open in Z-Library</strong>. Switch Anna's Archive mirrors (<code>.pk</code>, <code>.gl</code>, <code>.li</code>, <code>.se</code>, <code>.org</code>) or add new book sites with 1 click in the extension popup.
+                • <strong>Amazon Wishlists (<em>Books (Kindle)</em>, <em>Print Books</em>):</strong> Automatically checks every wishlist book against MyLibrary (with automatic <code>/dp/&lt;ASIN&gt;</code> publication year, edition &amp; ISBN verification to prevent same-title false positives, plus a persistent <strong>✕ False Positive</strong> button), highlights reduced-price items with a glowing <strong>🏷️ ON SALE</strong> banner &amp; <strong>🏷️ On Sale</strong> toolbar filter chip, checks Anna's Archive by <strong>ISBN + Title</strong>, and supports <strong>Auto-Scroll</strong> &amp; <strong>Export CSV</strong>.<br>
+                • <strong>Book Product Pages (Amazon, Barnes &amp; Noble, Simon &amp; Schuster, Springer Link, Goodreads, O'Reilly, No Starch + Custom Sites):</strong> Adds an inline <strong>✅ In MyLibrary / ❌ Not in MyLibrary</strong> indicator next to the book title plus a unified panel below the cover with <strong>Open in Anna's Archive (ISBN)</strong>, <strong>Search in Anna's Archive (Title)</strong>, <strong>🔍 Check Anna's Live</strong>, and optional <strong>Open in Z-Library</strong>. Switch Anna's Archive mirrors (<code>.pk</code>, <code>.gl</code>, <code>.li</code>, <code>.se</code>, <code>.org</code>) or add new book sites with 1 click in the extension popup.
             </div>
             <div style="grid-column:1 / -1; background:rgba(30,41,59,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:0.75rem 0.9rem;">
                 <strong style="color:#38bdf8; text-transform:uppercase; font-size:0.72rem; display:block; margin-bottom:0.3rem;">3. CLI (<code>mylibrary_cli.py</code>), Amazon Sync (<code>sync_amazon.py</code>) &amp; Calibre/Moon+ Sync</strong>
@@ -1195,9 +1219,10 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
                 POST /mylibrary/api/interesting/toggle/ (☆ Interesting)<br>
                 POST /mylibrary/api/bad-metadata/toggle/ (⚑ Bad Meta)<br>
                 GET|POST /mylibrary/api/cover-search/ (Find Cover)<br>
+                GET  /mylibrary/api/suggest/?repair_covers=start (Fix Borders)<br>
                 GET|POST /mylibrary/api/book-preview/ (Peek &amp; AI Vision)<br>
                 GET|POST /mylibrary/api/duplicates/ (Duplicates API)<br>
-                GET  /mylibrary/opds/?v=2 (OPDS 1.2 Root)<br>
+                GET  /mylibrary/opds/?v=2 &amp; /opds/packt/ (OPDS 1.2)<br>
                 GET  /mylibrary/api/status/ &amp; /api/catalog/
             </div>
         </div>
@@ -1206,5 +1231,5 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/search.js' %}?v=20261111a"></script>
+<script src="{% static 'js/search.js' %}?v=20261113c"></script>
 {% endblock %}

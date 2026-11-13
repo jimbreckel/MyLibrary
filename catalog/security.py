@@ -262,7 +262,14 @@ class ExternalAccessSecurityMiddleware:
 
         # Internal scanner sync endpoints already enforce Bearer SCANNER_API_TOKEN
         if '/api/sync/' in path:
-            return self.get_response(request)
+            try:
+                return self.get_response(request)
+            finally:
+                try:
+                    from django.db import reset_queries
+                    reset_queries()
+                except Exception:
+                    pass
 
         is_opds = '/opds' in path
         external = is_request_external(request)
@@ -294,5 +301,12 @@ class ExternalAccessSecurityMiddleware:
                 login_url = f"{script_prefix.rstrip('/')}/login/?next={request.get_full_path()}"
                 return HttpResponseRedirect(login_url)
 
-        return self.get_response(request)
+        try:
+            return self.get_response(request)
+        finally:
+            try:
+                from django.db import reset_queries
+                reset_queries()
+            except Exception:
+                pass
 

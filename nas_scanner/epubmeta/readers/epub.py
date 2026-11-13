@@ -364,24 +364,31 @@ class EpubReader(BaseReader):
                     href = item.get("href", "")
                     if not href:
                         continue
+                    is_img_item = "image" in media_type or href.lower().endswith(
+                        (".jpg", ".jpeg", ".png", ".webp", ".gif")
+                    )
+                    if not is_img_item:
+                        continue
                     if (
                         (cover_id and item_id == cover_id)
                         or "cover-image" in props
-                        or item_id.lower() in ("cover", "cover-image")
+                        or item_id.lower() in ("cover", "cover-image", "cover_img", "cover-img")
                     ):
                         primary_candidates.append(href)
-                    elif "image" in media_type and "cover" in href.lower():
+                    elif "cover" in href.lower() or "cover" in item_id.lower():
                         fallback_candidates.append(href)
 
-                candidates = primary_candidates if primary_candidates else fallback_candidates
+                candidates = primary_candidates + [c for c in fallback_candidates if c not in primary_candidates]
 
                 for raw_href in candidates:
                     rel_path = unquote(raw_href)
                     full_href = os.path.normpath(os.path.join(opf_dir, rel_path)).replace("\\", "/") if opf_dir else rel_path
                     for cand_path in (full_href, full_href.lstrip("/"), rel_path):
                         if cand_path in namelist:
-                            images.append(_read_zip_member_lenient(z, cand_path))
-                            break
+                            img_data = _read_zip_member_lenient(z, cand_path)
+                            if img_data and len(img_data) >= 1000:
+                                images.append(img_data)
+                                break
                     if len(images) >= max_pages:
                         break
             except Exception:

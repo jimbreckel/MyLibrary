@@ -26,8 +26,10 @@ Access the main catalog at **`http://192.168.1.43:8080/mylibrary/`**.
   - Click **`✨ Enrich Now`** on any book card or inside **View Details** (or **`✨ Enrich File`** on a specific file location) to immediately run `epubmeta` on the physical `.epub` / `.pdf` file on the NAS, rewrite its embedded OPF metadata, and update its cover, ISBN, author, and synopsis in `BookDB`.
   - Check **"Enrich search results on demand"** beneath the search bar (or append `+enrich` to your search query) to automatically enrich top unenriched search results right as you search!
 - **Instant Autocomplete**: Typing 2+ characters displays matching title and author suggestions.
-- **Virtual Bookshelves & Faceted Filters**: Browse `Bookmarked & Reading in Moon+`, `Highlights & Notes (.an)`, `Enriched EPUBs`, `Purchased on Amazon`, `Kindle+`, `Amazon Bookmarked`, `Purchased on Audible`, `Amazon Only (Not on NAS)`, and `Matched to NAS Books`, or filter by **Catalog Type**, **File Format**, **Enriched Tags**, and **Enriched Collections**.
-- **Book Details Modal**: Click any card to view its cover art, synopsis, publisher, publication date, ISBN/ASIN, Amazon ownership/bookmark banner, and all physical file copies on the NAS (with **Download**, **Enrich File**, and **Add to Calibre** buttons).
+- **Virtual Bookshelves & Faceted Filters**: Browse `Interesting Books`, `Bad Metadata`, `Bookmarked & Reading in Moon+` (with `100% Read`, `Unread <100%`, and `Reading 1–99%` progress pills), `Highlights & Notes (.an)`, `Enriched Books`, `Missing / Text Cover`, `Enriched Duplicates`, `Needs Enriching`, `In Review`, `Removed Protection (nodrm)`, **`Packt Books`** (`Computer Mags & FAQ/978`, sorted by most recent file modification date first), `Moved to toMags`, `Recently Published (1 Yr)`, `Purchased on Amazon`, `Kindle+`, `Amazon Bookmarked`, `Purchased on Audible`, `Amazon Only (Not on NAS)`, and `Matched to NAS Books`, or filter by **Catalog Type**, **File Format**, **Enriched Tags**, and **Enriched Collections**.
+- **Book Details Modal & Cover Intelligence**:
+  - Click any card to view its cover art, synopsis, publisher, publication date, file date, ISBN/ASIN, Amazon ownership/bookmark banner, physical file copies on the NAS (with **Download**, **Enrich File**, and **Add to Calibre** buttons), and a read-only **Tags** list at the bottom of the modal.
+  - **Automatic White-Border Cropping & Color Cover Preference**: Automatically trims excessive white/light margins around PDF, EPUB, and web covers (with background batch repair via `/mylibrary/api/suggest/?repair_covers=start`), and prioritizes **full-color covers** over grayscale scans during Web Cover Search (`🖼 Find Cover`) and `epubmeta` enrichment.
 
 ---
 
@@ -189,6 +191,10 @@ MyLibrary includes a built-in **OPDS 1.2 Content Server** and **Calibre Content 
 ### A. OPDS Endpoints
 
 - **Root Catalog (Add this URL in Moon+ Reader):** `http://192.168.1.43:8080/mylibrary/opds/`
+- **Interesting Books Shelf:** `http://192.168.1.43:8080/mylibrary/opds/interesting/`
+- **Flagged: Bad Metadata Shelf:** `http://192.168.1.43:8080/mylibrary/opds/bad-metadata/`
+- **Bookmarked & Reading in Moon+ Shelf:** `http://192.168.1.43:8080/mylibrary/opds/bookmarked/`
+- **Packt Books Shelf (`Computer Mags & FAQ / 978` — Most Recent File Date First):** `http://192.168.1.43:8080/mylibrary/opds/packt/`
 - **Enriched EPUBs Shelf (`epubmeta` Verified):** `http://192.168.1.43:8080/mylibrary/opds/enriched/`
 - **Recently Updated & Enriched Books:** `http://192.168.1.43:8080/mylibrary/opds/recent/`
 - **Browse by Author (A–Z):** `http://192.168.1.43:8080/mylibrary/opds/authors/`
@@ -325,9 +331,10 @@ The companion Chrome Extension ([`chrome_wishlist_extension/`](file:///c:/Users/
 
 - **Amazon Wishlists (`Books (Kindle)`, `Print Books`, etc.)**:
   - Automatically checks every wishlist book against MyLibrary (`POST /mylibrary/api/wishlist/check/`).
+  - **Sale & Reduced-Price Highlighting (`🏷️ ON SALE`)**: Automatically detects price drops (`Price dropped X%`), strikethrough list prices, savings badges, and deals on wishlist rows, highlighting the row in emerald/amber with a **`🏷️ ON SALE`** banner and adding a **`🏷️ On Sale`** filter chip in the sticky top toolbar.
   - Performs automatic `/dp/<ASIN>` verification for title-only matches to extract the true **Publication Year**, **Edition**, **Subtitle**, and **Print ISBN-13/10** so newer editions with the same title as an older book in your library are never falsely marked as owned.
-  - Includes a **`✕ False Positive`** button (with **`↩ Undo`**), filter chips (`Scanned`, `✅ In MyLibrary`, `❌ Not in Library`, `🔎 On Anna's Archive`), **`⏬ Auto-Scroll Entire Wishlist`**, **`📚 Check Anna's Archive (Missing)`** (by ISBN + Title), and **`📥 Export CSV`**.
-- **Book Product Pages (Amazon, Barnes & Noble, Springer Link, Goodreads, O'Reilly, No Starch Press + Custom Sites)**:
+  - Includes a **`✕ False Positive`** button (with **`↩ Undo`**), filter chips (`Scanned`, `✅ In MyLibrary`, `❌ Not in Library`, `🏷️ On Sale`, `🔎 On Anna's Archive`), **`⏬ Auto-Scroll Entire Wishlist`**, **`📚 Check Anna's Archive (Missing)`** (by ISBN + Title), and **`📥 Export CSV`**.
+- **Book Product Pages (Amazon, Barnes & Noble, Simon & Schuster, Springer Link, Goodreads, O'Reilly, No Starch Press + Custom Sites)**:
   - Adds an inline **`✅ In MyLibrary` / `❌ Not in MyLibrary`** pill next to the book's `<h1>` title.
   - Inserts a unified action widget below the book cover with:
     - Live MyLibrary status, match details, and direct **[Download EPUB/PDF]** links

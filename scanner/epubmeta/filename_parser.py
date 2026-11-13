@@ -24,13 +24,57 @@ JUNK_SUFFIXES = [
 ]
 
 
+# Internal DTP / Acrobat / Word production artifact titles (InDesign, Quark, PageMaker, FrameMaker, Word)
+_GARBAGE_EMBEDDED_TITLE_RE = re.compile(
+    r"^(?:"
+    r"untitled\b|"
+    r".*\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|doc|docx|pdf|ps|eps|dvi|tex|rtf|tmp)$|"
+    r"\d{2,4}[_\-\s].*(?:ffirs|ftoc|fbetw|flast|fpref|c01|ch01|cover|front|final|title)|"
+    r"0\d\s+cover\b|"
+    r"cover\s+final|"
+    r"\d{3}_[A-Za-z0-9_]+$|"
+    r"microsoft\s+word\s*-|"
+    r"slide\s+\d+$"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_garbage_embedded_title(raw_title: Optional[str]) -> bool:
+    """Return True if `raw_title` is an internal InDesign/Quark/Word production slug rather than a book title."""
+    if not raw_title:
+        return True
+    s = str(raw_title).strip()
+    if len(s) < 2:
+        return True
+    return bool(_GARBAGE_EMBEDDED_TITLE_RE.search(s))
+
+
+def is_garbage_embedded_author(raw_author: Optional[str]) -> bool:
+    """Return True if `raw_author` is an internal OS/DTP username (`fk`, `ncargill`, `jturner`, `admin`) rather than a book author."""
+    if not raw_author:
+        return True
+    s = str(raw_author).strip()
+    low = s.lower()
+    if low in (
+        "", "unknown", "unknown author", "..", ".", "admin", "administrator",
+        "user", "owner", "default", "root", "guest", "author", "yyepg", "asura01",
+        "fk", "jess", "bartdevries", "ncargill", "jturner", "ldilk",
+    ):
+        return True
+    # Single lowercase token with no spaces (e.g. 'fk', 'ncargill', 'jturner', 'ldilk', 'jsmith1')
+    if " " not in s and re.match(r"^[a-z][a-z0-9_.-]{0,14}$", s):
+        return True
+    return False
+
+
 def clean_book_title(raw_title: Optional[str]) -> Optional[str]:
     """Strip release suffixes (_nodrm, nodrm, etc.) and normalize underscores in a book title."""
     if not raw_title:
         return None
     cleaned = raw_title.strip()
-    # Ignore internal Quark/InDesign/Acrobat production codes like '000_ITWK_MicrosoftIFC_13Feb06'
-    if re.match(r"^\d{3}_[A-Za-z0-9_]+$", cleaned):
+    # Ignore internal Quark/InDesign/Acrobat production codes like '000_ITWK_MicrosoftIFC_13Feb06' or '01 Cover FINAL.indd'
+    if is_garbage_embedded_title(cleaned):
         return None
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
@@ -58,18 +102,27 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     isbns = extract_isbns_from_text(stem)
     found_isbn = isbns[0][0] if isbns else None
 
-    # 2. Strip junk suffixes
+    # 2. Strip junk suffixes and trailing (Publisher, Year) WW release tags before splitting
     cleaned = stem
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
     if "." in cleaned and " " not in cleaned and cleaned.count(".") >= 2:
         cleaned = cleaned.replace(".", " ").strip()
 
-    # 3. Detect Anna's Archive "Title -- Author -- Publisher, Year -- ISBN -- MD5" or "Author(s) - Title" pattern
     author_candidate = None
     title_candidate = None
     pub_year_candidate = None
+    had_trailing_pub_paren = False
 
+    m_pub_tail = re.search(r"\s*\((?:[^)]*?\b(19\d{2}|20\d{2})\b[^)]*)\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$", cleaned, re.I)
+    if m_pub_tail:
+        pub_year_candidate = m_pub_tail.group(1)
+        had_trailing_pub_paren = True
+        cleaned = cleaned[:m_pub_tail.start()].strip()
+    else:
+        cleaned = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$", "", cleaned).strip()
+
+    # 3. Detect Anna's Archive "Title -- Author -- Publisher, Year -- ISBN -- MD5" or "Author(s) - Title" pattern
     if " -- " in cleaned:
         aa_parts = [p.strip() for p in cleaned.split(" -- ") if p.strip()]
         if aa_parts:
@@ -82,12 +135,37 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
                 pub_year_candidate = m_yr.group(1)
                 break
     elif " - " in cleaned:
-        parts = cleaned.split(" - ", 1)
-        author_candidate = parts[0].strip()
-        title_candidate = parts[1].strip()
-    elif "-" in cleaned:
-        # Avoid splitting inside hyphenated words if only one hyphen
-        # e.g., "Dunne, J. W.-An Experiment with Time"
+        parts = cleaned.split(" - ")
+        first_seg = parts[0].strip()
+        last_seg = parts[-1].strip()
+        first_looks_like_title = bool(
+            re.search(
+                r"\b(?:demystified|handbook|guide|manual|introduction|principles|programming|engineering|encyclopedia|dictionary|edition|ed\.|design|management|networks|systems|analysis|fundamentals|reference|complete|bible|secrets|for\s+dummies)\b",
+                first_seg,
+                re.I,
+            )
+        )
+        last_looks_like_author = bool(
+            last_seg
+            and (
+                re.match(
+                    r"^(?:[A-Z]\.\s*[A-Za-z\-]+|[A-Za-z]+,\s*[A-Z]\.?|[A-Z][a-z]+\s+[A-Z][a-z\-]+)(?:,\s*(?:[A-Z]\.\s*[A-Za-z\-]+|[A-Z][a-z]+\s+[A-Z][a-z\-]+))*$",
+                    last_seg,
+                )
+                or (had_trailing_pub_paren and len(last_seg.split()) <= 3)
+            )
+        )
+        if last_looks_like_author and (had_trailing_pub_paren or first_looks_like_title):
+            author_candidate = last_seg
+            title_candidate = ": ".join(p.strip() for p in parts[:-1] if p.strip())
+        elif first_looks_like_title:
+            title_candidate = f"{first_seg}: {' - '.join(parts[1:]).strip()}"
+            author_candidate = None
+        else:
+            author_candidate = first_seg
+            title_candidate = " - ".join(parts[1:]).strip()
+    elif "-" in cleaned and "(" not in cleaned and "," in cleaned.split("-", 1)[0]:
+        # Only split on a tight hyphen when the left side is "Last, First-Title" (e.g., "Dunne, J. W.-An Experiment with Time")
         parts = cleaned.split("-", 1)
         if len(parts) == 2:
             author_candidate = parts[0].strip()
@@ -99,8 +177,10 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     else:
         title_candidate = cleaned
 
-    # Clean title candidate: replace underscore separators often used for colons
+    # Clean title candidate: replace underscore separators often used for colons and strip trailing (Publisher, Year) WW tags
     if title_candidate:
+        title_candidate = re.sub(r"\s*\([^)]*?\b(?:19\d{2}|20\d{2})\b[^)]*\)\s*(?:WW|YYePG|BLG|TLRG)?$", "", title_candidate, flags=re.I).strip()
+        title_candidate = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG)$", "", title_candidate).strip()
         # e.g. "Unabridged_ The Thrill of..." -> "Unabridged: The Thrill of..."
         title_candidate = re.sub(r"_\s+", ": ", title_candidate)
         title_candidate = re.sub(r"\s*_\s*", " ", title_candidate)

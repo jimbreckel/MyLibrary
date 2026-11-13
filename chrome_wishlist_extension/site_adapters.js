@@ -364,23 +364,28 @@
     },
 
     // =========================================================================
-    // 3. Springer Link Book Pages (combines UserScript: Springer Books to Z-Library & Anna's Archive)
+    // 3. Springer Link Book & Chapter Pages (combines UserScript: Springer Books to Z-Library & Anna's Archive)
     // =========================================================================
     {
       id: 'springer_link',
       name: 'Springer Books',
-      hostRegex: /^link\.springer\.com$/i,
-      pathRegex: /^\/book\//i,
+      hostRegex: /^(?:link\.)?springer\.com$/i,
+      pathRegex: /^\/(?:book|referencework|referenceworkentry|chapter)\//i,
       imageAnchorSelectors: [
         '#pdpMainImage',
         '#overview',
         'div[data-test="book-cover"]',
         '.c-book-cover',
-        '.app-article-masthead--book__info'
+        '.app-article-masthead--book__info',
+        '.c-article-header',
+        'h1.c-article-title',
+        'h1'
       ],
       titleSelectors: [
+        'meta[name="citation_inbook_title"]',
         'div.app-article-masthead--book__info > h1',
         'h1[data-test="book-title"]',
+        '.c-chapter-book-details__title a',
         '.c-article-title',
         'meta[name="citation_title"]',
         'h1'
@@ -392,7 +397,7 @@
         '.c-article-author-list a'
       ],
       getIsbn(doc, url) {
-        // 1. UserScript exact method: last segment of pathname (e.g. /book/10.1007/978-3-031-12345-6)
+        // 1. UserScript exact method: last segment of pathname (e.g. /book/10.1007/978-3-031-12345-6 or /chapter/10.1007/978-3-031-12345-6_1)
         const parts = url.pathname.split('/').filter(Boolean);
         const lastPart = parts[parts.length - 1] || '';
         const mPath = lastPart.match(/(97[89][0-9\-]{10,14})/);
@@ -416,13 +421,13 @@
         return { raw: '', digits: '' };
       },
       getPubYear(doc) {
-        const copyrightEl = doc.querySelector('meta[name="citation_publication_date"], meta[name="dc.date"]');
+        const copyrightEl = doc.querySelector('meta[name="citation_publication_date"], meta[name="citation_online_date"], meta[name="dc.date"]');
         if (copyrightEl && copyrightEl.getAttribute('content')) {
-          const ym = copyrightEl.getAttribute('content').match(/\b(19[7-9]\d|20[0-2]\d)\b/);
+          const ym = copyrightEl.getAttribute('content').match(/\b(19[0-9]{2}|20[0-3]\d)\b/);
           if (ym) return parseInt(ym[1], 10);
         }
         const bibText = (doc.querySelector('.c-bibliographic-information, .app-article-masthead--book__info') || doc.body).textContent || '';
-        const ym2 = bibText.match(/©\s*(19[7-9]\d|20[0-2]\d)|\b(20[0-2]\d)\b/);
+        const ym2 = bibText.match(/©\s*(19[0-9]{2}|20[0-3]\d)|\b(19[5-9]\d|20[0-3]\d)\b/);
         if (ym2) return parseInt(ym2[1] || ym2[2], 10);
         return null;
       },
@@ -822,6 +827,132 @@
         }
         return null;
       }
+    },
+
+    // =========================================================================
+    // 10. Simon & Schuster (simonandschuster.com/books/<Title>/<Author>/<ISBN13>)
+    // =========================================================================
+    {
+      id: 'simon_and_schuster',
+      name: 'Simon & Schuster',
+      hostRegex: /(^|\.)simonandschuster\.(com|co\.uk|ca|com\.au|co\.in)$/i,
+      pathRegex: /^\/books\/[^/]+/i,
+      imageAnchorSelectors: [
+        '.book-cover',
+        '.book-image',
+        '.book-jacket',
+        '.primary-image',
+        'img[src*="d28hgpri8am2if.cloudfront.net"]',
+        'img[src*="simonandschuster"]',
+        '.book-details',
+        '.book-info',
+        'h1'
+      ],
+      titleSelectors: [
+        'h1.book-title',
+        '.book-details h1',
+        'h1[itemprop="name"]',
+        'h1'
+      ],
+      authorSelectors: [
+        '.book-author a',
+        '.book-authors a',
+        '.author-name a',
+        'a[href*="/authors/"]',
+        '[itemprop="author"]'
+      ],
+      getTitle(doc, url) {
+        // 1. Check JSON-LD Book/Product name
+        const ldScripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ldScripts) {
+          try {
+            const parsed = JSON.parse(s.textContent || '{}');
+            const items = Array.isArray(parsed) ? parsed : (parsed['@graph'] || [parsed]);
+            for (const item of items) {
+              if (item && item.name && /book|product/i.test(String(item['@type'] || ''))) {
+                return String(item.name).replace(/\s+/g, ' ').trim();
+              }
+            }
+          } catch (_) {}
+        }
+        // 2. Check H1
+        const h1 = firstElementBySelectors(doc, ['h1.book-title', '.book-details h1', 'h1[itemprop="name"]', 'h1']);
+        if (h1 && h1.textContent && h1.textContent.trim()) {
+          return h1.textContent.replace(/\s+/g, ' ').trim();
+        }
+        // 3. Check og:title ("The Death of Mrs. Westaway | Book by Ruth Ware | Official Publisher Page | Simon & Schuster")
+        const ogTitle = doc.querySelector('meta[property="og:title"]');
+        if (ogTitle && ogTitle.getAttribute('content')) {
+          const t = ogTitle.getAttribute('content').split(/\s*\|\s*/)[0].trim();
+          if (t) return t;
+        }
+        // 4. Fallback to URL slug (/books/The-Death-of-Mrs-Westaway/Ruth-Ware/9781501156229)
+        const parts = (url.pathname || '').split('/').filter(Boolean);
+        if (parts[0] && parts[0].toLowerCase() === 'books' && parts[1]) {
+          return decodeURIComponent(parts[1]).replace(/-/g, ' ').trim();
+        }
+        return '';
+      },
+      getAuthor(doc, url) {
+        // 1. JSON-LD or citation/meta tags
+        const ldAuthor = extractAuthorFromMetaOrJsonLd(doc);
+        if (ldAuthor) return ldAuthor;
+        // 2. Check og:title or document.title for "Book by <Author> |"
+        const ogTitle = (doc.querySelector('meta[property="og:title"]') && doc.querySelector('meta[property="og:title"]').getAttribute('content')) || doc.title || '';
+        const mBy = ogTitle.match(/\bBook\s+by\s+([^|]+?)(?:\s*\||$)/i);
+        if (mBy && mBy[1]) {
+          return cleanExtractedAuthor(mBy[1]);
+        }
+        // 3. Check DOM author links
+        const domAuth = firstTextBySelectors(doc, [
+          '.book-author a',
+          '.book-authors a',
+          '.author-name a',
+          '[itemprop="author"]',
+          'main a[href*="/authors/"]'
+        ]);
+        if (domAuth) return cleanExtractedAuthor(domAuth);
+        // 4. Fallback to URL slug (/books/<Title>/<Author>/<ISBN13>)
+        const parts = (url.pathname || '').split('/').filter(Boolean);
+        if (parts.length >= 4 && parts[0].toLowerCase() === 'books') {
+          const authorSlug = parts[2];
+          if (authorSlug && !/^97[89]\d{10}$/.test(authorSlug)) {
+            return decodeURIComponent(authorSlug).replace(/-/g, ' ').trim();
+          }
+        }
+        return '';
+      },
+      getIsbn(doc, url) {
+        // 1. Extract directly from URL path (/books/<Title>/<Author>/9781501156229)
+        const mUrl = (url.pathname || '').match(/\/(97[89][0-9\-]{10,14}|\d{9}[0-9Xx])(?:[/?#]|$)/i);
+        if (mUrl) {
+          const norm = normalizeIsbn13(mUrl[1]);
+          if (norm.digits) return norm;
+        }
+        // 2. Meta tags / JSON-LD
+        const metaIsbn = extractIsbnFromMetaOrJsonLd(doc);
+        if (metaIsbn.digits) return metaIsbn;
+        // 3. Product details section text
+        const bodyTxt = (doc.body && doc.body.textContent) || '';
+        const mTxt = bodyTxt.match(/(?:eBook\s+ISBN|ISBN(?:-13)?)\s*[:\s]*?(97[89][0-9\-]{10,14})/i);
+        if (mTxt) return normalizeIsbn13(mTxt[1]);
+        return { raw: '', digits: '' };
+      },
+      getPubYear(doc) {
+        const ldScripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ldScripts) {
+          const m = (s.textContent || '').match(/"(?:datePublished|releaseDate)"\s*:\s*"(19[0-9]{2}|20[0-3]\d)/i);
+          if (m) return parseInt(m[1], 10);
+        }
+        const metaDate = doc.querySelector('meta[property="books:release_date"], meta[name="publication_date"]');
+        if (metaDate && metaDate.getAttribute('content')) {
+          const ym = metaDate.getAttribute('content').match(/\b(19[0-9]{2}|20[0-3]\d)\b/);
+          if (ym) return parseInt(ym[1], 10);
+        }
+        const bodyTxt = (doc.querySelector('.book-details, .product-details, main') || doc.body).textContent || '';
+        const mPub = bodyTxt.match(/(?:Published|Publication\s+Date|Release\s+Date|On\s+Sale)\s*:?\s*[^\n\r]{0,30}?\b(19[5-9]\d|20[0-3]\d)\b/i);
+        return mPub ? parseInt(mPub[1], 10) : null;
+      }
     }
   ];
 
@@ -1183,6 +1314,150 @@
           pub_year: null,
           cardEl: item,
           mountEl: item
+        });
+      });
+    }
+
+    // 6. Springer Link Search & Series Cards (link.springer.com/search?source=new-es&..., /search, /series/...)
+    if (/^(?:link\.)?springer\.com$/i.test(host) && !/^\/(?:book|referencework|referenceworkentry|chapter|article)\//i.test(url.pathname || '')) {
+      let items = Array.from(
+        doc.querySelectorAll(
+          'li[data-test="search-result-item"], [data-test="results-list"] > li, ol#results-list > li, li.app-card-open, div.app-card-open, li.c-card-open, div.c-card-open, article.app-card-open, article.c-card-open'
+        )
+      );
+      if (items.length === 0) {
+        items = Array.from(doc.querySelectorAll('main ol > li, main ul > li, ol.u-list-reset > li')).filter((li) =>
+          Boolean(li.querySelector('h2 a[href], h3 a[href], a[href*="/book/"], a[href*="/chapter/"], a[href*="/referencework"]'))
+        );
+      }
+      // Deduplicate nested matches (e.g. if an <li> contains a <div class="app-card-open">)
+      const uniqueItems = items.filter((el) => !items.some((other) => other !== el && other.contains(el)));
+
+      uniqueItems.forEach((item, idx) => {
+        const headingLink = item.querySelector(
+          '.app-card-open__heading a[href], .c-card-open__heading a[href], [data-test="search-result-title"] a[href], h2 a[href], h3 a[href], a.title[href]'
+        );
+        const headingEl =
+          headingLink ||
+          item.querySelector('.app-card-open__heading, .c-card-open__heading, [data-test="search-result-title"], h2, h3');
+        if (!headingEl) return;
+
+        const headingTitle = (headingEl.textContent || '').replace(/\s+/g, ' ').trim();
+        const primaryHref = (headingLink && headingLink.getAttribute('href')) || '';
+
+        // Check if this card is a Book Chapter / Reference Work Entry that also links to its parent Book
+        const parentBookLink = item.querySelector('a[href*="/book/"], a[href*="/referencework/"]');
+        const parentBookHref = (parentBookLink && parentBookLink.getAttribute('href')) || '';
+        const parentBookTitle =
+          parentBookLink && parentBookLink !== headingLink
+            ? (parentBookLink.textContent || '').replace(/\s+/g, ' ').trim()
+            : '';
+
+        // Extract ISBN-13 (preserving hyphenated raw form if available) from book/chapter DOI link, cover image URL, or card text
+        const coverImg = item.querySelector('img[src*="978"], img[src*="979"], img[data-src*="978"], img[data-src*="979"]');
+        const imgSrc = (coverImg && (coverImg.getAttribute('src') || coverImg.getAttribute('data-src'))) || '';
+        const candidateIsbnSource = `${parentBookHref} ${primaryHref} ${imgSrc} ${item.innerText || ''}`;
+        const mIsbn = candidateIsbnSource.match(/(97[89]-[0-9\-]{10,14}|97[89][0-9]{10})/);
+        const isbnRaw = mIsbn ? mIsbn[1].replace(/_.*$/, '') : '';
+        const isbnDigits = isbnRaw ? isbnRaw.replace(/[^0-9]/g, '') : '';
+
+        // For chapters with a known parent book title, prefer the parent book title for library lookup
+        const isChapterOrEntry = /\/(?:chapter|referenceworkentry)\//i.test(primaryHref);
+        const title = (isChapterOrEntry && parentBookTitle) ? parentBookTitle : headingTitle;
+        if (!title && !isbnDigits) return;
+
+        // Extract authors/editors cleanly
+        let author = '';
+        const authorContainer = item.querySelector(
+          '.app-card-open__authors, .c-card-open__authors, .c-author-list, [data-test="authors"], [data-test="author-text"], .authors'
+        );
+        if (authorContainer) {
+          const authorNodes = Array.from(authorContainer.querySelectorAll('li, a, span[itemprop="name"]'));
+          if (authorNodes.length > 0) {
+            const names = authorNodes
+              .map((n) => cleanExtractedAuthor((n.textContent || '').replace(/,\s*$/, '')))
+              .filter((n) => n && !/^and$/i.test(n) && !/^\+\d+$/i.test(n));
+            if (names.length > 0) {
+              author = Array.from(new Set(names)).join(', ');
+            }
+          }
+          if (!author) {
+            author = cleanExtractedAuthor(authorContainer.textContent);
+          }
+        }
+
+        // Extract publication year (supports 1900–2039 for classic & modern Springer publications)
+        const metaEl = item.querySelector(
+          '[data-test="published-on"], [data-test="publication-date"], .app-card-open__meta, .c-card-open__meta, .c-meta, .enumeration'
+        );
+        const metaTxt = (metaEl && metaEl.textContent) || '';
+        const ym = metaTxt.match(/\b(19[0-9]{2}|20[0-3][0-9])\b/);
+        const pub_year = ym ? parseInt(ym[1], 10) : null;
+
+        const mountEl =
+          item.querySelector('.app-card-open__main, .c-card-open__main, .app-card-open__meta, .c-card-open__meta') ||
+          item;
+
+        cards.push({
+          key: `springer_card_${isbnDigits || idx}_${(headingTitle || title).slice(0, 28)}`,
+          siteName: 'Springer',
+          isbnRaw,
+          isbnDigits,
+          title,
+          chapterTitle: (isChapterOrEntry && parentBookTitle && headingTitle !== parentBookTitle) ? headingTitle : '',
+          author,
+          edition: '',
+          pub_year,
+          cardEl: item,
+          mountEl
+        });
+      });
+    }
+
+    // 7. Simon & Schuster Search, eBook Deals, Author & Series Cards
+    if (/(^|\.)simonandschuster\.(com|co\.uk|ca|com\.au|co\.in)$/i.test(host) && !/^\/books\/[^/]+/i.test(url.pathname || '')) {
+      const bookLinks = Array.from(doc.querySelectorAll('a[href*="/books/"]'));
+      const seenCardEls = new Set();
+
+      bookLinks.forEach((linkEl, idx) => {
+        const href = linkEl.getAttribute('href') || '';
+        const mHref = href.match(/\/books\/([^/?#]+)(?:\/([^/?#]+))?(?:\/([^/?#]+))?\/(97[89][0-9\-]{10,14}|\d{9}[0-9Xx])(?:[/?#]|$)/i);
+        if (!mHref) return;
+
+        const cardEl =
+          linkEl.closest('.book-item, .book-card, .product-card, .search-result-item, article, li') ||
+          linkEl.parentElement;
+        if (!cardEl || seenCardEls.has(cardEl)) return;
+        seenCardEls.add(cardEl);
+
+        const slugTitle = decodeURIComponent(mHref[1] || '').replace(/-/g, ' ').trim();
+        const slugPart2 = decodeURIComponent(mHref[2] || '').replace(/-/g, ' ').trim();
+        const isbnObj = normalizeIsbn13(mHref[4]);
+
+        const titleEl = cardEl.querySelector('.book-title, .title, h2, h3, h4');
+        const imgEl = cardEl.querySelector('img[alt]');
+        const title =
+          (titleEl && titleEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          (imgEl && (imgEl.getAttribute('alt') || '').replace(/\s+/g, ' ').trim()) ||
+          slugTitle;
+        if (!title && !isbnObj.digits) return;
+
+        const authorEl = cardEl.querySelector('.book-author, .author, a[href*="/authors/"]');
+        const author =
+          (authorEl && cleanExtractedAuthor(authorEl.textContent)) ||
+          (slugPart2 && !/^97[89]\d{10}$/.test(slugPart2) ? slugPart2 : '');
+
+        cards.push({
+          key: `sands_card_${isbnObj.digits || idx}_${title.slice(0, 24)}`,
+          siteName: 'Simon & Schuster',
+          isbnRaw: isbnObj.raw,
+          isbnDigits: isbnObj.digits,
+          title,
+          author,
+          edition: '',
+          pub_year: null,
+          cardEl,
+          mountEl: cardEl
         });
       });
     }

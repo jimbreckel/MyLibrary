@@ -14,7 +14,7 @@ from django.db.models import Count, Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
-from .models import CatalogItem, FileLocation
+from .models import CatalogItem, FileLocation, build_author_q_filter, format_normalized_authors_str
 from .pg_scanner_db import connect_scanner_db, is_postgres_scanner_enabled
 from .search import (
     SEARCH_KEYWORDS_SPEC,
@@ -81,6 +81,214 @@ def _get_cached_dashboard_meta() -> tuple[dict, list[str]]:
         return _MAIN_DASHBOARD_CACHE['stats'], _MAIN_DASHBOARD_CACHE['available_formats']
 
     return _rebuild_dashboard_meta_cache()
+
+
+_SCANNER_CYCLE_CACHE: dict = {
+    'expires_at': 0.0,
+    'metrics': None,
+}
+
+
+def _get_scanner_cycle_header_disk_paths() -> list[Path]:
+    paths: list[Path] = []
+    for d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if d.exists() and d.is_dir():
+                paths.append(d / '.scanner_cycle_header.json')
+                break
+        except Exception:
+            continue
+    paths.append(Path('/tmp/mylibrary_scanner_cycle_header.json'))
+    return paths
+
+
+def _get_scanner_cycle_metrics(
+    fallback_total_files: int = 0,
+    fallback_complete_bookdb: int = 0,
+    fallback_total_processed: int = 0,
+    is_scanning: bool = False,
+) -> dict:
+    """
+    Parse and persist the enrichment queue metrics from `scanner.log` so that:
+    1. `eligible_to_enrich_initial` and `skipped_complete_bookdb` are persisted to
+       `.scanner_cycle_header.json` and never vanish when `scanner.log` grows past 512 KB.
+    2. Both the Status Dashboard (`Remaining to Enrich`) and Catalog Sidebar (`Needs Enriching`)
+       share the exact same live `remaining_to_enrich` count.
+    """
+    import time as _time
+    now_m = _time.monotonic()
+    if _SCANNER_CYCLE_CACHE['metrics'] is not None and now_m < _SCANNER_CYCLE_CACHE['expires_at']:
+        return _SCANNER_CYCLE_CACHE['metrics']
+
+    base_dir = Path(settings.BASE_DIR)
+    nas_scanner_dir = base_dir / 'nas_scanner'
+    scanner_dir = (
+        base_dir / 'scanner'
+        if not (nas_scanner_dir / 'scanner_state.db').exists() and (base_dir / 'scanner' / 'scanner_state.db').exists()
+        else nas_scanner_dir
+    )
+    scanner_log_path = scanner_dir / 'logs' / 'scanner.log'
+    config_file = scanner_dir / 'config.json'
+
+    persisted: dict = {}
+    for p in _get_scanner_cycle_header_disk_paths():
+        try:
+            if p.exists():
+                persisted = json.loads(p.read_text(encoding='utf-8')) or {}
+                if persisted:
+                    break
+        except Exception:
+            continue
+
+    eligible_to_enrich_initial = int(persisted.get('eligible_to_enrich_initial') or 0)
+    skipped_complete_bookdb = int(persisted.get('skipped_complete_bookdb') or fallback_complete_bookdb or 0)
+    new_changed_in_walk = int(persisted.get('new_changed_in_walk') or 0)
+    cycle_inspected = int(persisted.get('cycle_inspected') or 0)
+    cycle_net_used = int(persisted.get('cycle_net_used') or 0)
+    cycle_net_cap = 4000
+    if config_file.exists():
+        try:
+            cfg_data = json.loads(config_file.read_text(encoding='utf-8')) or {}
+            em_cfg = cfg_data.get('epubmeta') or {}
+            if em_cfg.get('max_files'):
+                cycle_net_cap = max(4000, int(em_cfg['max_files'])) if int(em_cfg['max_files']) == 2500 else int(em_cfg['max_files'])
+        except Exception:
+            pass
+
+    remaining_to_catalog = 0
+    catalog_sync_chunk_info = ''
+    discovered_files_total = int(persisted.get('discovered_files_total') or fallback_total_files or 0)
+    header_dirty = False
+
+    if scanner_log_path.exists():
+        try:
+            with scanner_log_path.open('rb') as lf:
+                lf.seek(0, os.SEEK_END)
+                fsize = lf.tell()
+                lf.seek(max(0, fsize - 512 * 1024), os.SEEK_SET)
+                tail_text = lf.read().decode('utf-8', errors='replace')
+
+                elig_pattern = (
+                    r'out of (\d+) eligible:\s*(\d+) new/changed,\s*(\d+) backfill;\s*'
+                    r'skipped (\d+) previously processed,\s*(\d+) complete/DRM/invalid'
+                )
+                elig_matches = list(re.finditer(elig_pattern, tail_text))
+                # If the eligibility header scrolled past the 512 KB tail and hasn't been persisted yet,
+                # scan up to the last 8 MB of scanner.log once to recover and persist it.
+                if not elig_matches and (skipped_complete_bookdb <= 300000 or eligible_to_enrich_initial <= 0) and fsize > 512 * 1024:
+                    lf.seek(max(0, fsize - 8 * 1024 * 1024), os.SEEK_SET)
+                    wider_text = lf.read().decode('utf-8', errors='replace')
+                    elig_matches_wide = list(re.finditer(elig_pattern, wider_text))
+                    if elig_matches_wide:
+                        m_w = elig_matches_wide[-1]
+                        eligible_to_enrich_initial = int(m_w.group(1))
+                        new_changed_in_walk = int(m_w.group(2))
+                        skipped_complete_bookdb = int(m_w.group(5))
+                        header_dirty = True
+
+            last_elig_pos = -1
+            if elig_matches:
+                m_el = elig_matches[-1]
+                last_elig_pos = m_el.start()
+                new_elig = int(m_el.group(1))
+                new_walk = int(m_el.group(2))
+                new_skip_comp = int(m_el.group(5))
+                if (
+                    new_elig != eligible_to_enrich_initial
+                    or new_skip_comp != skipped_complete_bookdb
+                ):
+                    header_dirty = True
+                eligible_to_enrich_initial = new_elig
+                new_changed_in_walk = new_walk
+                skipped_complete_bookdb = new_skip_comp
+
+            prog_matches = list(
+                re.finditer(r'\[(\d+)/(\d+)\s*\|\s*net:(\d+)/(\d+|all)\]\s*Inspecting', tail_text)
+            )
+            if prog_matches and prog_matches[-1].start() > last_elig_pos:
+                m_pr = prog_matches[-1]
+                new_inspected = int(m_pr.group(1))
+                new_elig_pr = int(m_pr.group(2))
+                new_net = int(m_pr.group(3))
+                if abs(new_inspected - cycle_inspected) >= 20 or new_elig_pr != eligible_to_enrich_initial:
+                    header_dirty = True
+                cycle_inspected = new_inspected
+                eligible_to_enrich_initial = new_elig_pr
+                cycle_net_used = new_net
+                if m_pr.group(4).isdigit() and is_scanning:
+                    logged_cap = int(m_pr.group(4))
+                    cycle_net_cap = 4000 if logged_cap == 2500 else logged_cap
+            elif elig_matches:
+                cycle_inspected = 0
+                cycle_net_used = 0
+
+            parse_matches = list(
+                re.finditer(r'Found (\d+) files needing metadata extraction and syncing', tail_text)
+            )
+            chunk_matches = list(
+                re.finditer(r'Processing Chunk (\d+)/(\d+)\s*\((\d+) files\)', tail_text)
+            )
+            fin_matches = list(
+                re.finditer(
+                    r'Scan Finished\.\s*Discovered:\s*(\d+)\s*\|\s*Synced:\s*(\d+)\s*\|\s*Skipped:\s*(\d+)\s*\|\s*Failed:\s*(\d+)',
+                    tail_text,
+                )
+            )
+            for fm in reversed(fin_matches):
+                disc_val = int(fm.group(1))
+                if disc_val > 0:
+                    discovered_files_total = max(discovered_files_total, disc_val)
+                    break
+
+            last_parse_pos = parse_matches[-1].start() if parse_matches else -1
+            last_fin_pos = fin_matches[-1].start() if fin_matches else -1
+
+            if last_parse_pos > last_fin_pos and is_scanning:
+                total_to_parse = int(parse_matches[-1].group(1))
+                if chunk_matches and chunk_matches[-1].start() > last_parse_pos:
+                    c_idx = int(chunk_matches[-1].group(1))
+                    c_tot = int(chunk_matches[-1].group(2))
+                    remaining_to_catalog = max(0, total_to_parse - (c_idx - 1) * 250)
+                    catalog_sync_chunk_info = f'Chunk {c_idx}/{c_tot}'
+                else:
+                    remaining_to_catalog = total_to_parse
+            elif is_scanning and last_elig_pos > last_fin_pos:
+                remaining_to_catalog = new_changed_in_walk
+        except Exception:
+            pass
+
+    if eligible_to_enrich_initial > 0:
+        remaining_to_enrich = max(0, eligible_to_enrich_initial - cycle_inspected)
+    elif persisted.get('remaining_to_enrich'):
+        remaining_to_enrich = int(persisted['remaining_to_enrich'])
+    else:
+        remaining_to_enrich = max(
+            0, fallback_total_files - skipped_complete_bookdb - fallback_total_processed
+        )
+
+    result = {
+        'eligible_to_enrich_initial': eligible_to_enrich_initial,
+        'skipped_complete_bookdb': skipped_complete_bookdb,
+        'new_changed_in_walk': new_changed_in_walk,
+        'cycle_inspected': cycle_inspected,
+        'cycle_net_used': cycle_net_used,
+        'cycle_net_cap': cycle_net_cap,
+        'remaining_to_enrich': remaining_to_enrich,
+        'remaining_to_catalog': remaining_to_catalog,
+        'catalog_sync_chunk_info': catalog_sync_chunk_info,
+        'discovered_files_total': discovered_files_total,
+    }
+    _SCANNER_CYCLE_CACHE['metrics'] = result
+    _SCANNER_CYCLE_CACHE['expires_at'] = now_m + 5.0
+
+    if header_dirty or not persisted.get('remaining_to_enrich'):
+        raw_json = json.dumps(result)
+        for p in _get_scanner_cycle_header_disk_paths():
+            try:
+                p.write_text(raw_json, encoding='utf-8')
+            except Exception:
+                continue
+    return result
 
 
 def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
@@ -232,7 +440,7 @@ class _PrecomputedCountPaginator(Paginator):
                 return self._get_page([], number, self)
             items_by_id = {
                 it.id: it
-                for it in CatalogItem.objects.filter(id__in=page_ids).prefetch_related('files')
+                for it in CatalogItem.objects.filter(id__in=page_ids).order_by().prefetch_related('files')
             }
             page_items = [items_by_id[pid] for pid in page_ids if pid in items_by_id]
             return self._get_page(page_items, number, self)
@@ -348,6 +556,8 @@ class DashboardView(ListView):
             get_enriched_tags_and_folders_index,
             get_interesting_item_ids,
             get_needs_cover_enriched_shelf,
+            get_packt_books_shelf_ids,
+            get_removed_protection_item_ids,
             get_tomags_item_ids,
         )
 
@@ -377,7 +587,7 @@ class DashboardView(ListView):
         qs = perform_search(query, filters)
         fast_exclude_ids_set = getattr(qs, '_fast_exclude_ids_set', None)
         if selected_author:
-            qs = qs.filter(authors__icontains=selected_author)
+            qs = qs.filter(build_author_q_filter(selected_author))
 
         bm_data = None
         amz_data = None
@@ -439,9 +649,38 @@ class DashboardView(ListView):
             enr_idx = get_enriched_item_ids_index()
             if not item_types:
                 qs = qs.filter(item_type='BOOK')
+            complete_q = (
+                Q(isbn__isnull=False) & ~Q(isbn='')
+                & Q(description__isnull=False) & ~Q(description='')
+                & ~Q(authors='Unknown Author') & ~Q(authors='')
+            )
+            qs = qs.exclude(complete_q)
             excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
-            tm_excl = set(get_tomags_item_ids())
+            tm_excl = set(get_tomags_item_ids(sync_disk=False))
             fast_exclude_ids_set = (enr_idx.get('excluded_from_needs_enriching_ids_set') or set(excl_ids)) | tm_excl
+        elif shelf in ('removed_protection', 'nodrm'):
+            rp_ids = get_removed_protection_item_ids()
+            qs = qs.filter(id__in=rp_ids)
+            if not sort_by:
+                qs = qs.order_by(F('created_at').desc(nulls_last=True), 'title')
+        elif shelf in ('packt', 'packt_books'):
+            packt_ids = get_packt_books_shelf_ids()
+            qs = qs.filter(id__in=packt_ids)
+            if packt_ids and not query and (not sort_by or sort_by in ('filedate_desc', 'added_desc')):
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(packt_ids)],
+                    default=len(packt_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_packt_order=order_expr).order_by('_packt_order')
+            elif packt_ids and sort_by in ('filedate_asc', 'added_asc'):
+                rev_ids = list(reversed(packt_ids))
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(rev_ids)],
+                    default=len(rev_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_packt_order=order_expr).order_by('_packt_order')
         elif shelf == 'interesting':
             int_ids = get_interesting_item_ids()
             qs = qs.filter(id__in=int_ids)
@@ -521,8 +760,14 @@ class DashboardView(ListView):
             elif enrich_status == 'needs_enriching':
                 if not item_types and shelf not in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_all'):
                     qs = qs.filter(item_type='BOOK')
+                complete_q = (
+                    Q(isbn__isnull=False) & ~Q(isbn='')
+                    & Q(description__isnull=False) & ~Q(description='')
+                    & ~Q(authors='Unknown Author') & ~Q(authors='')
+                )
+                qs = qs.exclude(complete_q)
                 excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
-                tm_excl = set(get_tomags_item_ids())
+                tm_excl = set(get_tomags_item_ids(sync_disk=False))
                 if shelf == 'recent_pub':
                     import datetime as _dt
                     today_dt = _dt.date.today()
@@ -566,7 +811,7 @@ class DashboardView(ListView):
                 qs = qs.annotate(_bm_filter_order=order_expr).order_by('_bm_filter_order')
 
         if selected_tag:
-            tags_idx = get_enriched_tags_and_folders_index()
+            tags_idx = get_enriched_tags_and_folders_index(need_paths=True)
             tag_paths = tags_idx['tag_to_paths'].get(selected_tag, [])
             if not tag_paths:
                 for k, v in tags_idx['tag_to_paths'].items():
@@ -576,9 +821,10 @@ class DashboardView(ListView):
             qs = qs.filter(files__file_path__in=tag_paths).distinct()
 
         if selected_folder:
-            tags_idx = get_enriched_tags_and_folders_index()
-            fld_paths = tags_idx['folder_to_paths'].get(selected_folder, [])
-            qs = qs.filter(files__file_path__in=fld_paths).distinct()
+            qs = qs.filter(
+                Q(files__file_path__startswith=f'/books/{selected_folder}/')
+                | Q(files__file_path__startswith=f'/volume1/common/Media/Books/{selected_folder}/')
+            ).distinct()
 
         # Apply explicit Sort By selection
         if sort_by == 'title_asc':
@@ -593,9 +839,9 @@ class DashboardView(ListView):
             qs = qs.order_by(F('pub_date').desc(nulls_last=True), F('created_at').desc(nulls_last=True), 'title')
         elif sort_by == 'pubdate_asc':
             qs = qs.order_by(F('pub_date').asc(nulls_last=True), F('created_at').asc(nulls_last=True), 'title')
-        elif sort_by in ('filedate_desc', 'added_desc'):
+        elif sort_by in ('filedate_desc', 'added_desc') and shelf not in ('packt', 'packt_books'):
             qs = qs.order_by(F('created_at').desc(nulls_last=True), 'title')
-        elif sort_by in ('filedate_asc', 'added_asc'):
+        elif sort_by in ('filedate_asc', 'added_asc') and shelf not in ('packt', 'packt_books'):
             qs = qs.order_by(F('created_at').asc(nulls_last=True), 'title')
         elif sort_by == 'updated_desc':
             qs = qs.order_by('-updated_at', 'title')
@@ -626,7 +872,7 @@ class DashboardView(ListView):
         return final_qs
 
     def get_paginator(self, queryset, per_page, orphans=0, allow_empty_first_page=True, **kwargs):
-        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids, get_needs_cover_enriched_shelf, get_tomags_item_ids
+        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids, get_needs_cover_enriched_shelf, get_packt_books_shelf_ids, get_removed_protection_item_ids, get_tomags_item_ids
 
         query = self.request.GET.get('q', '').strip()
         shelf = self.request.GET.get('shelf', '').strip().lower()
@@ -658,7 +904,15 @@ class DashboardView(ListView):
                 stats, _ = _get_cached_dashboard_meta()
                 enr_idx = get_enriched_item_ids_index()
                 excl_cnt = len(enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx.get('enriched_ids') or [])
-                precomputed_count = max(0, (stats.get('books_count') or 0) - excl_cnt)
+                cyc = _get_scanner_cycle_metrics(
+                    fallback_total_files=stats.get('total_files') or 0,
+                    fallback_total_processed=excl_cnt,
+                )
+                precomputed_count = int(cyc.get('remaining_to_enrich') or max(0, (stats.get('books_count') or 0) - excl_cnt))
+            elif shelf in ('removed_protection', 'nodrm') and not item_types and not enrich_status:
+                precomputed_count = len(get_removed_protection_item_ids())
+            elif shelf in ('packt', 'packt_books') and not item_types and not enrich_status:
+                precomputed_count = len(get_packt_books_shelf_ids())
             elif (shelf in ('needs_review', 'in_review') or (not shelf and enrich_status == 'needs_review')) and not item_types:
                 enr_idx = get_enriched_item_ids_index()
                 precomputed_count = len(enr_idx.get('needs_review_ids') or [])
@@ -706,6 +960,8 @@ class DashboardView(ListView):
             get_file_enrich_diagnostic,
             get_interesting_item_ids,
             get_needs_cover_enriched_shelf,
+            get_packt_books_shelf_ids,
+            get_removed_protection_item_ids,
             get_tomags_item_ids,
             is_file_enriched,
             ENRICHABLE_FORMATS,
@@ -753,8 +1009,18 @@ class DashboardView(ListView):
         enr_idx = get_enriched_item_ids_index()
         enr_cnt = len(enr_idx.get('enriched_ids') or [])
         rev_cnt = len(enr_idx.get('needs_review_ids') or [])
+        strict_rev_cnt = len(enr_idx.get('strict_in_review_ids') or [])
+        no_isbn_rev_cnt = max(0, rev_cnt - strict_rev_cnt)
         excl_cnt = len(enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx.get('enriched_ids') or [])
-        needs_enr_cnt = max(0, (stats.get('books_count') or 0) - excl_cnt)
+        cyc_metrics = _get_scanner_cycle_metrics(
+            fallback_total_files=stats.get('total_files') or 0,
+            fallback_total_processed=excl_cnt,
+        )
+        needs_enr_cnt = int(cyc_metrics.get('remaining_to_enrich') or max(0, (stats.get('books_count') or 0) - excl_cnt))
+        context['removed_protection_count'] = len(get_removed_protection_item_ids())
+        context['packt_books_count'] = len(get_packt_books_shelf_ids())
+        context['strict_in_review_count'] = strict_rev_cnt
+        context['no_isbn_review_count'] = no_isbn_rev_cnt
         tm_ids = get_tomags_item_ids(sync_disk=(context['selected_shelf'] in ('tomags', 'to_mags') or context['selected_enrich_status'] in ('tomags', 'to_mags')))
         tm_cnt = len(tm_ids)
         context['tomags_count'] = tm_cnt
@@ -830,7 +1096,8 @@ class DashboardView(ListView):
             it.is_enriched = any(is_file_enriched(f.file_path) for f in f_list if f.file_path)
             it.cover_issue = nc_issue_map.get(str(it.id), '')
             if it.is_enriched and not it.cover_issue and str(it.id) not in (nc_shelf.get('dismissed_set') or set()):
-                it.cover_issue = classify_cover_image(it.cover_thumbnail, it.cover_image_url) or ''
+                if not it.cover_thumbnail and not it.cover_image_url:
+                    it.cover_issue = 'missing'
             it.has_enrichable_file = any(
                 (f.file_format or '').upper().lstrip('.') in ENRICHABLE_FORMATS
                 for f in f_list
@@ -878,7 +1145,15 @@ class SuggestAPIView(APIView):
     """
     def get(self, request):
         if request.GET.get('reload_workers') == '1':
-            import os, signal
+            import os, py_compile, signal
+            from pathlib import Path
+            base_d = Path(getattr(settings, 'BASE_DIR', '.'))
+            for sub_d in ('catalog', 'core'):
+                for py_f in (base_d / sub_d).glob('*.py'):
+                    try:
+                        py_compile.compile(str(py_f), doraise=True)
+                    except Exception as comp_err:
+                        return Response({'reloaded': False, 'error': str(comp_err)}, status=400)
             try:
                 os.kill(os.getppid(), signal.SIGHUP)
             except Exception:
@@ -944,6 +1219,79 @@ class SuggestAPIView(APIView):
         return Response(results)
 
 
+from zoneinfo import ZoneInfo
+
+_EST_TZ = ZoneInfo('America/New_York')
+
+
+def _format_est_timestamp(val, include_tz: bool = True) -> str:
+    """Convert a datetime or UTC timestamp string to America/New_York (EST/EDT)."""
+    if not val:
+        return ''
+    try:
+        if isinstance(val, datetime):
+            dt = val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
+            dt_est = dt.astimezone(_EST_TZ)
+            return dt_est.strftime('%Y-%m-%d %H:%M:%S %Z' if include_tz else '%Y-%m-%d %H:%M:%S')
+        s = str(val).strip()
+        if not s:
+            return ''
+        if s.endswith((' EST', ' EDT')):
+            return s if include_tz else s[:-4]
+        if s.endswith(' UTC'):
+            s = s[:-4].strip()
+        s_iso = s.replace('Z', '+00:00')
+        if len(s_iso) >= 19 and s_iso[10] == ' ':
+            s_iso = s_iso[:10] + 'T' + s_iso[11:]
+        dt = datetime.fromisoformat(s_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_est = dt.astimezone(_EST_TZ)
+        return dt_est.strftime('%Y-%m-%d %H:%M:%S %Z' if include_tz else '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(val)[:19].replace('T', ' ')
+
+
+def _convert_utc_bucket_to_est(bucket_str: str, granularity: str = 'hour') -> str:
+    """Convert a 'YYYY-MM-DD HH:00' or 'YYYY-MM-DD' UTC bucket string to America/New_York."""
+    b = (bucket_str or '').strip().replace('T', ' ')
+    if not b:
+        return ''
+    try:
+        if len(b) == 13:
+            b = f"{b}:00"
+        if len(b) >= 16:
+            dt_utc = datetime.strptime(b[:16], '%Y-%m-%d %H:%M').replace(tzinfo=timezone.utc)
+            dt_est = dt_utc.astimezone(_EST_TZ)
+            return dt_est.strftime('%Y-%m-%d' if granularity == 'day' else '%Y-%m-%d %H:00')
+    except Exception:
+        pass
+    return b
+
+
+_LOG_TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}),(\d{3})(?!\s+(?:EST|EDT))\b(.*)$')
+_LOG_START_RE = re.compile(r'^(.*?\bStarting\s+\S+\s+at\s+)(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})(?!\s+(?:EST|EDT))(.*)$')
+
+
+def _convert_log_line_to_est(line: str) -> str:
+    """Convert leading UTC timestamps in scanner/epubmeta log lines to America/New_York (EST/EDT)."""
+    m = _LOG_TS_RE.match(line)
+    if m:
+        ts_part, ms_part, rest = m.group(1), m.group(2), m.group(3)
+        est_ts = _format_est_timestamp(ts_part, include_tz=False)
+        try:
+            dt_utc = datetime.strptime(ts_part, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            tz_abbr = dt_utc.astimezone(_EST_TZ).strftime('%Z')
+        except Exception:
+            tz_abbr = 'EST'
+        line = f"{est_ts},{ms_part} {tz_abbr}{rest}"
+    m2 = _LOG_START_RE.match(line)
+    if m2:
+        prefix, ts2, suffix = m2.group(1), m2.group(2), m2.group(3)
+        line = f"{prefix}{_format_est_timestamp(ts2, include_tz=True)}{suffix}"
+    return line
+
+
 def _tail_log_file(log_path: Path, max_lines: int = 45) -> list[str]:
     """Read the last `max_lines` from a log file safely without loading the whole file."""
     if not log_path.exists():
@@ -955,7 +1303,7 @@ def _tail_log_file(log_path: Path, max_lines: int = 45) -> list[str]:
             block_size = min(file_size, 32768)
             f.seek(max(0, file_size - block_size))
             data = f.read().decode('utf-8', errors='replace')
-            lines = [line.rstrip() for line in data.splitlines() if line.strip()]
+            lines = [_convert_log_line_to_est(line.rstrip()) for line in data.splitlines() if line.strip()]
             return lines[-max_lines:]
     except Exception:
         return []
@@ -988,10 +1336,17 @@ def _serialize_conversion_rows(rows) -> list[dict]:
         return []
 
     sha_set = set()
+    path_set = set()
     isbn_set = set()
-    title_set = set()
     for r in rows:
         rk = r.keys()
+        if 'file_path' in rk and r['file_path']:
+            fp_val = r['file_path']
+            path_set.add(fp_val)
+            if fp_val.startswith('/volume1/common/Media/Books/'):
+                path_set.add('/books/' + fp_val[len('/volume1/common/Media/Books/'):])
+            elif fp_val.startswith('/books/'):
+                path_set.add('/volume1/common/Media/Books/' + fp_val[len('/books/'):])
         if 'file_sha256' in rk and r['file_sha256']:
             sha_set.add(r['file_sha256'])
         if 'orig_sha256' in rk and r['orig_sha256']:
@@ -1000,29 +1355,28 @@ def _serialize_conversion_rows(rows) -> list[dict]:
             isbn_set.add(r['isbn'])
         if r['orig_isbn']:
             isbn_set.add(r['orig_isbn'])
-        if r['title']:
-            title_set.add(r['title'])
-        if r['orig_title']:
-            title_set.add(r['orig_title'])
 
     by_sha = {}
     by_path = {}
     by_isbn = {}
     by_title = {}
     try:
-        if sha_set:
-            for loc in FileLocation.objects.select_related('catalog_item').filter(file_hash__in=sha_set):
+        if path_set or sha_set:
+            loc_q = Q()
+            if path_set:
+                loc_q |= Q(file_path__in=path_set)
+            if sha_set:
+                loc_q |= Q(file_hash__in=sha_set)
+            for loc in FileLocation.objects.select_related('catalog_item').filter(loc_q):
                 if loc.catalog_item:
-                    by_sha[loc.file_hash] = loc.catalog_item
-                    by_path[loc.file_path] = loc.catalog_item
+                    if loc.file_hash:
+                        by_sha[loc.file_hash] = loc.catalog_item
+                    if loc.file_path:
+                        by_path[loc.file_path] = loc.catalog_item
         if isbn_set:
             for ci in CatalogItem.objects.filter(isbn__in=isbn_set):
                 if ci.isbn:
                     by_isbn[ci.isbn] = ci
-        if title_set:
-            for ci in CatalogItem.objects.filter(title__in=title_set)[:150]:
-                if ci.title:
-                    by_title[ci.title] = ci
     except Exception:
         pass
 
@@ -1057,16 +1411,21 @@ def _serialize_conversion_rows(rows) -> list[dict]:
         orig_title = r['orig_title'] or orig_meta.get('title') or ''
         new_title = r['title'] or cand_meta.get('title') or ''
 
+        alt_fp = (
+            '/books/' + fp[len('/volume1/common/Media/Books/'):]
+            if fp.startswith('/volume1/common/Media/Books/')
+            else ('/volume1/common/Media/Books/' + fp[len('/books/'):] if fp.startswith('/books/') else fp)
+        )
         cat_item = (
             by_path.get(fp)
+            or by_path.get(alt_fp)
             or (by_sha.get(f_sha) if f_sha else None)
             or (by_sha.get(o_sha) if o_sha else None)
             or (by_isbn.get(new_isbn) if new_isbn else None)
             or (by_isbn.get(orig_isbn) if orig_isbn else None)
-            or (by_title.get(new_title) if new_title else None)
-            or (by_title.get(orig_title) if orig_title else None)
         )
-        cat_cover = (cat_item.cover_thumbnail or cat_item.cover_image_url or '') if cat_item else ''
+        cat_has_cover = bool(cat_item and (cat_item.cover_thumbnail or cat_item.cover_image_url))
+        cat_cover = f"/mylibrary/opds/cover/{cat_item.id}.jpg" if cat_has_cover else ''
         cat_desc = (cat_item.description or '') if cat_item else ''
 
         orig_desc = _strip_html(orig_meta.get('description'))
@@ -1078,14 +1437,16 @@ def _serialize_conversion_rows(rows) -> list[dict]:
             new_desc = _strip_html(cat_desc)
 
         # Before Cover: prefer embedded thumbnail from BookDB or original cover_url / orig_isbn
-        orig_cover = orig_meta.get('cover_url') or ''
+        raw_orig_cov = orig_meta.get('cover_url') or ''
+        orig_cover = raw_orig_cov if not raw_orig_cov.startswith('data:') else (cat_cover or raw_orig_cov)
         if not orig_cover and cat_cover:
             orig_cover = cat_cover
         elif not orig_cover and orig_isbn:
             orig_cover = f"https://covers.openlibrary.org/b/isbn/{orig_isbn}-M.jpg?default=false"
 
         # After Cover: prefer enriched cover_url from provider, then BookDB thumbnail (if SUCCESS), then OpenLibrary by new_isbn
-        new_cover = cand_meta.get('cover_url') or ''
+        raw_new_cov = cand_meta.get('cover_url') or ''
+        new_cover = raw_new_cov if not raw_new_cov.startswith('data:') else (cat_cover or raw_new_cov)
         if not new_cover and raw_status == 'SUCCESS' and cat_cover:
             new_cover = cat_cover
         elif not new_cover and new_isbn:
@@ -1110,7 +1471,7 @@ def _serialize_conversion_rows(rows) -> list[dict]:
             'orig_cover': orig_cover,
             'match_confidence': round(float(conf) * 100) if conf is not None else None,
             'error_message': r['error_message'] or '',
-            'updated_at': (r['updated_at'] or '')[:19].replace('T', ' '),
+            'updated_at': _format_est_timestamp(r['updated_at'], include_tz=True),
             'file_size_mb': round((r['file_size'] or 0) / (1024 * 1024), 2),
         })
     return items
@@ -1167,10 +1528,14 @@ def _ensure_scanner_daemon_or_trigger(scanner_dir: Path, force_trigger: bool = F
     if not loop_script.exists():
         return {'ok': False, 'error': f'{loop_script} not found'}
 
-    loop_lock = scanner_dir / 'nas_scanner_loop.lock'
-    scan_lock = scanner_dir / 'nas_scanner.lock'
     logs_dir = scanner_dir / 'logs'
     logs_dir.mkdir(parents=True, exist_ok=True)
+    loop_lock = logs_dir / 'nas_scanner_loop.lock'
+    if not loop_lock.exists() and (scanner_dir / 'nas_scanner_loop.lock').exists():
+        loop_lock = scanner_dir / 'nas_scanner_loop.lock'
+    scan_lock = logs_dir / 'nas_scanner.lock'
+    if not scan_lock.exists() and (scanner_dir / 'nas_scanner.lock').exists():
+        scan_lock = scanner_dir / 'nas_scanner.lock'
     trigger_flag = logs_dir / 'trigger_scan.flag'
 
     loop_held = _is_posix_lock_held(loop_lock)
@@ -1240,237 +1605,384 @@ def get_conversion_and_import_status() -> dict:
     scanner_log_path = scanner_dir / 'logs' / 'scanner.log'
     epubmeta_log_path = scanner_dir / 'logs' / 'epubmeta.log'
 
-    # 1. PostgreSQL BookDB Catalog & File Import Metrics (cached 45s for 1.4M-row tables)
-    if _DASHBOARD_HEAVY_CACHE['catalog_summary'] is not None and now_mono < _DASHBOARD_HEAVY_CACHE['expires_at']:
-        cached_cat = _DASHBOARD_HEAVY_CACHE['catalog_summary']
-        catalog_agg = cached_cat['catalog_agg']
-        file_agg = cached_cat['file_agg']
-        format_rows = cached_cat['format_rows']
-        library_rows = cached_cat['library_rows']
-        total_items = catalog_agg['total_items'] or 0
-        total_files = file_agg['total_files'] or 0
+    # 1. PostgreSQL BookDB Catalog & File Import Metrics (cached 300s across workers with stale-while-revalidate)
+    status_cache_paths = [Path('/tmp/mylibrary_status_heavy_cache.json')]
+    for _d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
+        try:
+            if _d.exists() and _d.is_dir():
+                status_cache_paths.insert(0, _d / '.status_heavy_cache.json')
+                break
+        except Exception:
+            continue
+
+    if _DASHBOARD_HEAVY_CACHE['catalog_summary'] is None or _DASHBOARD_HEAVY_CACHE.get('sqlite_heavy') is None:
+        for _scp in status_cache_paths:
+            try:
+                if _scp.exists():
+                    disk_d = json.loads(_scp.read_text(encoding='utf-8'))
+                    if isinstance(disk_d.get('catalog_summary'), dict) and isinstance(disk_d.get('sqlite_heavy'), dict):
+                        _DASHBOARD_HEAVY_CACHE['catalog_summary'] = disk_d['catalog_summary']
+                        _DASHBOARD_HEAVY_CACHE['sqlite_heavy'] = disk_d['sqlite_heavy']
+                        age_s = max(0.0, _time.time() - _scp.stat().st_mtime)
+                        rem_ttl = max(0.0, 300.0 - age_s)
+                        _DASHBOARD_HEAVY_CACHE['expires_at'] = now_mono + rem_ttl
+                        _DASHBOARD_HEAVY_CACHE['sqlite_expires_at'] = now_mono + min(rem_ttl, 60.0)
+                        break
+            except Exception:
+                continue
+
+    def _compute_and_save_status_heavy_cache():
+        try:
+            _cat_agg = CatalogItem.objects.aggregate(
+                total_items=Count('id'),
+                books_count=Count('id', filter=Q(item_type='BOOK')),
+                magazines_count=Count('id', filter=Q(item_type='MAGAZINE')),
+                kindle_count=Count('id', filter=Q(item_type='KINDLE')),
+                audible_count=Count('id', filter=Q(item_type='AUDIBLE')),
+                audiobook_count=Count('id', filter=Q(item_type='AUDIOBOOK')),
+                with_isbn=Count('id', filter=Q(isbn__isnull=False) & ~Q(isbn='')),
+                with_asin=Count('id', filter=Q(asin__isnull=False) & ~Q(asin='')),
+                with_description=Count('id', filter=Q(description__isnull=False) & ~Q(description='')),
+                with_publisher=Count('id', filter=Q(publisher__isnull=False) & ~Q(publisher='')),
+                with_cover=Count(
+                    'id',
+                    filter=(Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
+                    | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url='')),
+                ),
+                known_author=Count(
+                    'id',
+                    filter=Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author'),
+                ),
+                complete_metadata=Count(
+                    'id',
+                    filter=Q(isbn__isnull=False)
+                    & ~Q(isbn='')
+                    & Q(description__isnull=False)
+                    & ~Q(description='')
+                    & ~Q(authors='Unknown Author')
+                    & ~Q(authors=''),
+                ),
+            )
+            _tot_files_agg = FileLocation.objects.aggregate(
+                total_files=Count('id'),
+                valid_files=Count('id', filter=Q(is_invalid=False, has_drm=False)),
+                drm_files=Count('id', filter=Q(has_drm=True)),
+                invalid_files=Count('id', filter=Q(is_invalid=True)),
+            )
+            _tf = _tot_files_agg['total_files'] or 0
+            _fmt_rows = list(
+                FileLocation.objects.values('file_format')
+                .annotate(count=Count('id'))
+                .order_by('-count')[:8]
+            )
+            for _r in _fmt_rows:
+                _r['file_format'] = _r['file_format'] or 'UNKNOWN'
+                _r['pct'] = _pct(_r['count'], _tf)
+            _lib_rows = list(
+                FileLocation.objects.values('library_name')
+                .annotate(count=Count('id'))
+                .order_by('-count')[:8]
+            )
+            for _r in _lib_rows:
+                _r['library_name'] = _r['library_name'] or 'Default Library'
+                _r['pct'] = _pct(_r['count'], _tf)
+            _rec_imports = []
+            for _it in CatalogItem.objects.prefetch_related('files').order_by('-created_at')[:15]:
+                _fl = list(_it.files.all())
+                _loc = _fl[0] if _fl else None
+                if not _loc:
+                    continue
+                _rec_imports.append({
+                    'file_name': _loc.file_name,
+                    'file_path': _loc.file_path,
+                    'file_format': _loc.file_format,
+                    'file_size_mb': round((_loc.file_size or 0) / (1024 * 1024), 2),
+                    'library_name': _loc.library_name or 'NAS Library',
+                    'is_invalid': _loc.is_invalid,
+                    'has_drm': _loc.has_drm,
+                    'scanned_at': _format_est_timestamp(_loc.scanned_at, include_tz=True) if _loc.scanned_at else '',
+                    'title': _it.title or _loc.file_name,
+                    'authors': _it.authors or 'Unknown Author',
+                    'isbn': _it.isbn or _it.asin or '',
+                    'item_type': _it.item_type or 'BOOK',
+                    'has_cover': bool(_it.cover_thumbnail or _it.cover_image_url),
+                })
+            _DASHBOARD_HEAVY_CACHE['catalog_summary'] = {
+                'catalog_agg': _cat_agg,
+                'file_agg': _tot_files_agg,
+                'format_rows': _fmt_rows,
+                'library_rows': _lib_rows,
+                'recent_imports': _rec_imports,
+            }
+            _DASHBOARD_HEAVY_CACHE['expires_at'] = _time.monotonic() + 300.0
+            if _DASHBOARD_HEAVY_CACHE.get('sqlite_heavy'):
+                raw_disk = json.dumps({
+                    'catalog_summary': _DASHBOARD_HEAVY_CACHE['catalog_summary'],
+                    'sqlite_heavy': _DASHBOARD_HEAVY_CACHE['sqlite_heavy'],
+                })
+                for _scp in status_cache_paths:
+                    try:
+                        _scp.write_text(raw_disk, encoding='utf-8')
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        finally:
+            _DASHBOARD_HEAVY_CACHE['_cat_refreshing'] = False
+
+    if _DASHBOARD_HEAVY_CACHE['catalog_summary'] is not None:
+        if now_mono >= _DASHBOARD_HEAVY_CACHE['expires_at'] and not _DASHBOARD_HEAVY_CACHE.get('_cat_refreshing'):
+            _DASHBOARD_HEAVY_CACHE['_cat_refreshing'] = True
+            _DASHBOARD_HEAVY_CACHE['expires_at'] = now_mono + 300.0
+            import threading
+            threading.Thread(target=_compute_and_save_status_heavy_cache, daemon=True).start()
     else:
-        catalog_agg = CatalogItem.objects.aggregate(
-            total_items=Count('id'),
-            books_count=Count('id', filter=Q(item_type='BOOK')),
-            magazines_count=Count('id', filter=Q(item_type='MAGAZINE')),
-            kindle_count=Count('id', filter=Q(item_type='KINDLE')),
-            audible_count=Count('id', filter=Q(item_type='AUDIBLE')),
-            audiobook_count=Count('id', filter=Q(item_type='AUDIOBOOK')),
-            with_isbn=Count('id', filter=Q(isbn__isnull=False) & ~Q(isbn='')),
-            with_asin=Count('id', filter=Q(asin__isnull=False) & ~Q(asin='')),
-            with_description=Count('id', filter=Q(description__isnull=False) & ~Q(description='')),
-            with_publisher=Count('id', filter=Q(publisher__isnull=False) & ~Q(publisher='')),
-            with_cover=Count(
-                'id',
-                filter=(Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
-                | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url='')),
-            ),
-            known_author=Count(
-                'id',
-                filter=Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author'),
-            ),
-            complete_metadata=Count(
-                'id',
-                filter=Q(isbn__isnull=False)
-                & ~Q(isbn='')
-                & Q(description__isnull=False)
-                & ~Q(description='')
-                & ~Q(authors='Unknown Author')
-                & ~Q(authors=''),
-            ),
-        )
+        _compute_and_save_status_heavy_cache()
 
-        total_items = catalog_agg['total_items'] or 0
-        file_agg = FileLocation.objects.aggregate(
-            total_files=Count('id'),
-            valid_files=Count('id', filter=Q(is_invalid=False, has_drm=False)),
-            drm_files=Count('id', filter=Q(has_drm=True)),
-            invalid_files=Count('id', filter=Q(is_invalid=True)),
-        )
-        total_files = file_agg['total_files'] or 0
-
-        format_rows = list(
-            FileLocation.objects.values('file_format')
-            .annotate(count=Count('id'))
-            .order_by('-count')[:8]
-        )
-        for row in format_rows:
-            row['file_format'] = row['file_format'] or 'UNKNOWN'
-            row['pct'] = _pct(row['count'], total_files)
-
-        library_rows = list(
-            FileLocation.objects.values('library_name')
-            .annotate(count=Count('id'))
-            .order_by('-count')[:8]
-        )
-        for row in library_rows:
-            row['library_name'] = row['library_name'] or 'Default Library'
-            row['pct'] = _pct(row['count'], total_files)
-
-        _DASHBOARD_HEAVY_CACHE['catalog_summary'] = {
-            'catalog_agg': catalog_agg,
-            'file_agg': file_agg,
-            'format_rows': format_rows,
-            'library_rows': library_rows,
-        }
-        _DASHBOARD_HEAVY_CACHE['expires_at'] = now_mono + 45.0
-
-    recent_imports_qs = (
-        FileLocation.objects.select_related('catalog_item')
-        .order_by('-scanned_at')[:15]
-    )
-    recent_imports = []
-    for loc in recent_imports_qs:
-        item = loc.catalog_item
-        recent_imports.append({
-            'file_name': loc.file_name,
-            'file_path': loc.file_path,
-            'file_format': loc.file_format,
-            'file_size_mb': round((loc.file_size or 0) / (1024 * 1024), 2),
-            'library_name': loc.library_name or 'NAS Library',
-            'is_invalid': loc.is_invalid,
-            'has_drm': loc.has_drm,
-            'scanned_at': loc.scanned_at.strftime('%Y-%m-%d %H:%M:%S') if loc.scanned_at else '',
-            'title': item.title if item else loc.file_name,
-            'authors': item.authors if item else 'Unknown Author',
-            'isbn': (item.isbn or item.asin or '') if item else '',
-            'item_type': item.item_type if item else 'BOOK',
-            'has_cover': bool(item and (item.cover_thumbnail or item.cover_image_url)),
-        })
+    cached_cat = _DASHBOARD_HEAVY_CACHE['catalog_summary']
+    catalog_agg = cached_cat['catalog_agg']
+    file_agg = cached_cat['file_agg']
+    format_rows = cached_cat['format_rows']
+    library_rows = cached_cat['library_rows']
+    recent_imports = cached_cat.get('recent_imports') or []
+    total_items = catalog_agg['total_items'] or 0
+    total_files = file_agg['total_files'] or 0
 
     # 2. Unified State Database (PostgreSQL BookDB / scanner_state.db)
     pg_enabled = is_postgres_scanner_enabled()
-    sqlite_stats = {
-        'db_exists': pg_enabled or db_path.exists(),
-        'db_path': 'PostgreSQL BookDB (postgres:5432/BookDB)' if pg_enabled else str(db_path),
-        'tracked_files_count': 0,
-        'last_synced_at': '',
-        'metadata_cache_count': 0,
-        'total_processed': 0,
-        'status_counts': {
-            'SUCCESS': 0,
-            'NO_ISBN': 0,
-            'NOT_FOUND': 0,
-            'NEEDS_REVIEW': 0,
-            'QUARANTINED': 0,
-            'HAS_DRM': 0,
-            'FAILED': 0,
-            'IGNORED': 0,
-        },
-        'status_pcts': {
-            'SUCCESS': 0.0,
-            'NO_ISBN': 0.0,
-            'NOT_FOUND': 0.0,
-            'NEEDS_REVIEW': 0.0,
-            'QUARANTINED': 0.0,
-            'HAS_DRM': 0.0,
-            'FAILED': 0.0,
-            'IGNORED': 0.0,
-        },
-        'success_rate': 0.0,
-        'recent_conversions': [],
-        'attention_items': [],
-    }
 
-    if pg_enabled or db_path.exists():
-        conn = None
-        try:
-            conn = connect_scanner_db(db_path, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-
-            # Check existing tables
-            tables = {
-                r['name']
-                for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            }
-
-            if 'file_states' in tables:
-                row = cur.execute(
-                    "SELECT COUNT(*) AS cnt, MAX(synced_at) AS last_sync FROM file_states"
-                ).fetchone()
-                if row:
-                    sqlite_stats['tracked_files_count'] = row['cnt'] or 0
-                    sqlite_stats['last_synced_at'] = (row['last_sync'] or '')[:19].replace('T', ' ')
-
-            if 'metadata_cache' in tables:
-                row = cur.execute("SELECT COUNT(*) AS cnt FROM metadata_cache").fetchone()
-                if row:
-                    sqlite_stats['metadata_cache_count'] = row['cnt'] or 0
-
-            if 'processed_files' in tables:
-                for row in cur.execute(
-                    "SELECT status, COUNT(*) AS cnt FROM processed_files GROUP BY status"
-                ).fetchall():
-                    st = (row['status'] or 'UNKNOWN').upper()
-                    if st == 'NOT_FOUND':
-                        st = 'NO_ISBN'
-                    cnt = row['cnt'] or 0
-                    sqlite_stats['status_counts'][st] = sqlite_stats['status_counts'].get(st, 0) + cnt
-                    sqlite_stats['total_processed'] += cnt
-                sqlite_stats['status_counts']['NOT_FOUND'] = sqlite_stats['status_counts']['NO_ISBN']
-
-                tot_proc = sqlite_stats['total_processed']
-                for st, cnt in sqlite_stats['status_counts'].items():
-                    sqlite_stats['status_pcts'][st] = _pct(cnt, tot_proc)
-
-                sqlite_stats['success_rate'] = _pct(
-                    sqlite_stats['status_counts'].get('SUCCESS', 0), tot_proc
-                )
-
-                # Recent conversions / enrichments
-                recent_rows = cur.execute(
-                    """
-                    SELECT file_name, file_path, file_ext, status, isbn, title, author,
-                           orig_title, orig_author, orig_isbn, match_confidence,
-                           error_message, updated_at, file_size,
-                           orig_sha256, file_sha256,
-                           original_metadata_json, updated_metadata_json
-                    FROM processed_files
-                    ORDER BY updated_at DESC
-                    LIMIT 25
-                    """
-                ).fetchall()
-                sqlite_stats['recent_conversions'] = _serialize_conversion_rows(recent_rows)
-
-                # Needs review / Quarantined / Failed / Not found
-                attn_rows = cur.execute(
-                    """
-                    SELECT file_name, file_path, file_ext, status, isbn, title, author,
-                           orig_title, orig_author, match_confidence, error_message, updated_at
-                    FROM processed_files
-                    WHERE status IN ('NEEDS_REVIEW', 'QUARANTINED', 'FAILED', 'HAS_DRM', 'NOT_FOUND')
-                    ORDER BY updated_at DESC
-                    LIMIT 20
-                    """
-                ).fetchall()
-                for r in attn_rows:
-                    conf = r['match_confidence']
-                    sqlite_stats['attention_items'].append({
-                        'file_name': r['file_name'] or os.path.basename(r['file_path'] or ''),
-                        'file_path': r['file_path'] or '',
-                        'file_ext': (r['file_ext'] or '').upper().lstrip('.'),
-                        'status': r['status'] or 'UNKNOWN',
-                        'isbn': r['isbn'] or '',
-                        'title': r['title'] or r['orig_title'] or '',
-                        'author': r['author'] or r['orig_author'] or '',
-                        'match_confidence': round(float(conf) * 100) if conf is not None else None,
-                        'error_message': r['error_message'] or '',
-                        'updated_at': (r['updated_at'] or '')[:19].replace('T', ' '),
+    def _compute_sqlite_heavy_stats():
+        _sq = {
+            'db_exists': pg_enabled or db_path.exists(),
+            'db_path': 'PostgreSQL BookDB (postgres:5432/BookDB)' if pg_enabled else str(db_path),
+            'tracked_files_count': 0,
+            'last_synced_at': '',
+            'metadata_cache_count': 0,
+            'total_processed': 0,
+            'status_counts': {
+                'SUCCESS': 0,
+                'NO_ISBN': 0,
+                'NOT_FOUND': 0,
+                'NEEDS_REVIEW': 0,
+                'QUARANTINED': 0,
+                'HAS_DRM': 0,
+                'FAILED': 0,
+                'IGNORED': 0,
+            },
+            'status_pcts': {
+                'SUCCESS': 0.0,
+                'NO_ISBN': 0.0,
+                'NOT_FOUND': 0.0,
+                'NEEDS_REVIEW': 0.0,
+                'QUARANTINED': 0.0,
+                'HAS_DRM': 0.0,
+                'FAILED': 0.0,
+                'IGNORED': 0.0,
+            },
+            'success_rate': 0.0,
+            'recent_conversions': [],
+            'attention_items': [],
+        }
+        if pg_enabled or db_path.exists():
+            conn = None
+            try:
+                conn = connect_scanner_db(db_path, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                tables = {
+                    r['name']
+                    for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                if 'file_states' in tables:
+                    if pg_enabled:
+                        r_est = cur.execute(
+                            "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'file_states'"
+                        ).fetchone()
+                        est_cnt = int(r_est['cnt'] or 0) if r_est else 0
+                        if est_cnt <= 0:
+                            r_c = cur.execute("SELECT COUNT(*) AS cnt FROM file_states").fetchone()
+                            est_cnt = int(r_c['cnt'] or 0) if r_c else 0
+                        _sq['tracked_files_count'] = est_cnt
+                        r_sync = cur.execute(
+                            "SELECT synced_at FROM file_states WHERE synced_at IS NOT NULL ORDER BY synced_at DESC LIMIT 1"
+                        ).fetchone()
+                        if r_sync and r_sync['synced_at']:
+                            _sq['last_synced_at'] = _format_est_timestamp(r_sync['synced_at'], include_tz=True)
+                    else:
+                        row = cur.execute(
+                            "SELECT COUNT(*) AS cnt, MAX(synced_at) AS last_sync FROM file_states"
+                        ).fetchone()
+                        if row:
+                            _sq['tracked_files_count'] = row['cnt'] or 0
+                            _sq['last_synced_at'] = _format_est_timestamp(row['last_sync'], include_tz=True)
+                if 'metadata_cache' in tables:
+                    if pg_enabled:
+                        r_mc = cur.execute(
+                            "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'metadata_cache'"
+                        ).fetchone()
+                        mc_cnt = int(r_mc['cnt'] or 0) if r_mc else 0
+                        if mc_cnt <= 0:
+                            row = cur.execute("SELECT COUNT(*) AS cnt FROM metadata_cache").fetchone()
+                            mc_cnt = int(row['cnt'] or 0) if row else 0
+                        _sq['metadata_cache_count'] = mc_cnt
+                    else:
+                        row = cur.execute("SELECT COUNT(*) AS cnt FROM metadata_cache").fetchone()
+                        if row:
+                            _sq['metadata_cache_count'] = row['cnt'] or 0
+                if 'processed_files' in tables:
+                    for row in cur.execute(
+                        "SELECT status, COUNT(*) AS cnt FROM processed_files GROUP BY status"
+                    ).fetchall():
+                        st = (row['status'] or 'UNKNOWN').upper()
+                        if st == 'NOT_FOUND':
+                            st = 'NO_ISBN'
+                        cnt = row['cnt'] or 0
+                        _sq['status_counts'][st] = _sq['status_counts'].get(st, 0) + cnt
+                        _sq['total_processed'] += cnt
+                    _sq['enriched_files_count'] = _sq['status_counts'].get('SUCCESS', 0)
+                    try:
+                        from .opds import get_enriched_item_ids_index
+                        _enr_idx = get_enriched_item_ids_index()
+                        _enr_books_cnt = len(_enr_idx.get('enriched_ids') or [])
+                        _rev_total_cnt = len(_enr_idx.get('needs_review_ids') or [])
+                        _strict_rev_cnt = len(_enr_idx.get('strict_in_review_ids') or [])
+                        _no_isbn_cnt = max(0, _rev_total_cnt - _strict_rev_cnt)
+                        if _enr_books_cnt > 0:
+                            _sq['status_counts']['SUCCESS'] = _enr_books_cnt
+                            _sq['status_counts']['NEEDS_REVIEW'] = _strict_rev_cnt
+                            _sq['status_counts']['NO_ISBN'] = _no_isbn_cnt
+                            _sq['status_counts']['FAILED'] = 0
+                            _sq['total_processed'] = (
+                                _enr_books_cnt
+                                + _strict_rev_cnt
+                                + _no_isbn_cnt
+                                + _sq['status_counts'].get('QUARANTINED', 0)
+                                + _sq['status_counts'].get('HAS_DRM', 0)
+                                + _sq['status_counts'].get('IGNORED', 0)
+                            )
+                    except Exception:
+                        pass
+                    _sq['status_counts']['NOT_FOUND'] = _sq['status_counts']['NO_ISBN']
+                    tot_proc = _sq['total_processed']
+                    for st, cnt in _sq['status_counts'].items():
+                        _sq['status_pcts'][st] = _pct(cnt, tot_proc)
+                    _sq['success_rate'] = _pct(
+                        _sq['status_counts'].get('SUCCESS', 0), tot_proc
+                    )
+                    recent_rows = cur.execute(
+                        """
+                        SELECT file_name, file_path, file_ext, status, isbn, title, author,
+                               orig_title, orig_author, orig_isbn, match_confidence,
+                               error_message, updated_at, file_size,
+                               orig_sha256, file_sha256,
+                               original_metadata_json, updated_metadata_json
+                        FROM processed_files
+                        ORDER BY updated_at DESC
+                        LIMIT 25
+                        """
+                    ).fetchall()
+                    _sq['recent_conversions'] = _serialize_conversion_rows(recent_rows)
+                    attn_rows = cur.execute(
+                        """
+                        SELECT file_name, file_path, file_ext, status, isbn, title, author,
+                               orig_title, orig_author, match_confidence, error_message, updated_at
+                        FROM processed_files
+                        WHERE status IN ('NEEDS_REVIEW', 'QUARANTINED', 'FAILED', 'HAS_DRM', 'NOT_FOUND')
+                        ORDER BY updated_at DESC
+                        LIMIT 20
+                        """
+                    ).fetchall()
+                    for r in attn_rows:
+                        conf = r['match_confidence']
+                        _sq['attention_items'].append({
+                            'file_name': r['file_name'] or os.path.basename(r['file_path'] or ''),
+                            'file_path': r['file_path'] or '',
+                            'file_ext': (r['file_ext'] or '').upper().lstrip('.'),
+                            'status': r['status'] or 'UNKNOWN',
+                            'isbn': r['isbn'] or '',
+                            'title': r['title'] or r['orig_title'] or '',
+                            'author': r['author'] or r['orig_author'] or '',
+                            'match_confidence': round(float(conf) * 100) if conf is not None else None,
+                            'error_message': r['error_message'] or '',
+                            'updated_at': _format_est_timestamp(r['updated_at'], include_tz=True),
+                        })
+                import copy as _copy
+                _DASHBOARD_HEAVY_CACHE['sqlite_heavy'] = _copy.deepcopy(_sq)
+                _DASHBOARD_HEAVY_CACHE['sqlite_expires_at'] = _time.monotonic() + 60.0
+                if _DASHBOARD_HEAVY_CACHE.get('catalog_summary'):
+                    raw_disk = json.dumps({
+                        'catalog_summary': _DASHBOARD_HEAVY_CACHE['catalog_summary'],
+                        'sqlite_heavy': _DASHBOARD_HEAVY_CACHE['sqlite_heavy'],
                     })
-        except Exception as e:
-            sqlite_stats['error'] = str(e)
-        finally:
-            if conn is not None:
-                conn.close()
+                    for _scp in status_cache_paths:
+                        try:
+                            _scp.write_text(raw_disk, encoding='utf-8')
+                        except Exception:
+                            continue
+            except Exception as e:
+                _sq['error'] = str(e)
+            finally:
+                if conn is not None:
+                    conn.close()
+                _DASHBOARD_HEAVY_CACHE['_sq_refreshing'] = False
+        return _sq
+
+    import copy as _copy
+    if _DASHBOARD_HEAVY_CACHE.get('sqlite_heavy') is not None:
+        sqlite_stats = _copy.deepcopy(_DASHBOARD_HEAVY_CACHE['sqlite_heavy'])
+        if now_mono >= _DASHBOARD_HEAVY_CACHE.get('sqlite_expires_at', 0.0) and not _DASHBOARD_HEAVY_CACHE.get('_sq_refreshing'):
+            _DASHBOARD_HEAVY_CACHE['_sq_refreshing'] = True
+            _DASHBOARD_HEAVY_CACHE['sqlite_expires_at'] = now_mono + 60.0
+            import threading
+            threading.Thread(target=_compute_sqlite_heavy_stats, daemon=True).start()
+    else:
+        sqlite_stats = _compute_sqlite_heavy_stats()
+
+    # Always overlay live in-memory book counts from `get_enriched_item_ids_index()` so
+    # Status Dashboard (`Enriched`, `Review`, `No ISBN`) and Catalog Sidebar match 100% in real time.
+    try:
+        from .opds import get_enriched_item_ids_index
+        _live_idx = get_enriched_item_ids_index()
+        _live_enr = len(_live_idx.get('enriched_ids') or [])
+        _live_rev_all = len(_live_idx.get('needs_review_ids') or [])
+        _live_strict_rev = len(_live_idx.get('strict_in_review_ids') or [])
+        _live_no_isbn = max(0, _live_rev_all - _live_strict_rev)
+        if _live_enr > 0:
+            if not sqlite_stats.get('enriched_files_count'):
+                sqlite_stats['enriched_files_count'] = sqlite_stats['status_counts'].get('SUCCESS', _live_enr)
+            sqlite_stats['status_counts']['SUCCESS'] = _live_enr
+            sqlite_stats['status_counts']['NEEDS_REVIEW'] = _live_strict_rev
+            sqlite_stats['status_counts']['NO_ISBN'] = _live_no_isbn
+            sqlite_stats['status_counts']['NOT_FOUND'] = _live_no_isbn
+            sqlite_stats['status_counts']['FAILED'] = 0
+            sqlite_stats['total_processed'] = (
+                _live_enr
+                + _live_strict_rev
+                + _live_no_isbn
+                + sqlite_stats['status_counts'].get('QUARANTINED', 0)
+                + sqlite_stats['status_counts'].get('HAS_DRM', 0)
+                + sqlite_stats['status_counts'].get('IGNORED', 0)
+            )
+            _tp = sqlite_stats['total_processed']
+            for _st_k, _cnt_v in sqlite_stats['status_counts'].items():
+                sqlite_stats['status_pcts'][_st_k] = _pct(_cnt_v, _tp)
+            sqlite_stats['success_rate'] = _pct(_live_enr, _tp)
+    except Exception:
+        pass
 
     # 3. Scanner Live Activity & Log Tail
     scanner_lines = _tail_log_file(scanner_log_path, max_lines=40)
     epubmeta_lines = _tail_log_file(epubmeta_log_path, max_lines=30)
 
-    lock_exists = (scanner_dir / 'nas_scanner.lock').exists() or (scanner_dir / 'scanner.lock').exists()
-    loop_lock_exists = (scanner_dir / 'nas_scanner_loop.lock').exists()
+    lock_exists = (
+        (scanner_dir / 'logs' / 'nas_scanner.lock').exists()
+        or (scanner_dir / 'nas_scanner.lock').exists()
+        or (scanner_dir / 'scanner.lock').exists()
+    )
+    loop_lock_exists = (
+        (scanner_dir / 'logs' / 'nas_scanner_loop.lock').exists()
+        or (scanner_dir / 'nas_scanner_loop.lock').exists()
+    )
 
     # Read configured scan interval from config.json (default 4.0 hours)
     scan_interval_hours = 4.0
@@ -1486,14 +1998,14 @@ def get_conversion_and_import_status() -> dict:
 
     log_mtime_str = ''
     log_dt = None
-    now_dt = datetime.now(tz=timezone.utc)
+    now_dt = datetime.now(tz=_EST_TZ)
     seconds_since_log = None
     if scanner_log_path.exists():
         try:
             mtime = scanner_log_path.stat().st_mtime
-            log_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+            log_dt = datetime.fromtimestamp(mtime, tz=_EST_TZ)
             seconds_since_log = max(0, int((now_dt - log_dt).total_seconds()))
-            log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+            log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         except Exception:
             pass
 
@@ -1540,7 +2052,7 @@ def get_conversion_and_import_status() -> dict:
         next_scan_countdown = 'Scanning now'
     elif log_dt is not None:
         next_scan_dt = log_dt + timedelta(hours=scan_interval_hours)
-        next_scan_at = next_scan_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        next_scan_at = next_scan_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         next_scan_iso = next_scan_dt.isoformat()
         rem_sec = int((next_scan_dt - now_dt).total_seconds())
         next_scan_in_seconds = max(0, rem_sec)
@@ -1585,117 +2097,35 @@ def get_conversion_and_import_status() -> dict:
             if scanner_log_path.exists():
                 try:
                     mtime = scanner_log_path.stat().st_mtime
-                    log_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                    log_dt = datetime.fromtimestamp(mtime, tz=_EST_TZ)
                     seconds_since_log = max(0, int((now_dt - log_dt).total_seconds()))
-                    log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
                 except Exception:
                     pass
 
-    # 4. Remaining to Catalog & Remaining to Enrich Queue Metrics
-    remaining_to_catalog = 0
-    catalog_sync_chunk_info = ''
-    discovered_files_total = max(sqlite_stats['tracked_files_count'], total_files)
-    eligible_to_enrich_initial = 0
-    remaining_to_enrich = 0
-    skipped_complete_bookdb = catalog_agg['complete_metadata'] or 0
-    cycle_inspected = 0
-    cycle_net_used = 0
-    cycle_net_cap = 4000
-    if config_file.exists():
-        try:
-            with open(config_file, 'r', encoding='utf-8') as cf:
-                cfg_data = json.load(cf)
-                em_cfg = cfg_data.get('epubmeta') or {}
-                if em_cfg.get('max_files'):
-                    cycle_net_cap = max(4000, int(em_cfg['max_files'])) if int(em_cfg['max_files']) == 2500 else int(em_cfg['max_files'])
-        except Exception:
-            pass
-
-    if scanner_log_path.exists():
-        try:
-            with scanner_log_path.open('rb') as lf:
-                lf.seek(0, os.SEEK_END)
-                fsize = lf.tell()
-                lf.seek(max(0, fsize - 512 * 1024), os.SEEK_SET)
-                tail_text = lf.read().decode('utf-8', errors='replace')
-
-            # Enrichment eligibility header from current/latest scan pass
-            elig_matches = list(
-                re.finditer(
-                    r'out of (\d+) eligible:\s*(\d+) new/changed,\s*(\d+) backfill;\s*'
-                    r'skipped (\d+) previously processed,\s*(\d+) complete/DRM/invalid',
-                    tail_text,
-                )
-            )
-            last_elig_pos = -1
-            new_changed_in_walk = 0
-            if elig_matches:
-                m_el = elig_matches[-1]
-                last_elig_pos = m_el.start()
-                eligible_to_enrich_initial = int(m_el.group(1))
-                new_changed_in_walk = int(m_el.group(2))
-                skipped_complete_bookdb = int(m_el.group(5))
-
-            # Progress inside current enrichment pass: [275/597078 | net:199/2500]
-            prog_matches = list(
-                re.finditer(r'\[(\d+)/(\d+)\s*\|\s*net:(\d+)/(\d+|all)\]\s*Inspecting', tail_text)
-            )
-            if prog_matches and prog_matches[-1].start() > last_elig_pos:
-                m_pr = prog_matches[-1]
-                cycle_inspected = int(m_pr.group(1))
-                eligible_to_enrich_initial = int(m_pr.group(2))
-                cycle_net_used = int(m_pr.group(3))
-                if m_pr.group(4).isdigit() and is_scanning:
-                    logged_cap = int(m_pr.group(4))
-                    cycle_net_cap = 4000 if logged_cap == 2500 else logged_cap
-
-            if eligible_to_enrich_initial > 0:
-                remaining_to_enrich = max(0, eligible_to_enrich_initial - cycle_inspected)
-            else:
-                # Fallback estimate from tracked files minus complete & processed
-                est_epubs = next(
-                    (r['count'] for r in format_rows if (r.get('file_format') or '').upper() == 'EPUB'),
-                    total_files,
-                )
-                remaining_to_enrich = max(
-                    0, est_epubs - skipped_complete_bookdb - sqlite_stats['total_processed']
-                )
-
-            # Cataloging queue (files needing metadata extraction & syncing)
-            parse_matches = list(
-                re.finditer(r'Found (\d+) files needing metadata extraction and syncing', tail_text)
-            )
-            chunk_matches = list(
-                re.finditer(r'Processing Chunk (\d+)/(\d+)\s*\((\d+) files\)', tail_text)
-            )
-            fin_matches = list(
-                re.finditer(
-                    r'Scan Finished\.\s*Discovered:\s*(\d+)\s*\|\s*Synced:\s*(\d+)\s*\|\s*Skipped:\s*(\d+)\s*\|\s*Failed:\s*(\d+)',
-                    tail_text,
-                )
-            )
-            for fm in reversed(fin_matches):
-                disc_val = int(fm.group(1))
-                if disc_val > 0:
-                    discovered_files_total = max(discovered_files_total, disc_val)
-                    break
-
-            last_parse_pos = parse_matches[-1].start() if parse_matches else -1
-            last_fin_pos = fin_matches[-1].start() if fin_matches else -1
-
-            if last_parse_pos > last_fin_pos and is_scanning:
-                total_to_parse = int(parse_matches[-1].group(1))
-                if chunk_matches and chunk_matches[-1].start() > last_parse_pos:
-                    c_idx = int(chunk_matches[-1].group(1))
-                    c_tot = int(chunk_matches[-1].group(2))
-                    remaining_to_catalog = max(0, total_to_parse - (c_idx - 1) * 250)
-                    catalog_sync_chunk_info = f'Chunk {c_idx}/{c_tot}'
-                else:
-                    remaining_to_catalog = total_to_parse
-            elif is_scanning and last_elig_pos > last_fin_pos:
-                remaining_to_catalog = new_changed_in_walk
-        except Exception:
-            pass
+    # 4. Remaining to Catalog & Remaining to Enrich Queue Metrics (unified with Catalog Sidebar)
+    est_epubs = next(
+        (r['count'] for r in format_rows if (r.get('file_format') or '').upper() == 'EPUB'),
+        total_files,
+    )
+    cyc_metrics = _get_scanner_cycle_metrics(
+        fallback_total_files=est_epubs,
+        fallback_complete_bookdb=catalog_agg['complete_metadata'] or 0,
+        fallback_total_processed=sqlite_stats['total_processed'],
+        is_scanning=is_scanning,
+    )
+    remaining_to_catalog = cyc_metrics['remaining_to_catalog']
+    catalog_sync_chunk_info = cyc_metrics['catalog_sync_chunk_info']
+    discovered_files_total = max(
+        sqlite_stats['tracked_files_count'],
+        total_files,
+        cyc_metrics['discovered_files_total'],
+    )
+    remaining_to_enrich = cyc_metrics['remaining_to_enrich']
+    skipped_complete_bookdb = cyc_metrics['skipped_complete_bookdb']
+    cycle_inspected = cyc_metrics['cycle_inspected']
+    cycle_net_used = cyc_metrics['cycle_net_used']
+    cycle_net_cap = cyc_metrics['cycle_net_cap']
 
     cycle_net_remaining = max(0, cycle_net_cap - cycle_net_used)
     enrich_total_scope = remaining_to_enrich + sqlite_stats['total_processed']
@@ -1712,8 +2142,20 @@ def get_conversion_and_import_status() -> dict:
     sqlite_stats['cycle_net_remaining'] = cycle_net_remaining
     sqlite_stats['enrich_progress_pct'] = enrich_progress_pct
 
+    if sqlite_stats.get('last_synced_at'):
+        sqlite_stats['last_synced_at'] = _format_est_timestamp(sqlite_stats['last_synced_at'], include_tz=True)
+    for _rc in sqlite_stats.get('recent_conversions') or []:
+        if _rc.get('updated_at'):
+            _rc['updated_at'] = _format_est_timestamp(_rc['updated_at'], include_tz=True)
+    for _ai in sqlite_stats.get('attention_items') or []:
+        if _ai.get('updated_at'):
+            _ai['updated_at'] = _format_est_timestamp(_ai['updated_at'], include_tz=True)
+    for _ri in recent_imports:
+        if _ri.get('scanned_at'):
+            _ri['scanned_at'] = _format_est_timestamp(_ri['scanned_at'], include_tz=True)
+
     return {
-        'generated_at': now_dt.strftime('%Y-%m-%d %H:%M:%S UTC'),
+        'generated_at': now_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
         'scanner': {
             'is_scanning': is_scanning,
             'daemon_active': daemon_active,
@@ -2089,6 +2531,7 @@ class ConversionItemsAPIView(APIView):
                         if final_title:
                             cat_item.title = final_title
                         if final_author:
+                            final_author = format_normalized_authors_str(final_author) or final_author
                             cat_item.authors = final_author
                         cat_item.publisher = final_pub or cat_item.publisher
                         cat_item.isbn = final_isbn or cat_item.isbn
@@ -2239,8 +2682,8 @@ class ConversionHistoryAPIView(APIView):
             bucket_map: dict[str, dict[str, int]] = {}
 
             rows = cur.execute(
-                f"""
-                SELECT substr(updated_at, 1, {substr_len}) AS bucket,
+                """
+                SELECT substr(updated_at, 1, 13) AS bucket,
                        status,
                        COUNT(*) AS cnt
                 FROM processed_files
@@ -2251,9 +2694,7 @@ class ConversionHistoryAPIView(APIView):
             ).fetchall()
 
             for r in rows:
-                b = (r['bucket'] or '').replace('T', ' ')
-                if granularity == 'hour' and len(b) == 13:
-                    b = f"{b}:00"
+                b = _convert_utc_bucket_to_est(r['bucket'] or '', granularity)
                 st = (r['status'] or 'UNKNOWN').upper()
                 if st == 'NOT_FOUND':
                     st = 'NO_ISBN'
@@ -2267,8 +2708,8 @@ class ConversionHistoryAPIView(APIView):
             # Also include metadata_cache timestamps if present
             try:
                 c_rows = cur.execute(
-                    f"""
-                    SELECT substr(updated_at, 1, {substr_len}) AS bucket,
+                    """
+                    SELECT substr(updated_at, 1, 13) AS bucket,
                            COUNT(*) AS cnt
                     FROM metadata_cache
                     WHERE updated_at IS NOT NULL AND updated_at != ''
@@ -2277,9 +2718,7 @@ class ConversionHistoryAPIView(APIView):
                     """
                 ).fetchall()
                 for r in c_rows:
-                    b = (r['bucket'] or '').replace('T', ' ')
-                    if granularity == 'hour' and len(b) == 13:
-                        b = f"{b}:00"
+                    b = _convert_utc_bucket_to_est(r['bucket'] or '', granularity)
                     if b not in bucket_map:
                         bucket_map[b] = {k: 0 for k in statuses + ['CACHE', 'TRACKED']}
                     bucket_map[b]['CACHE'] += int(r['cnt'] or 0)
@@ -2289,13 +2728,13 @@ class ConversionHistoryAPIView(APIView):
             # Also include file_states (Tracked File States in SQLite) cached for 120s
             try:
                 now_m = _time.monotonic()
-                cache_entry = _TRACKED_HISTORY_CACHE.get(granularity)
+                cache_entry = _TRACKED_HISTORY_CACHE.get('hour')
                 if cache_entry and now_m < cache_entry['expires_at']:
                     t_rows = cache_entry['rows']
                 else:
                     raw_t = cur.execute(
-                        f"""
-                        SELECT substr(synced_at, 1, {substr_len}) AS bucket,
+                        """
+                        SELECT substr(synced_at, 1, 13) AS bucket,
                                COUNT(*) AS cnt
                         FROM file_states
                         WHERE synced_at IS NOT NULL AND synced_at != ''
@@ -2304,14 +2743,12 @@ class ConversionHistoryAPIView(APIView):
                         """
                     ).fetchall()
                     t_rows = [(r['bucket'], int(r['cnt'] or 0)) for r in raw_t]
-                    _TRACKED_HISTORY_CACHE[granularity] = {
+                    _TRACKED_HISTORY_CACHE['hour'] = {
                         'expires_at': now_m + 120.0,
                         'rows': t_rows,
                     }
                 for raw_b, cnt in t_rows:
-                    b = (raw_b or '').replace('T', ' ')
-                    if granularity == 'hour' and len(b) == 13:
-                        b = f"{b}:00"
+                    b = _convert_utc_bucket_to_est(raw_b or '', granularity)
                     if b not in bucket_map:
                         bucket_map[b] = {k: 0 for k in statuses + ['CACHE', 'TRACKED']}
                     bucket_map[b]['TRACKED'] += cnt
@@ -2430,9 +2867,10 @@ class CatalogSearchAPIView(APIView):
 
         qs = perform_search(query, filters)
         if isbn_filter:
-            qs = qs.filter(Q(isbn__iexact=isbn_filter) | Q(asin__iexact=isbn_filter))
+            isbn_cands = list({isbn_filter, isbn_filter.upper(), isbn_filter.lower()})
+            qs = qs.filter(Q(isbn__in=isbn_cands) | Q(asin__in=isbn_cands))
         if author_filter:
-            qs = qs.filter(authors__icontains=author_filter)
+            qs = qs.filter(build_author_q_filter(author_filter))
 
         if not query and not isbn_filter and not author_filter and not file_formats and not item_types:
             stats, _ = _get_cached_dashboard_meta()
@@ -2480,14 +2918,15 @@ class CatalogItemDetailAPIView(APIView):
         except ValueError:
             pass
 
+        ident_cands = list({ident, ident.upper(), ident.lower()})
         item = CatalogItem.objects.prefetch_related('files').filter(
-            Q(isbn__iexact=ident) | Q(asin__iexact=ident)
+            Q(isbn__in=ident_cands) | Q(asin__in=ident_cands)
         ).first()
         if item:
             return item
 
         loc = FileLocation.objects.select_related('catalog_item').filter(
-            Q(file_hash=ident) | Q(file_path=ident) | Q(file_name__iexact=ident)
+            Q(file_hash=ident) | Q(file_path=ident) | Q(file_name__in=ident_cands)
         ).first()
         if loc and loc.catalog_item:
             return loc.catalog_item

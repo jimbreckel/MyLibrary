@@ -1,6 +1,27 @@
 import logging
 import os
 import sys
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+os.environ.setdefault('TZ', 'America/New_York')
+if hasattr(time, 'tzset'):
+    try:
+        time.tzset()
+    except Exception:
+        pass
+
+_EST_TZ = ZoneInfo('America/New_York')
+
+
+class _EasternLogFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=_EST_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return f"{dt.strftime('%Y-%m-%d %H:%M:%S')},{int(record.msecs):03d} {dt.strftime('%Z')}"
+
 
 class LineLimitingFileHandler(logging.FileHandler):
     """
@@ -64,7 +85,7 @@ def setup_logging(log_file='scanner.log', level=logging.INFO):
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    formatter = _EasternLogFormatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
     
     # File Handler
     file_handler = LineLimitingFileHandler(log_file, max_lines=100000, encoding='utf-8')

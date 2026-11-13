@@ -18,8 +18,10 @@ services:
       - .env
     environment:
       - DEBUG=True
-    mem_limit: 1536m
-    memswap_limit: 1536m
+      - TZ=America/New_York
+      - TIME_ZONE=America/New_York
+    mem_limit: 4g
+    memswap_limit: 4g
     networks:
       - default
     restart: always
@@ -47,6 +49,8 @@ services:
       - .env
     environment:
       - SCAN_INTERVAL_HOURS=4
+      - TZ=America/New_York
+      - TIME_ZONE=America/New_York
     networks:
       - default
     restart: always

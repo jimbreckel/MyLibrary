@@ -53,6 +53,7 @@ urlpatterns = [
     path('opds/opensearch.xml', opds.OPDSOpenSearchView.as_view(), name='opds_opensearch'),
     path('opds/search/', opds.OPDSSearchView.as_view(), name='opds_search'),
     path('opds/interesting/', opds.OPDSInterestingFeedView.as_view(), name='opds_interesting'),
+    path('opds/packt/', opds.OPDSPacktFeedView.as_view(), name='opds_packt'),
     path('opds/bad-metadata/', opds.OPDSBadMetadataFeedView.as_view(), name='opds_bad_metadata'),
     path('opds/missing-covers/', opds.OPDSMissingCoverFeedView.as_view(), name='opds_missing_covers'),
     path('opds/flag-bad-meta/<str:item_id>/', opds.OPDSFlagBadMetadataView.as_view(), name='opds_flag_bad_meta'),

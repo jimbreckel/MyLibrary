@@ -157,7 +157,7 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
         )
         if last_looks_like_author and (had_trailing_pub_paren or first_looks_like_title):
             author_candidate = last_seg
-            title_candidate = " - ".join(parts[:-1]).strip()
+            title_candidate = ": ".join(p.strip() for p in parts[:-1] if p.strip())
         elif first_looks_like_title:
             title_candidate = f"{first_seg}: {' - '.join(parts[1:]).strip()}"
             author_candidate = None
