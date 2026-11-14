@@ -178,42 +178,69 @@ class GeminiBookExtractor:
         authors: Optional[str] = None,
         publisher: Optional[str] = None,
         file_path_hint: Optional[str] = None,
+        focus_title_author: bool = False,
     ) -> Dict[str, Any]:
-        """Generate a catalog-ready 2-4 sentence description grounded in the book's actual content."""
+        """Generate a catalog-ready 2-4 sentence description and/or clean title & authors grounded in the book's actual content."""
         if not self.is_available:
             logger.debug("Gemini API key not configured; skipping AI content description.")
             return {}
 
-        prompt = (
-            "You are an expert literary and technical book cataloger. "
-            "This book/document did not match external ISBN catalogs and currently has no description. "
-            "Carefully read the provided actual book content (front matter, table of contents, preface, "
-            "introduction, opening chapters, and/or rendered page images) along with any title/author/path clues, "
-            "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content.\n\n"
-            "Respond ONLY with a valid JSON object with these keys:\n"
-            "{\n"
-            '  "description": "2-4 sentence informative synopsis based strictly on the document content",\n'
-            '  "title": "clean human-readable title if identifiable from content, else null",\n'
-            '  "authors": ["author 1", ...],\n'
-            '  "publisher": "publisher or organization if identifiable, else null",\n'
-            '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
-            "}\n"
-            "Important rules:\n"
-            "- Base the description directly on the actual topics, chapters, narrative, or technical material inside the document.\n"
-            "- Do NOT invent plot points unsupported by the text, and do NOT write generic filler like 'This PDF document contains text.'\n"
-            "- Keep the description clear, natural, and catalog-ready (roughly 40 to 110 words, 2 to 4 sentences).\n"
-        )
+        if focus_title_author:
+            prompt = (
+                "You are an expert literary, academic, and technical book cataloger. "
+                "The user is fixing a book/document whose stored Title or Author is wrong, missing, or a raw DTP/filename slug (such as '*.indd', 'Untitled', or 'Unknown Author'). "
+                "Carefully inspect the rendered cover/title/copyright page images, extracted front-matter text, and file path/filename clues to determine the exact, clean human-readable Title, Author(s), Publisher, Published Year, and ISBN.\n\n"
+                "Respond ONLY with a valid JSON object with these keys:\n"
+                "{\n"
+                '  "title": "clean human-readable title (include concise subtitle with \': \' when prominent on cover/title page)",\n'
+                '  "authors": ["First Last", ...],\n'
+                '  "publisher": "publisher or issuing organization if identifiable, else null",\n'
+                '  "published_year": "4-digit publication year if stated on copyright/title page, else null",\n'
+                '  "isbn": "ISBN-13 or ISBN-10 digits if printed in front matter, else null",\n'
+                '  "description": "2-4 sentence informative synopsis based strictly on the document content, or null",\n'
+                '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
+                "}\n"
+                "Important rules:\n"
+                "- Do NOT parrot back broken stored metadata like '*.indd', '*.qxd', '*.pdf', 'Microsoft Word - ...', underscores, or 'Unknown Author'.\n"
+                "- Read the cover image and title/copyright pages carefully, cross-checking with the filename/folder path.\n"
+                "- Format person authors in standard 'First Last' order. If no individual human author/editor is credited on an institutional report or rulebook, use the authoring organization/studio.\n"
+            )
+        else:
+            prompt = (
+                "You are an expert literary and technical book cataloger. "
+                "This book/document did not match external ISBN catalogs and currently has no description. "
+                "Carefully read the provided actual book content (front matter, table of contents, preface, "
+                "introduction, opening chapters, and/or rendered page images) along with any title/author/path clues, "
+                "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content.\n\n"
+                "Respond ONLY with a valid JSON object with these keys:\n"
+                "{\n"
+                '  "description": "2-4 sentence informative synopsis based strictly on the document content",\n'
+                '  "title": "clean human-readable title if identifiable from content, else null",\n'
+                '  "authors": ["First Last", ...],\n'
+                '  "publisher": "publisher or organization if identifiable, else null",\n'
+                '  "published_year": "4-digit publication year if stated on copyright/title page, else null",\n'
+                '  "isbn": "ISBN-13 or ISBN-10 digits if printed in front matter, else null",\n'
+                '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
+                "}\n"
+                "Important rules:\n"
+                "- Base the description directly on the actual topics, chapters, narrative, or technical material inside the document.\n"
+                "- Do NOT invent plot points unsupported by the text, and do NOT write generic filler like 'This PDF document contains text.'\n"
+                "- Keep the description clear, natural, and catalog-ready (roughly 40 to 110 words, 2 to 4 sentences).\n"
+                "- NEVER return raw filenames, DTP production slugs (like '*.indd' or 'Microsoft Word - ...'), or 'Unknown Author' as the title or author.\n"
+            )
 
         contents: List[Any] = [prompt]
         meta_lines: List[str] = []
+        if file_path_hint:
+            meta_lines.append(f"File Path / Filename Clue: {file_path_hint}")
         if title:
-            meta_lines.append(f"Current Title: {title}")
+            lbl = "Current Stored Title (may be wrong/junk — verify against cover & content)" if focus_title_author else "Current Title"
+            meta_lines.append(f"{lbl}: {title}")
         if authors:
-            meta_lines.append(f"Current Author(s): {authors}")
+            lbl_a = "Current Stored Author(s) (may be wrong/missing — verify against cover & content)" if focus_title_author else "Current Author(s)"
+            meta_lines.append(f"{lbl_a}: {authors}")
         if publisher:
             meta_lines.append(f"Current Publisher: {publisher}")
-        if file_path_hint:
-            meta_lines.append(f"File Path: {file_path_hint}")
         if meta_lines:
             contents.append("--- EXISTING METADATA / FILE CLUES ---\n" + "\n".join(meta_lines) + "\n--- END CLUES ---")
 
@@ -247,16 +274,34 @@ class GeminiBookExtractor:
             raw_text = response.text or ""
             cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.IGNORECASE)
             cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-            data = json.loads(cleaned)
+            try:
+                data = json.loads(cleaned)
+            except Exception:
+                m_json = re.search(r"\{.*\}", cleaned, re.S)
+                if not m_json:
+                    raise
+                data = json.loads(m_json.group(0))
             if not isinstance(data, dict):
                 return {}
-            return {
+            res_out: Dict[str, Any] = {
+                "isbn13": None,
+                "isbn10": None,
                 "description": str(data.get("description")).strip() if data.get("description") else None,
                 "title": data.get("title") or None,
                 "authors": [a.strip() for a in (data.get("authors") or []) if isinstance(a, str) and a.strip()],
                 "publisher": data.get("publisher") or None,
+                "published_year": str(data.get("published_year")) if data.get("published_year") else None,
                 "subjects": [s.strip() for s in (data.get("subjects") or []) if isinstance(s, str) and s.strip()],
             }
+            for key in ("isbn13", "isbn10", "isbn"):
+                val = data.get(key)
+                if val:
+                    i13, i10 = normalize_isbn(str(val))
+                    if i13:
+                        res_out["isbn13"] = i13
+                        res_out["isbn10"] = i10
+                        break
+            return res_out
         except Exception as exc:
             err_str = str(exc)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:

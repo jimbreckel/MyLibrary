@@ -179,10 +179,17 @@ class FileSyncAPIView(APIView):
                     updated = True
                 else:
                     try:
-                        from .opds import classify_cover_image
+                        from .opds import (
+                            classify_cover_image,
+                            get_original_cover_backup_for_item,
+                            should_prefer_candidate_cover,
+                        )
                         if (
                             classify_cover_image(item.cover_thumbnail, item.cover_image_url) == 'text_only'
                             and classify_cover_image(cover_thumbnail) is None
+                        ) or (
+                            get_original_cover_backup_for_item(item.id) is None
+                            and should_prefer_candidate_cover(item.cover_thumbnail, cover_thumbnail)
                         ):
                             item.cover_thumbnail = cover_thumbnail
                             updated = True
@@ -231,9 +238,21 @@ class FileSyncAPIView(APIView):
             if description and not item.description:
                 item.description = description
                 updated = True
-            if cover_thumbnail and not item.cover_thumbnail:
-                item.cover_thumbnail = cover_thumbnail
-                updated = True
+            if cover_thumbnail:
+                if not item.cover_thumbnail:
+                    item.cover_thumbnail = cover_thumbnail
+                    updated = True
+                else:
+                    try:
+                        from .opds import get_original_cover_backup_for_item, should_prefer_candidate_cover
+                        if (
+                            get_original_cover_backup_for_item(item.id) is None
+                            and should_prefer_candidate_cover(item.cover_thumbnail, cover_thumbnail)
+                        ):
+                            item.cover_thumbnail = cover_thumbnail
+                            updated = True
+                    except Exception:
+                        pass
             if updated:
                 item.save()
 
@@ -311,9 +330,21 @@ class MediaSyncAPIView(APIView):
             if cover_image_url and not item.cover_image_url:
                 item.cover_image_url = cover_image_url
                 updated = True
-            if cover_thumbnail and not item.cover_thumbnail:
-                item.cover_thumbnail = cover_thumbnail
-                updated = True
+            if cover_thumbnail:
+                if not item.cover_thumbnail:
+                    item.cover_thumbnail = cover_thumbnail
+                    updated = True
+                else:
+                    try:
+                        from .opds import get_original_cover_backup_for_item, should_prefer_candidate_cover
+                        if (
+                            get_original_cover_backup_for_item(item.id) is None
+                            and should_prefer_candidate_cover(item.cover_thumbnail, cover_thumbnail)
+                        ):
+                            item.cover_thumbnail = cover_thumbnail
+                            updated = True
+                    except Exception:
+                        pass
             if description and not item.description:
                 item.description = description
                 updated = True

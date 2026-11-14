@@ -429,12 +429,19 @@ def get_epub_cover(filepath):
 
 
 def get_pdf_cover(filepath):
-    """Render the full first page cover of a PDF file (avoiding partial header/banner XObject slices)."""
+    """Extract cover image bytes from Page 1 of a PDF (extracting embedded portrait covers on hybrid/blank-margin pages, or rendering full Page 1)."""
     try:
         import pymupdf
         doc = pymupdf.open(filepath)
         try:
             if (not doc.needs_pass or doc.authenticate("")) and len(doc) > 0:
+                try:
+                    from epubmeta.readers.pdf import extract_pdf_page0_cover_bytes
+                    cov = extract_pdf_page0_cover_bytes(doc)
+                    if cov:
+                        return cov
+                except Exception:
+                    pass
                 p0 = doc[0]
                 pix = p0.get_pixmap(dpi=150)
                 return pix.tobytes("png")

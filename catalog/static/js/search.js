@@ -269,6 +269,27 @@ const initCatalogSearch = () => {
             modalAiDescBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content`;
             modalAiDescBtn.style.display = 'inline-flex';
         }
+        const modalAiMetaBtn = document.getElementById('modal-btn-ai-title-author');
+        const modalAiMetaSt = document.getElementById('modal-ai-title-author-status');
+        if (modalAiMetaSt) {
+            modalAiMetaSt.style.display = 'none';
+            modalAiMetaSt.textContent = '';
+        }
+        if (modalAiMetaBtn) {
+            modalAiMetaBtn.disabled = false;
+            modalAiMetaBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Title &amp; Author`;
+            modalAiMetaBtn.style.display = 'inline-flex';
+        }
+        const quickEditDrawer = document.getElementById('modal-quick-edit-drawer');
+        if (quickEditDrawer) {
+            quickEditDrawer.style.display = 'none';
+        }
+        const qInTitle = document.getElementById('modal-quick-input-title');
+        const qInAuth = document.getElementById('modal-quick-input-author');
+        const qInPub = document.getElementById('modal-quick-input-publisher');
+        if (qInTitle) qInTitle.value = title || '';
+        if (qInAuth) qInAuth.value = (authors && authors !== 'Unknown Author') ? authors : '';
+        if (qInPub) qInPub.value = publisher || '';
         const errBanner = document.getElementById('modal-enrich-error-banner');
         if (errBanner) {
             if (!isEnriched && (errMsg || errStatus)) {
@@ -1606,10 +1627,10 @@ const initCatalogSearch = () => {
             }
         });
 
-        window.moveToMagNow = function (btn) {
+        window.moveToMagNow = function (btn, targetBucket) {
             if (!btn) return;
             const itemId = btn.getAttribute('data-item-id');
-            triggerMoveToMags({ itemId, btn });
+            triggerMoveToMags({ itemId, btn, targetBucket: targetBucket || '' });
         };
 
         document.querySelectorAll('.btn-move-tomag').forEach(btn => {
@@ -1621,13 +1642,37 @@ const initCatalogSearch = () => {
             }
         });
 
+        window.moveToBookNow = function (btn) {
+            if (!btn) return;
+            const itemId = btn.getAttribute('data-item-id');
+            triggerMoveToBooks({ itemId, btn });
+        };
+
+        document.querySelectorAll('.btn-move-tobook').forEach(btn => {
+            if (!btn.hasAttribute('onclick')) {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    window.moveToBookNow(btn);
+                });
+            }
+        });
+
         // Close modal handlers
         modalClose.addEventListener('click', closeModal);
         modalOverlay.addEventListener('click', (e) => {
             if (e.target === modalOverlay) closeModal();
         });
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && modalOverlay.classList.contains('active')) closeModal();
+            if (e.key === 'Escape') {
+                closeTypePillDropdown();
+                if (modalOverlay.classList.contains('active')) closeModal();
+            }
+        });
+        document.addEventListener('click', (e) => {
+            const menu = document.getElementById('type-pill-dropdown-menu');
+            if (menu && menu.style.display !== 'none' && !menu.contains(e.target) && !e.target.closest('.card-type-badge')) {
+                closeTypePillDropdown();
+            }
         });
     }
 
@@ -1638,7 +1683,219 @@ const initCatalogSearch = () => {
         }, 300); // matches CSS transition duration
     }
 
-    function triggerMoveToMags({ itemId, fileId, btn }) {
+    function getAvailableTypePillOptions() {
+        return window.VX_UNLOCKED ? ['BOOK', 'MAGAZINE', 'ARCHIVE-X'] : ['BOOK', 'MAGAZINE'];
+    }
+
+    function closeTypePillDropdown() {
+        const menu = document.getElementById('type-pill-dropdown-menu');
+        if (menu) {
+            menu.style.display = 'none';
+            menu._anchorBadge = null;
+        }
+    }
+
+    function updateTypePillAfterMove(typeBadge, newType, isUndoneToOrigin, fileId, customLabel, customTitle) {
+        if (!typeBadge) return;
+        const normType = String(newType || 'BOOK').toUpperCase();
+        const opts = getAvailableTypePillOptions();
+        const hasDropdown = opts.length > 2;
+        const canUndo = !isUndoneToOrigin;
+
+        typeBadge.disabled = false;
+        typeBadge.setAttribute('data-current-type', normType);
+        typeBadge.setAttribute('data-can-undo', canUndo ? 'true' : 'false');
+        if (fileId !== undefined) {
+            typeBadge.setAttribute('data-file-id', fileId || '');
+        }
+
+        if (normType === 'BOOK') {
+            typeBadge.className = 'card-type-badge type-book';
+            typeBadge.style.background = '';
+        } else if (normType === 'ARCHIVE-X') {
+            typeBadge.className = 'card-type-badge type-magazine';
+            typeBadge.style.background = 'rgba(244,63,94,0.88)';
+        } else {
+            typeBadge.className = 'card-type-badge type-magazine';
+            typeBadge.style.background = canUndo ? 'rgba(56,189,248,0.88)' : '';
+        }
+
+        const labelText = customLabel || normType;
+        if (canUndo) {
+            typeBadge.innerHTML = `${labelText} <i class="fa-solid fa-rotate-left pill-undo-icon" style="font-size:0.55rem; opacity:0.95; margin-left:2px;" title="Undo move (restore directly to origin)"></i>${hasDropdown ? '<i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>' : ''}`;
+        } else {
+            typeBadge.innerHTML = `${labelText} ${hasDropdown ? '<i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>' : '<i class="fa-solid fa-repeat" style="font-size:0.55rem; opacity:0.8; margin-left:2px;"></i>'}`;
+        }
+
+        if (customTitle) {
+            typeBadge.title = customTitle;
+        }
+        typeBadge.onclick = function (e) {
+            if (e) e.stopPropagation();
+            window.onTypePillClick(typeBadge, e);
+        };
+    }
+
+    function openTypePillDropdown(badgeEl) {
+        if (!badgeEl) return;
+        let menu = document.getElementById('type-pill-dropdown-menu');
+        if (menu && menu.style.display !== 'none' && menu._anchorBadge === badgeEl) {
+            closeTypePillDropdown();
+            return;
+        }
+        if (!menu) {
+            menu = document.createElement('div');
+            menu.id = 'type-pill-dropdown-menu';
+            menu.style.cssText = [
+                'position:fixed',
+                'z-index:10050',
+                'min-width:175px',
+                'background:rgba(15,23,42,0.97)',
+                'border:1px solid rgba(56,189,248,0.45)',
+                'border-radius:10px',
+                'padding:0.32rem',
+                'box-shadow:0 14px 34px rgba(0,0,0,0.75)',
+                'backdrop-filter:blur(8px)',
+                'display:none',
+                'flex-direction:column',
+                'gap:0.18rem',
+            ].join(';');
+            document.body.appendChild(menu);
+        }
+
+        const itemId = badgeEl.getAttribute('data-item-id') || '';
+        const fileId = badgeEl.getAttribute('data-file-id') || '';
+        const curType = (badgeEl.getAttribute('data-current-type') || (badgeEl.classList.contains('type-book') ? 'BOOK' : 'MAGAZINE')).toUpperCase();
+        const canUndo = badgeEl.getAttribute('data-can-undo') === 'true';
+        const opts = getAvailableTypePillOptions();
+
+        menu.innerHTML = '';
+
+        function makeOptionRow({ html, title, accentColor, onClick }) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.title = title || '';
+            btn.style.cssText = [
+                'display:flex',
+                'align-items:center',
+                'gap:0.45rem',
+                'width:100%',
+                'text-align:left',
+                'padding:0.4rem 0.58rem',
+                'border-radius:7px',
+                'border:none',
+                'background:transparent',
+                `color:${accentColor || '#f1f5f9'}`,
+                'font-size:0.75rem',
+                'font-weight:700',
+                'cursor:pointer',
+                'transition:background 0.15s',
+            ].join(';');
+            btn.innerHTML = html;
+            btn.addEventListener('mouseenter', () => {
+                btn.style.background = 'rgba(56,189,248,0.16)';
+            });
+            btn.addEventListener('mouseleave', () => {
+                btn.style.background = 'transparent';
+            });
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                closeTypePillDropdown();
+                onClick();
+            });
+            return btn;
+        }
+
+        if (canUndo) {
+            menu.appendChild(makeOptionRow({
+                html: `<i class="fa-solid fa-rotate-left" style="color:#fde047; width:14px; text-align:center;"></i> <span>Undo Move (Restore Origin)</span>`,
+                title: 'Move physical file directly back to the exact folder it came from',
+                accentColor: '#fde047',
+                onClick: () => {
+                    window.undoMoveToMag(itemId, fileId, [], badgeEl, false);
+                },
+            }));
+            const sep = document.createElement('div');
+            sep.style.cssText = 'height:1px; background:rgba(148,163,184,0.22); margin:0.15rem 0.25rem;';
+            menu.appendChild(sep);
+        }
+
+        opts.forEach(opt => {
+            if (opt === curType) return;
+            if (opt === 'BOOK') {
+                menu.appendChild(makeOptionRow({
+                    html: `<i class="fa-solid fa-book" style="color:#c084fc; width:14px; text-align:center;"></i> <span>Move to Books</span>`,
+                    title: 'Move to Books (/books/<Category>/<Shard>/ if enriched, else /toBooks)',
+                    accentColor: '#e9d5ff',
+                    onClick: () => {
+                        triggerMoveToBooks({ itemId, fileId, btn: badgeEl });
+                    },
+                }));
+            } else if (opt === 'MAGAZINE') {
+                menu.appendChild(makeOptionRow({
+                    html: `<i class="fa-solid fa-newspaper" style="color:#38bdf8; width:14px; text-align:center;"></i> <span>Move to Magazines</span>`,
+                    title: 'Move to Periodicals (/periodicals/<Series>/<Year>/ if enriched, else /toMags)',
+                    accentColor: '#bae6fd',
+                    onClick: () => {
+                        triggerMoveToMags({ itemId, fileId, btn: badgeEl, targetBucket: 'Periodicals' });
+                    },
+                }));
+            } else if (opt === 'ARCHIVE-X') {
+                menu.appendChild(makeOptionRow({
+                    html: `<i class="fa-solid fa-box-archive" style="color:#fb7185; width:14px; text-align:center;"></i> <span>Move to Archive-X</span>`,
+                    title: 'Move to Archive-X',
+                    accentColor: '#fda4af',
+                    onClick: () => {
+                        triggerMoveToMags({ itemId, fileId, btn: badgeEl, targetBucket: 'Archive-X' });
+                    },
+                }));
+            }
+        });
+
+        menu._anchorBadge = badgeEl;
+        menu.style.display = 'flex';
+        const rect = badgeEl.getBoundingClientRect();
+        const menuWidth = Math.max(menu.offsetWidth || 180, 180);
+        const leftPos = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth));
+        const topPos = Math.min(window.innerHeight - 160, rect.bottom + 5);
+        menu.style.left = `${leftPos}px`;
+        menu.style.top = `${topPos}px`;
+    }
+
+    window.onTypePillClick = function (badgeEl, event) {
+        if (!badgeEl) return;
+        const itemId = badgeEl.getAttribute('data-item-id') || '';
+        const fileId = badgeEl.getAttribute('data-file-id') || '';
+        const curType = (badgeEl.getAttribute('data-current-type') || (badgeEl.classList.contains('type-book') ? 'BOOK' : 'MAGAZINE')).toUpperCase();
+        const canUndo = badgeEl.getAttribute('data-can-undo') === 'true';
+        const opts = getAvailableTypePillOptions();
+
+        // When only 2 options exist (BOOK <-> MAGAZINE), act as a direct 2-way toggle & 1-click Undo
+        if (opts.length <= 2) {
+            closeTypePillDropdown();
+            if (canUndo) {
+                window.undoMoveToMag(itemId, fileId, [], badgeEl, false);
+                return;
+            }
+            if (curType === 'BOOK') {
+                triggerMoveToMags({ itemId, fileId, btn: badgeEl });
+            } else {
+                triggerMoveToBooks({ itemId, fileId, btn: badgeEl });
+            }
+            return;
+        }
+
+        // When 3+ options exist (e.g. Archive-X unlocked):
+        // Clicking directly on the undo icon performs immediate 1-click Undo; otherwise open dropdown
+        if (canUndo && event && event.target && event.target.closest && event.target.closest('.pill-undo-icon')) {
+            closeTypePillDropdown();
+            window.undoMoveToMag(itemId, fileId, [], badgeEl, false);
+            return;
+        }
+        openTypePillDropdown(badgeEl);
+    };
+
+    function triggerMoveToMags({ itemId, fileId, btn, targetBucket }) {
         if (!btn) return;
         const origHtml = btn.innerHTML;
         btn.disabled = true;
@@ -1647,6 +1904,7 @@ const initCatalogSearch = () => {
         const payload = {};
         if (fileId) payload.file_id = fileId;
         else if (itemId) payload.item_id = itemId;
+        if (targetBucket) payload.target_bucket = targetBucket;
 
         fetch(`${BASE_PREFIX}/api/move-to-mag/`, {
             method: 'POST',
@@ -1661,6 +1919,40 @@ const initCatalogSearch = () => {
                 if (data.ok) {
                     const targetId = data.item_id || itemId;
                     const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+                    if (data.moved_to_periodicals_direct && card) {
+                        card.style.opacity = '1';
+                        const topFld = data.top_folder || (targetBucket === 'Archive-X' ? 'Archive-X' : 'Periodicals');
+                        card.setAttribute('data-top-folder', topFld);
+                        const newPillType = topFld === 'Archive-X' ? 'ARCHIVE-X' : 'MAGAZINE';
+                        const typeBadge = card.querySelector('.card-type-badge');
+                        if (typeBadge) {
+                            updateTypePillAfterMove(
+                                typeBadge,
+                                newPillType,
+                                Boolean(data.undone_to_origin),
+                                data.file_id || fileId || '',
+                                newPillType,
+                                data.undone_to_origin
+                                    ? `Undone — restored to original ${topFld} folder`
+                                    : `Moved to ${topFld} — Click to Undo and move directly back to original folder`
+                            );
+                        }
+                        const fldLbl = card.querySelector('.card-folder-label');
+                        if (fldLbl) {
+                            const ser = data.periodical_series || '';
+                            fldLbl.textContent = ser ? `${topFld} › ${ser}` : topFld;
+                        }
+                        const descEl = card.querySelector('.card-description');
+                        if (descEl && data.message) {
+                            descEl.textContent = data.message;
+                        }
+                        applyCardMetadataUpdate(targetId, {
+                            title: data.title,
+                            authors: data.authors,
+                            cover_url: data.cover_url,
+                        }, false);
+                        return;
+                    }
                     const enrBtn = card ? card.querySelector('.btn-enrich-card') : null;
                     const detBtn = card ? card.querySelector('.btn-details') : null;
                     const wasEnriched = Boolean(
@@ -1697,6 +1989,97 @@ const initCatalogSearch = () => {
             });
     }
 
+    function triggerMoveToBooks({ itemId, fileId, btn }) {
+        if (!btn) return;
+        const origHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Moving...`;
+
+        const payload = {};
+        if (fileId) payload.file_id = fileId;
+        else if (itemId) payload.item_id = itemId;
+
+        fetch(`${BASE_PREFIX}/api/move-to-book/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify(payload)
+        })
+            .then(resp => resp.json())
+            .then(data => {
+                if (data.ok) {
+                    const targetId = data.item_id || itemId;
+                    const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+                    if (card) {
+                        card.style.opacity = '1';
+                        card.setAttribute('data-top-folder', data.top_folder || 'Misc');
+                        const typeBadge = card.querySelector('.card-type-badge');
+                        if (typeBadge) {
+                            const lbl = data.staged_in_tobooks ? 'BOOK → toBooks' : 'BOOK';
+                            const ttl = data.undone_to_origin
+                                ? `Undone — restored to /books/${data.top_folder || 'Books'}/`
+                                : (data.staged_in_tobooks
+                                    ? 'Moved to /toBooks — Click to Undo and move directly back to origin'
+                                    : `Moved to /books/${data.top_folder || 'Books'}/ — Click to Undo and move directly back to origin`);
+                            updateTypePillAfterMove(
+                                typeBadge,
+                                'BOOK',
+                                Boolean(data.undone_to_origin),
+                                data.file_id || fileId || '',
+                                lbl,
+                                ttl
+                            );
+                        }
+                        const fldLbl = card.querySelector('.card-folder-label');
+                        if (fldLbl) {
+                            fldLbl.textContent = data.top_folder || 'Books';
+                        }
+                        const enrBtn = card.querySelector('.btn-enrich-card');
+                        if (enrBtn && data.undone_to_origin) {
+                            enrBtn.disabled = false;
+                            enrBtn.onclick = function (e) {
+                                if (e) e.stopPropagation();
+                                if (window.enrichCardNow) window.enrichCardNow(enrBtn);
+                            };
+                            const isEnr = enrBtn.getAttribute('data-force') === 'true';
+                            enrBtn.innerHTML = isEnr
+                                ? `<i class="fa-solid fa-wand-magic-sparkles"></i> Re-Enrich`
+                                : `<i class="fa-solid fa-wand-magic-sparkles"></i> Enrich Now`;
+                            enrBtn.style.background = isEnr ? 'rgba(74,222,128,0.14)' : 'rgba(168,85,247,0.18)';
+                            enrBtn.style.borderColor = isEnr ? 'rgba(74,222,128,0.4)' : 'rgba(168,85,247,0.45)';
+                            enrBtn.style.color = isEnr ? '#4ade80' : '#c084fc';
+                        }
+                        const descEl = card.querySelector('.card-description');
+                        if (descEl && data.message) {
+                            descEl.textContent = data.message;
+                        }
+                        applyCardMetadataUpdate(targetId, {
+                            title: data.title,
+                            authors: data.authors,
+                            publisher: data.publisher,
+                            pub_date: data.pub_date,
+                            isbn: data.isbn,
+                            description: data.description || data.message,
+                            cover_url: data.cover_url,
+                        }, false);
+                    }
+                } else {
+                    btn.disabled = false;
+                    btn.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Move Failed`;
+                    btn.title = data.message || data.error || 'Move to Books failed';
+                    alert(data.message || data.error || 'Could not move file to Books.');
+                }
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+                console.error('Error moving to Books:', err);
+                alert('Network or server error moving file to Books.');
+            });
+    }
+
     function adjustTomagsCounter(delta) {
         if (!delta) return;
         const el = document.getElementById('sidebar-tomags-count');
@@ -1708,11 +2091,17 @@ const initCatalogSearch = () => {
     function setCardMovedToMagsState(targetId, fileId, movedFiles, message) {
         const card = targetId ? document.getElementById(`card-${targetId}`) : null;
         if (!card) return;
-        card.style.opacity = '0.88';
+        card.style.opacity = '0.92';
         const typeBadge = card.querySelector('.card-type-badge');
         if (typeBadge) {
-            typeBadge.textContent = 'MAG → toMags';
-            typeBadge.style.background = 'rgba(56,189,248,0.85)';
+            updateTypePillAfterMove(
+                typeBadge,
+                'MAGAZINE',
+                false,
+                fileId || '',
+                'MAGAZINE',
+                'Moved to Magazines — Click to Undo and move directly back to original folder'
+            );
         }
         const descEl = card.querySelector('.card-description');
         if (descEl && message) {
@@ -1730,26 +2119,10 @@ const initCatalogSearch = () => {
             enrBtn.style.background = 'rgba(250,204,21,0.2)';
             enrBtn.style.borderColor = 'rgba(250,204,21,0.55)';
             enrBtn.style.color = '#fde047';
-            enrBtn.title = 'Restore file(s) from /toMags back to /books and run epubmeta Book Enrichment';
+            enrBtn.title = 'Restore file(s) from Magazines back to original /books/ folder and run epubmeta Book Enrichment';
             enrBtn.onclick = function (e) {
                 if (e) e.stopPropagation();
                 window.undoMoveToMag(targetId, enrBtn._movedFileId, enrBtn._movedFiles, enrBtn, true);
-            };
-        }
-
-        const magBtn = card.querySelector('.btn-move-tomag');
-        if (magBtn) {
-            magBtn.disabled = false;
-            magBtn._movedFiles = movedFiles || [];
-            magBtn._movedFileId = fileId || '';
-            magBtn.innerHTML = `<i class="fa-solid fa-rotate-left"></i> Undo toMag`;
-            magBtn.style.background = 'rgba(56,189,248,0.22)';
-            magBtn.style.borderColor = 'rgba(56,189,248,0.55)';
-            magBtn.style.color = '#38bdf8';
-            magBtn.title = 'Restore file(s) from /toMags back to /books without re-running enrichment';
-            magBtn.onclick = function (e) {
-                if (e) e.stopPropagation();
-                window.undoMoveToMag(targetId, magBtn._movedFileId, magBtn._movedFiles, magBtn, false);
             };
         }
     }
@@ -1758,7 +2131,7 @@ const initCatalogSearch = () => {
         if (!btnEl) return;
         const origHtml = btnEl.innerHTML;
         btnEl.disabled = true;
-        btnEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${enrichAfter ? 'Restoring & Enriching...' : 'Restoring...'}`;
+        btnEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${enrichAfter ? 'Restoring & Enriching...' : 'Undoing...'}`;
 
         fetch(`${BASE_PREFIX}/api/undo-to-mag/`, {
             method: 'POST',
@@ -1778,7 +2151,7 @@ const initCatalogSearch = () => {
                 if (!data.ok && !data.restored_from_tomags) {
                     btnEl.disabled = false;
                     btnEl.innerHTML = origHtml;
-                    alert(data.message || data.error || 'Could not restore file(s) from /toMags.');
+                    alert(data.message || data.error || 'Could not restore file(s) to origin.');
                     return;
                 }
 
@@ -1787,29 +2160,37 @@ const initCatalogSearch = () => {
                 const card = targetId ? document.getElementById(`card-${targetId}`) : null;
                 if (card) {
                     card.style.opacity = '1';
+                    const topFld = data.top_folder || 'Books';
+                    card.setAttribute('data-top-folder', topFld);
+                    const restoredType = topFld === 'Archive-X' ? 'ARCHIVE-X' : (data.item_type || 'BOOK').toUpperCase();
                     const typeBadge = card.querySelector('.card-type-badge');
                     if (typeBadge) {
-                        typeBadge.textContent = 'BOOK';
-                        typeBadge.style.background = '';
+                        updateTypePillAfterMove(
+                            typeBadge,
+                            restoredType,
+                            true,
+                            '',
+                            restoredType,
+                            `Undone — restored directly back to ${topFld}`
+                        );
+                    }
+                    const fldLbl = card.querySelector('.card-folder-label');
+                    if (fldLbl && topFld) {
+                        const ser = data.periodical_series || '';
+                        fldLbl.textContent = ser ? `${topFld} › ${ser}` : topFld;
                     }
                     const descEl = card.querySelector('.card-description');
                     if (descEl && data.message) {
                         descEl.textContent = data.summary || data.description || data.message;
                     }
-                    const enrBtn = card.querySelector('.btn-enrich-card');
-                    const magBtn = card.querySelector('.btn-move-tomag');
-                    if (magBtn) {
-                        magBtn.disabled = false;
-                        magBtn.innerHTML = `<i class="fa-solid fa-newspaper"></i> toMag`;
-                        magBtn.style.background = 'rgba(56,189,248,0.14)';
-                        magBtn.style.borderColor = 'rgba(56,189,248,0.38)';
-                        magBtn.style.color = '#38bdf8';
-                        magBtn.title = "Move this item's physical file(s) to /toMags for OrgPeriodicals magazine processing";
-                        magBtn.onclick = function (e) {
-                            if (e) e.stopPropagation();
-                            if (window.moveToMagNow) window.moveToMagNow(magBtn);
-                        };
+                    if (data.title || data.authors || data.cover_url) {
+                        applyCardMetadataUpdate(targetId, {
+                            title: data.title,
+                            authors: data.authors,
+                            cover_url: data.cover_url,
+                        }, false);
                     }
+                    const enrBtn = card.querySelector('.btn-enrich-card');
                     if (enrBtn) {
                         enrBtn.disabled = false;
                         enrBtn.onclick = function (e) {
@@ -1833,10 +2214,13 @@ const initCatalogSearch = () => {
                             openEnrichReviewModal(data, enrBtn, false, targetId, fileId);
                         } else {
                             adjustLiveEnrichCounters({ needsEnrichingDelta: 1 });
-                            enrBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> Enrich Now`;
-                            enrBtn.style.background = 'rgba(168,85,247,0.18)';
-                            enrBtn.style.borderColor = 'rgba(168,85,247,0.45)';
-                            enrBtn.style.color = '#c084fc';
+                            const isEnr = enrBtn.getAttribute('data-force') === 'true';
+                            enrBtn.innerHTML = isEnr
+                                ? `<i class="fa-solid fa-wand-magic-sparkles"></i> Re-Enrich`
+                                : `<i class="fa-solid fa-wand-magic-sparkles"></i> Enrich Now`;
+                            enrBtn.style.background = isEnr ? 'rgba(74,222,128,0.14)' : 'rgba(168,85,247,0.18)';
+                            enrBtn.style.borderColor = isEnr ? 'rgba(74,222,128,0.4)' : 'rgba(168,85,247,0.45)';
+                            enrBtn.style.color = isEnr ? '#4ade80' : '#c084fc';
                         }
                     }
                 }
@@ -1845,7 +2229,7 @@ const initCatalogSearch = () => {
                 btnEl.disabled = false;
                 btnEl.innerHTML = origHtml;
                 console.error('Error restoring from toMags:', err);
-                alert('Network error restoring file(s) from /toMags.');
+                alert('Network error restoring file(s) to origin.');
             });
     };
 
@@ -2743,6 +3127,9 @@ const initCatalogSearch = () => {
                 const newDesc = res.description;
                 const resolvedId = res.item_id || targetItemId;
                 updateItemDescriptionInDom(resolvedId, newDesc);
+                if (res.title_updated || res.authors_updated || res.publisher_updated) {
+                    updateItemTitleAuthorInDom(resolvedId, res);
+                }
 
                 if (isReview) {
                     if (btn) {
@@ -2759,9 +3146,29 @@ const initCatalogSearch = () => {
                             candDescBox.textContent = newDesc.length > 160 ? (newDesc.slice(0, 160) + '…') : newDesc;
                         }
                         window.erPickField('desc', 'cand', true);
+                        if (res.suggested_title && res.title_updated) {
+                            revData.candidate_title = res.suggested_title;
+                            const candTBox = document.querySelector('#er-field-title-cand > span');
+                            if (candTBox) { candTBox.style.color = '#f8fafc'; candTBox.textContent = res.suggested_title; }
+                            window.erPickField('title', 'cand', true);
+                        }
+                        if (res.suggested_authors && res.authors_updated) {
+                            revData.candidate_authors = res.suggested_authors;
+                            const candABox = document.querySelector('#er-field-author-cand > span');
+                            if (candABox) { candABox.style.color = '#f8fafc'; candABox.textContent = res.suggested_authors; }
+                            window.erPickField('author', 'cand', true);
+                        }
                     }
                     const descInput = document.getElementById('er-input-desc');
                     if (descInput) descInput.value = newDesc;
+                    if (res.title_updated && res.title) {
+                        const tIn = document.getElementById('er-input-title');
+                        if (tIn) tIn.value = res.title;
+                    }
+                    if (res.authors_updated && res.authors) {
+                        const aIn = document.getElementById('er-input-author');
+                        if (aIn) aIn.value = res.authors;
+                    }
                     if (statusSpan) {
                         statusSpan.style.display = 'inline';
                         statusSpan.style.color = '#4ade80';
@@ -2783,6 +3190,357 @@ const initCatalogSearch = () => {
                 } else {
                     alert('Network error generating AI description: ' + err.message);
                 }
+            });
+    };
+
+    function updateItemTitleAuthorInDom(targetId, data) {
+        if (!data) return;
+        const newTitle = (data.title || data.suggested_title || '').trim();
+        const newAuthors = (data.authors || data.suggested_authors || '').trim();
+        const newPublisher = (data.publisher || data.suggested_publisher || '').trim();
+        const newPubDate = (data.pub_date || data.suggested_year || '').trim();
+        const newIsbn = (data.isbn || data.suggested_isbn || '').trim();
+
+        const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        if (card) {
+            const detCheck = card.querySelector('.btn-details');
+            if (detCheck && detCheck.getAttribute('data-is-bad-metadata') === 'true' && typeof window.applyBadMetadataStateToDom === 'function') {
+                window.applyBadMetadataStateToDom(targetId, false, null, -1);
+            }
+            const titleEl = card.querySelector('.card-title');
+            const authorEl = card.querySelector('.card-author');
+            const detailsBtn = card.querySelector('.btn-details');
+            if (newTitle && titleEl) {
+                titleEl.textContent = newTitle;
+                titleEl.title = newTitle;
+            }
+            if (newAuthors && authorEl) {
+                authorEl.innerHTML = renderAuthorLinksHtml(newAuthors);
+                authorEl.title = `by ${newAuthors}`;
+            }
+            if (detailsBtn) {
+                if (newTitle) detailsBtn.setAttribute('data-title', newTitle);
+                if (newAuthors) detailsBtn.setAttribute('data-authors', newAuthors);
+                if (newPublisher) detailsBtn.setAttribute('data-publisher', newPublisher);
+                if (newPubDate) detailsBtn.setAttribute('data-pubdate', newPubDate);
+                if (newIsbn) detailsBtn.setAttribute('data-isbn', newIsbn);
+                if (detailsBtn._enrichResultData) {
+                    if (newTitle) detailsBtn._enrichResultData.candidate_title = newTitle;
+                    if (newAuthors) detailsBtn._enrichResultData.candidate_authors = newAuthors;
+                    if (newPublisher) detailsBtn._enrichResultData.candidate_publisher = newPublisher;
+                }
+            }
+            const mergedIds = Array.isArray(data.merged_item_ids) ? data.merged_item_ids.map(String) : [];
+            mergedIds.forEach(dupId => {
+                if (!dupId || String(dupId) === String(targetId)) return;
+                const dupCard = document.getElementById(`card-${dupId}`);
+                if (dupCard) dupCard.remove();
+            });
+        }
+
+        if (window._activeModalItem && (!targetId || String(window._activeModalItem.itemId) === String(targetId))) {
+            if (data.item_id) window._activeModalItem.itemId = data.item_id;
+            if (newTitle) window._activeModalItem.title = newTitle;
+            if (newAuthors) window._activeModalItem.authors = newAuthors;
+            if (newPublisher) window._activeModalItem.publisher = newPublisher;
+            if (newPubDate && !window._activeModalItem.pubDate) window._activeModalItem.pubDate = newPubDate;
+            if (newIsbn && !window._activeModalItem.isbn) window._activeModalItem.isbn = newIsbn;
+
+            const modalTitleEl = document.getElementById('modal-title');
+            if (modalTitleEl && newTitle) modalTitleEl.textContent = newTitle;
+            const modalAuthEl = document.getElementById('modal-authors');
+            if (modalAuthEl && newAuthors) modalAuthEl.innerHTML = renderAuthorLinksHtml(newAuthors);
+
+            const qInTitle = document.getElementById('modal-quick-input-title');
+            const qInAuth = document.getElementById('modal-quick-input-author');
+            const qInPub = document.getElementById('modal-quick-input-publisher');
+            if (qInTitle && newTitle) qInTitle.value = newTitle;
+            if (qInAuth && newAuthors) qInAuth.value = (newAuthors !== 'Unknown Author') ? newAuthors : '';
+            if (qInPub && newPublisher) qInPub.value = newPublisher;
+
+            // Keep cover search query synced with the newly resolved clean title & author
+            const covInput = document.getElementById('cover-search-input');
+            if (covInput) {
+                const cleanAuth = (window._activeModalItem.authors && !['unknown', 'unknown author', '..'].includes(window._activeModalItem.authors.toLowerCase().trim()))
+                    ? window._activeModalItem.authors : '';
+                const shortT = (window._activeModalItem.title && window._activeModalItem.title.length > 65 && window._activeModalItem.title.includes(':'))
+                    ? window._activeModalItem.title.split(':')[0].trim()
+                    : (window._activeModalItem.title || '');
+                covInput.value = [shortT, cleanAuth].filter(Boolean).join(' ').trim();
+            }
+
+            // Update or insert Publisher badge in #modal-badges-container if present
+            if (newPublisher) {
+                const badgeContainer = document.getElementById('modal-badges-container');
+                if (badgeContainer) {
+                    const existingPub = Array.from(badgeContainer.querySelectorAll('.modal-badge')).find(b => (b.textContent || '').startsWith('Publisher:'));
+                    if (existingPub) {
+                        existingPub.textContent = `Publisher: ${newPublisher}`;
+                    } else {
+                        const newBadge = createBadge(`Publisher: ${newPublisher}`);
+                        const firstBadge = badgeContainer.firstElementChild;
+                        if (firstBadge && firstBadge.nextSibling) {
+                            badgeContainer.insertBefore(newBadge, firstBadge.nextSibling);
+                        } else {
+                            badgeContainer.appendChild(newBadge);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    window.generateAiTitleAuthorForItem = function ({ itemId = '', fileId = '', filePath = '', mode = 'modal', btn = null } = {}) {
+        const isReview = mode === 'review';
+        const revData = (isReview && activeReviewCtx && activeReviewCtx.data) ? activeReviewCtx.data : null;
+        const activeModal = (!isReview && window._activeModalItem) ? window._activeModalItem : {};
+
+        const targetItemId = itemId || (revData ? (revData.item_id || activeReviewCtx.itemId || '') : (activeModal.itemId || ''));
+        const targetFileId = fileId || (revData ? (revData.file_id || activeReviewCtx.fileId || '') : (activeModal.firstFileId || ''));
+        const targetFilePath = filePath || (revData ? (revData.file_path || '') : (activeModal.firstFilePath || '')) || (isReview ? (document.getElementById('er-file-path')?.textContent || '').trim() : '');
+        const titleHint = isReview
+            ? (document.getElementById('er-input-title')?.value || (revData && (revData.orig_title || revData.candidate_title)) || '').trim()
+            : (activeModal.title || '');
+        const authorsHint = isReview
+            ? (document.getElementById('er-input-author')?.value || (revData && (revData.orig_authors || revData.candidate_authors)) || '').trim()
+            : (activeModal.authors || '');
+        const pubHint = isReview
+            ? (document.getElementById('er-input-publisher')?.value || (revData && (revData.orig_publisher || revData.candidate_publisher)) || '').trim()
+            : (activeModal.publisher || '');
+        const isbnHint = isReview
+            ? (document.getElementById('er-input-isbn')?.value || (revData && (revData.orig_isbn || revData.candidate_isbn)) || '').trim()
+            : (activeModal.isbn || '');
+
+        const origBtnHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Reading Cover &amp; Content...`;
+        }
+        const statusSpan = document.getElementById(isReview ? 'er-ai-title-author-status' : 'modal-ai-title-author-status');
+        if (statusSpan) {
+            statusSpan.style.display = 'inline';
+            statusSpan.style.color = '#d8b4fe';
+            statusSpan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Identifying Title &amp; Author with Gemini AI...`;
+        }
+
+        fetch(`${BASE_PREFIX}/api/ai-title-author/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({
+                item_id: targetItemId,
+                file_id: targetFileId,
+                file_path: targetFilePath,
+                title: titleHint,
+                authors: authorsHint,
+                publisher: pubHint,
+                isbn: isbnHint,
+                apply_immediately: true,
+                mode: 'title_author',
+            })
+        })
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
+            .then(res => {
+                if (!res || !res.ok || (!res.suggested_title && !res.suggested_authors && !res.title)) {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = origBtnHtml;
+                    }
+                    const errMsg = (res && res.error) || 'Could not extract Title & Author from book content.';
+                    if (statusSpan) {
+                        statusSpan.style.display = 'inline';
+                        statusSpan.style.color = '#fca5a5';
+                        statusSpan.textContent = errMsg;
+                    } else {
+                        alert(errMsg);
+                    }
+                    return;
+                }
+
+                const resolvedId = res.item_id || targetItemId;
+                updateItemTitleAuthorInDom(resolvedId, res);
+                if (res.description_updated && res.description) {
+                    updateItemDescriptionInDom(resolvedId, res.description);
+                }
+
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> Regenerate Title &amp; Author`;
+                }
+
+                if (isReview) {
+                    const finalT = res.suggested_title || res.title || '';
+                    const finalA = res.suggested_authors || res.authors || '';
+                    const finalP = res.suggested_publisher || res.publisher || '';
+                    if (revData) {
+                        if (finalT) {
+                            revData.candidate_title = finalT;
+                            const ct = document.querySelector('#er-field-title-cand > span');
+                            if (ct) { ct.style.color = '#f8fafc'; ct.textContent = finalT; }
+                            window.erPickField('title', 'cand', true);
+                        }
+                        if (finalA) {
+                            revData.candidate_authors = finalA;
+                            const ca = document.querySelector('#er-field-author-cand > span');
+                            if (ca) { ca.style.color = '#f8fafc'; ca.textContent = finalA; }
+                            window.erPickField('author', 'cand', true);
+                        }
+                        if (finalP) {
+                            revData.candidate_publisher = finalP;
+                            const cp = document.querySelector('#er-field-publisher-cand > span');
+                            if (cp) { cp.style.color = '#f8fafc'; cp.textContent = finalP; }
+                            window.erPickField('publisher', 'cand', true);
+                        }
+                    }
+                    if (finalT && document.getElementById('er-input-title')) document.getElementById('er-input-title').value = finalT;
+                    if (finalA && document.getElementById('er-input-author')) document.getElementById('er-input-author').value = finalA;
+                    if (finalP && document.getElementById('er-input-publisher')) document.getElementById('er-input-publisher').value = finalP;
+                    if (res.suggested_year && document.getElementById('er-input-pubdate') && !document.getElementById('er-input-pubdate').value.trim()) {
+                        document.getElementById('er-input-pubdate').value = res.suggested_year;
+                    }
+                    if (res.suggested_isbn && document.getElementById('er-input-isbn') && !document.getElementById('er-input-isbn').value.trim()) {
+                        document.getElementById('er-input-isbn').value = res.suggested_isbn;
+                    }
+                    const erCovIn = document.getElementById('er-cover-search-input');
+                    if (erCovIn && finalT) {
+                        erCovIn.value = [finalT, (finalA && finalA !== 'Unknown Author') ? finalA : ''].filter(Boolean).join(' ').trim();
+                    }
+                    if (statusSpan) {
+                        statusSpan.style.display = 'inline';
+                        statusSpan.style.color = '#4ade80';
+                        statusSpan.innerHTML = `<i class="fa-solid fa-check"></i> Title &amp; Author extracted &amp; saved!`;
+                    }
+                } else {
+                    if (statusSpan) {
+                        statusSpan.style.display = 'inline';
+                        statusSpan.style.color = '#4ade80';
+                        statusSpan.innerHTML = `<i class="fa-solid fa-check"></i> Generated Title &amp; Author &amp; saved`;
+                    }
+                }
+            })
+            .catch(err => {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origBtnHtml;
+                }
+                if (statusSpan) {
+                    statusSpan.style.display = 'inline';
+                    statusSpan.style.color = '#fca5a5';
+                    statusSpan.textContent = 'Network error: ' + err.message;
+                } else {
+                    alert('Network error generating Title & Author: ' + err.message);
+                }
+            });
+    };
+
+    window.toggleModalQuickEditMeta = function () {
+        const drawer = document.getElementById('modal-quick-edit-drawer');
+        if (!drawer) return;
+        const active = window._activeModalItem || {};
+        if (drawer.style.display === 'none' || !drawer.style.display) {
+            const qInTitle = document.getElementById('modal-quick-input-title');
+            const qInAuth = document.getElementById('modal-quick-input-author');
+            const qInPub = document.getElementById('modal-quick-input-publisher');
+            if (qInTitle) qInTitle.value = active.title || '';
+            if (qInAuth) qInAuth.value = (active.authors && active.authors !== 'Unknown Author') ? active.authors : '';
+            if (qInPub) qInPub.value = active.publisher || '';
+            drawer.style.display = 'block';
+            if (qInTitle) qInTitle.focus();
+        } else {
+            drawer.style.display = 'none';
+        }
+    };
+
+    window.saveModalQuickEditMeta = function (btnEl = null) {
+        const active = window._activeModalItem || {};
+        const newTitle = (document.getElementById('modal-quick-input-title')?.value || '').trim();
+        const newAuth = (document.getElementById('modal-quick-input-author')?.value || '').trim() || 'Unknown Author';
+        const newPub = (document.getElementById('modal-quick-input-publisher')?.value || '').trim();
+        if (!newTitle) {
+            alert('Please enter a Title before saving.');
+            return;
+        }
+        const origHtml = btnEl ? btnEl.innerHTML : '';
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
+        }
+        const selectedMetadata = {
+            title: newTitle,
+            author: newAuth,
+            publisher: newPub,
+            pub_date: active.pubDate || '',
+            isbn: active.isbn || '',
+            description: active.desc || '',
+            cover: active.cover || '',
+        };
+        fetch(`${BASE_PREFIX}/api/status/items/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({
+                action: 'approve',
+                item_id: active.itemId || '',
+                file_path: active.firstFilePath || '',
+                selected_metadata: selectedMetadata,
+            })
+        })
+            .then(r => r.json())
+            .then(res => {
+                if (btnEl) {
+                    btnEl.disabled = false;
+                    btnEl.innerHTML = origHtml;
+                }
+                if (res && res.ok) {
+                    const resolvedId = res.item_id || active.itemId || '';
+                    transitionCardEnrichBucket(resolvedId, 'enriched');
+                    applyCardMetadataUpdate(resolvedId, {
+                        item_id: resolvedId,
+                        title: newTitle,
+                        authors: newAuth,
+                        publisher: newPub,
+                        pub_date: selectedMetadata.pub_date,
+                        isbn: selectedMetadata.isbn,
+                        description: selectedMetadata.description,
+                        cover_url: res.cover_url || selectedMetadata.cover,
+                        merged_item_ids: res.merged_item_ids || [],
+                    }, true);
+                    updateItemTitleAuthorInDom(resolvedId, {
+                        item_id: resolvedId,
+                        title: newTitle,
+                        authors: newAuth,
+                        publisher: newPub,
+                        merged_item_ids: res.merged_item_ids || [],
+                    });
+                    const drawer = document.getElementById('modal-quick-edit-drawer');
+                    if (drawer) drawer.style.display = 'none';
+                    const stEl = document.getElementById('modal-ai-title-author-status');
+                    if (stEl) {
+                        stEl.style.display = 'inline';
+                        stEl.style.color = '#4ade80';
+                        stEl.innerHTML = `<i class="fa-solid fa-check"></i> Saved Title &amp; Author`;
+                    }
+                } else {
+                    alert((res && res.error) || 'Could not save metadata.');
+                }
+            })
+            .catch(err => {
+                if (btnEl) {
+                    btnEl.disabled = false;
+                    btnEl.innerHTML = origHtml;
+                }
+                alert('Network error saving metadata: ' + err.message);
             });
     };
 
@@ -3290,6 +4048,17 @@ const initCatalogSearch = () => {
             erAiDescBtn.disabled = false;
             erAiDescBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content`;
             erAiDescBtn.style.display = 'inline-flex';
+        }
+        const erAiTitleBtn = document.getElementById('er-btn-ai-title-author');
+        const erAiTitleSt = document.getElementById('er-ai-title-author-status');
+        if (erAiTitleSt) {
+            erAiTitleSt.style.display = 'none';
+            erAiTitleSt.textContent = '';
+        }
+        if (erAiTitleBtn) {
+            erAiTitleBtn.disabled = false;
+            erAiTitleBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Title &amp; Author`;
+            erAiTitleBtn.style.display = 'inline-flex';
         }
         const erTagsBox = document.getElementById('er-readonly-tags-box');
         if (erTagsBox) {
@@ -4833,6 +5602,9 @@ const initCatalogSearch = () => {
                         detBtn.setAttribute('data-enrich-status', st);
                         detBtn.setAttribute('data-enrich-error', errMsg);
                         detBtn._enrichResultData = data;
+                    }
+                    if (data.title_updated || data.authors_updated) {
+                        updateItemTitleAuthorInDom(targetId, data);
                     }
                     if (data.ai_generated_description) {
                         updateItemDescriptionInDom(targetId, data.ai_generated_description);

@@ -267,6 +267,72 @@ def build_author_q_filter(author_query: str) -> Q:
     return cond
 
 
+def compute_top_folder_from_path(file_path: str) -> str:
+    """Pure virtual top-folder computation matching PostgreSQL `catalog_top_folder(file_path)`."""
+    fp = str(file_path or '').replace('\\', '/').strip()
+    if not fp:
+        return ''
+    for prefix in ('/books/', '/volume1/common/Media/Books/'):
+        if fp.startswith(prefix):
+            rest = fp[len(prefix):]
+            seg = rest.split('/', 1)[0].strip() if '/' in rest else ''
+            if seg and seg not in ('Computer Book Code', 'File Formats', 'toMags'):
+                return seg
+            return ''
+    if fp.startswith('/periodicals/') or fp.startswith('/volume1/common/Media/Periodicals/'):
+        return 'Periodicals'
+    if (
+        fp.startswith('/xAdult/')
+        or fp.startswith('/xtoAdult/')
+        or fp.startswith('/volume1/jims_documents/Media/xAdult/')
+        or fp.startswith('/volume1/jims_documents/Media/xtoAdult/')
+    ):
+        return 'Archive-X'
+    if fp.startswith('/audiobooks/') or fp.startswith('/volume1/common/Media/Audiobooks/'):
+        return 'Audiobooks'
+    return ''
+
+
+def compute_periodical_series_from_path(file_path: str) -> str:
+    """Pure virtual periodical/series folder computation matching PostgreSQL `catalog_periodical_series(file_path)`."""
+    fp = str(file_path or '').replace('\\', '/').strip()
+    for prefix in (
+        '/periodicals/',
+        '/volume1/common/Media/Periodicals/',
+        '/xAdult/',
+        '/volume1/jims_documents/Media/xAdult/',
+    ):
+        if fp.startswith(prefix):
+            rest = fp[len(prefix):]
+            seg = rest.split('/', 1)[0].strip() if '/' in rest else ''
+            if seg and seg not in ('Unorganized', 'Unknown'):
+                return seg
+    return ''
+
+
+def is_vx_restricted_path(file_path: str) -> bool:
+    """Return True if a path belongs to the restricted Archive-X (/xAdult or /xtoAdult) hierarchy."""
+    fp = str(file_path or '').replace('\\', '/').strip().lower()
+    return (
+        fp.startswith('/xadult/')
+        or fp.startswith('/xtoadult/')
+        or fp.startswith('/volume1/jims_documents/media/xadult/')
+        or fp.startswith('/volume1/jims_documents/media/xtoadult/')
+    )
+
+
+def exclude_vx_restricted_queryset(qs, vx_unlocked: bool = False):
+    """Strictly exclude restricted Archive-X items from a CatalogItem queryset unless session is unlocked."""
+    if vx_unlocked:
+        return qs
+    return qs.exclude(
+        Q(files__file_path__startswith='/xAdult/')
+        | Q(files__file_path__startswith='/xtoAdult/')
+        | Q(files__file_path__startswith='/volume1/jims_documents/Media/xAdult/')
+        | Q(files__file_path__startswith='/volume1/jims_documents/Media/xtoAdult/')
+    )
+
+
 class CatalogItem(models.Model):
     ITEM_TYPES = [
         ('BOOK', 'Book'),
@@ -314,6 +380,34 @@ class CatalogItem(models.Model):
         """Return individual author names normalized to 'Firstname Lastname' for clickable author links."""
         return parse_and_normalize_authors(self.authors)
 
+    @property
+    def top_folder(self) -> str:
+        """Return the virtual top-level folder tag for this CatalogItem (computed from FileLocation.file_path)."""
+        try:
+            for f in self.files.all():
+                tf = compute_top_folder_from_path(f.file_path)
+                if tf:
+                    return tf
+        except Exception:
+            pass
+        return ''
+
+    @property
+    def periodical_series(self) -> str:
+        """Return the virtual magazine/series folder name when inside Periodicals or Archive-X."""
+        try:
+            for f in self.files.all():
+                ps = compute_periodical_series_from_path(f.file_path)
+                if ps:
+                    if ps.lower() in ('the', 'and', 'for', 'with', 'from', 'unorganized', 'unknown') or ps.isdigit():
+                        auth = (self.authors or '').strip()
+                        if auth and auth.lower() not in ('unknown author', 'unknown', 'the', 'and', 'for') and not auth.isdigit():
+                            return auth
+                    return ps
+        except Exception:
+            pass
+        return ''
+
     def files_json(self):
         import json
         try:
@@ -357,6 +451,8 @@ class CatalogItem(models.Model):
                 'enrich_status': (diag or {}).get('status', ''),
                 'enrich_error': (diag or {}).get('error', ''),
                 'tags': get_file_tags(f.file_path) if item_in_processed else [],
+                'top_folder': compute_top_folder_from_path(f.file_path),
+                'periodical_series': compute_periodical_series_from_path(f.file_path),
             })
         return json.dumps(out)
 
@@ -391,14 +487,25 @@ def _resolve_local_nas_path(file_path: str) -> str:
         return ''
     if os.path.exists(fp):
         return fp
-    if fp.startswith('/volume1/common/Media/Books/'):
-        alt = '/books/' + fp[len('/volume1/common/Media/Books/'):]
-        if os.path.exists(alt):
-            return alt
-    elif fp.startswith('/books/'):
-        alt = '/volume1/common/Media/Books/' + fp[len('/books/'):]
-        if os.path.exists(alt):
-            return alt
+    mappings = [
+        ('/volume1/common/Media/Books/', '/books/'),
+        ('/books/', '/volume1/common/Media/Books/'),
+        ('/volume1/common/Media/Periodicals/', '/periodicals/'),
+        ('/periodicals/', '/volume1/common/Media/Periodicals/'),
+        ('/volume1/common/Media/toMags/', '/toMags/'),
+        ('/toMags/', '/volume1/common/Media/toMags/'),
+        ('/volume1/common/Media/toBooks/', '/toBooks/'),
+        ('/toBooks/', '/volume1/common/Media/toBooks/'),
+        ('/volume1/jims_documents/Media/xAdult/', '/xAdult/'),
+        ('/xAdult/', '/volume1/jims_documents/Media/xAdult/'),
+        ('/volume1/jims_documents/Media/xtoAdult/', '/xtoAdult/'),
+        ('/xtoAdult/', '/volume1/jims_documents/Media/xtoAdult/'),
+    ]
+    for src_prefix, dst_prefix in mappings:
+        if fp.startswith(src_prefix):
+            alt = dst_prefix + fp[len(src_prefix):]
+            if os.path.exists(alt):
+                return alt
     return ''
 
 

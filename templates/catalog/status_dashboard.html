@@ -399,6 +399,9 @@
         <div class="kpi-submetrics">
             <span><i class="fa-solid fa-book"></i> Books: <strong id="kpi-sub-books">{{ dashboard.catalog.books_count|intcomma }}</strong></span>
             <span><i class="fa-solid fa-newspaper"></i> Mags: <strong id="kpi-sub-mags">{{ dashboard.catalog.magazines_count|intcomma }}</strong></span>
+            {% if dashboard.vx_unlocked and dashboard.catalog.archive_x_count %}
+            <span style="color:#fda4af;"><i class="fa-solid fa-box-archive"></i> Archive-X: <strong id="kpi-sub-archivex">{{ dashboard.catalog.archive_x_count|intcomma }}</strong></span>
+            {% endif %}
             <span><i class="fa-solid fa-tablet-screen-button"></i> Kindle: <strong id="kpi-sub-kindle">{{ dashboard.catalog.kindle_count|intcomma }}</strong></span>
             <span><i class="fa-solid fa-headphones"></i> Audio: <strong id="kpi-sub-audio">{{ dashboard.catalog.audible_count|intcomma }}</strong></span>
         </div>
@@ -419,6 +422,7 @@
             <span class="text-green"><i class="fa-solid fa-circle-check"></i> Valid: <strong id="kpi-sub-valid">{{ dashboard.catalog.valid_files|intcomma }}</strong> ({{ dashboard.catalog.valid_files_pct }}%)</span>
             <span class="text-amber"><i class="fa-solid fa-lock"></i> DRM: <strong id="kpi-sub-drm">{{ dashboard.catalog.drm_files|intcomma }}</strong></span>
             <span class="text-red"><i class="fa-solid fa-triangle-exclamation"></i> Invalid: <strong id="kpi-sub-invalid">{{ dashboard.catalog.invalid_files|intcomma }}</strong></span>
+            <span style="color:#94a3b8; width:100%; font-size:0.74rem; padding-top:2px;"><i class="fa-solid fa-folder-tree"></i> Books: <strong>{{ dashboard.catalog.books_files_count|intcomma }}</strong> &middot; Mags: <strong>{{ dashboard.catalog.periodicals_files_count|intcomma }}</strong>{% if dashboard.vx_unlocked and dashboard.catalog.archive_x_files_count %} &middot; <span style="color:#fda4af;">Archive-X: <strong>{{ dashboard.catalog.archive_x_files_count|intcomma }}</strong></span>{% endif %}</span>
         </div>
     </div>
 
@@ -436,6 +440,7 @@
         <div class="kpi-submetrics">
             <span style="color:#38bdf8;"><i class="fa-solid fa-hourglass-half"></i> Remaining to Catalog: <strong id="kpi-rem-catalog">{{ dashboard.conversion.remaining_to_catalog|intcomma }}</strong> <small id="kpi-rem-catalog-chunk">{% if dashboard.conversion.catalog_sync_chunk_info %}({{ dashboard.conversion.catalog_sync_chunk_info }}){% endif %}</small></span>
             <span><i class="fa-solid fa-folder-open"></i> Discovered on NAS: <strong id="kpi-discovered-total">{{ dashboard.conversion.discovered_files_total|intcomma }}</strong></span>
+            <span style="color:#94a3b8; font-size:0.74rem;"><i class="fa-solid fa-layer-group"></i> Books: <strong>{{ dashboard.conversion.tracked_books_count|intcomma }}</strong> &middot; Mags: <strong>{{ dashboard.conversion.tracked_mags_count|intcomma }}</strong>{% if dashboard.vx_unlocked and dashboard.conversion.tracked_archive_x_count %} &middot; <span style="color:#fda4af;">Archive-X: <strong>{{ dashboard.conversion.tracked_archive_x_count|intcomma }}</strong></span>{% endif %}</span>
             {% if dashboard.conversion.last_synced_at %}
                 <span><i class="fa-regular fa-calendar-check"></i> Synced: <strong>{{ dashboard.conversion.last_synced_at }}</strong></span>
             {% endif %}
@@ -1015,7 +1020,15 @@
                 <div id="modal-new-meta"></div>
             </div>
             <div class="conv-modal-field full" id="modal-merged-editor-wrap">
-                <label style="color:#4ade80;"><i class="fa-solid fa-sliders"></i> Selected Fields to Save (Click fields above to mix &amp; match, or edit text directly)</label>
+                <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.45rem; margin-bottom:0.35rem;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                        <label style="color:#4ade80; margin:0;"><i class="fa-solid fa-sliders"></i> Selected Fields to Save (Click fields above to mix &amp; match, or edit text directly)</label>
+                        <span id="conv-ai-title-author-status" style="font-size:0.7rem; color:#4ade80; display:none;"></span>
+                    </div>
+                    <button type="button" class="btn-mini-action" id="conv-btn-ai-title-author" onclick="generateConvAiTitleAuthor(this)" style="display:inline-flex; background:rgba(168,85,247,0.22); border-color:rgba(168,85,247,0.58); color:#e9d5ff;" title="Read the book's cover, title page, copyright page &amp; filename to extract clean Title &amp; Author with Gemini AI">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Title &amp; Author
+                    </button>
+                </div>
                 <div class="merged-edit-grid">
                     <div>
                         <small style="color:#94a3b8; font-size:0.7rem;">Title</small>
@@ -1857,6 +1870,17 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             convAiDescBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content';
             convAiDescBtn.style.display = 'inline-flex';
         }
+        const convAiTitleBtn = document.getElementById('conv-btn-ai-title-author');
+        const convAiTitleSt = document.getElementById('conv-ai-title-author-status');
+        if (convAiTitleSt) {
+            convAiTitleSt.style.display = 'none';
+            convAiTitleSt.textContent = '';
+        }
+        if (convAiTitleBtn) {
+            convAiTitleBtn.disabled = false;
+            convAiTitleBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Title &amp; Author';
+            convAiTitleBtn.style.display = 'inline-flex';
+        }
         const ignoreBtn = document.getElementById('modal-ignore-btn');
         if (ignoreBtn) {
             ignoreBtn.disabled = false;
@@ -2056,6 +2080,16 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                 pickNewDescEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(newDesc)}`;
             }
             if (typeof pickField === 'function') pickField('description', 'new', true);
+            if (res.title_updated && res.title) {
+                currentModalItem.title = res.title;
+                const tIn = document.getElementById('merge-input-title');
+                if (tIn) tIn.value = res.title;
+            }
+            if (res.authors_updated && res.authors) {
+                currentModalItem.author = res.authors;
+                const aIn = document.getElementById('merge-input-author');
+                if (aIn) aIn.value = res.authors;
+            }
             if (hintEl) hintEl.style.display = 'none';
             if (btn) {
                 btn.disabled = false;
@@ -2065,6 +2099,107 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                 statusEl.style.display = 'inline';
                 statusEl.style.color = '#4ade80';
                 statusEl.innerHTML = '<i class="fa-solid fa-check"></i> Generated from content &amp; saved to BookDB (click <b>Approve Selected Fields</b> to finalize)';
+            }
+        } catch (err) {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+            if (statusEl) {
+                statusEl.style.display = 'inline';
+                statusEl.style.color = '#fca5a5';
+                statusEl.textContent = 'Network error: ' + err.message;
+            }
+        }
+    }
+
+    async function generateConvAiTitleAuthor(btn) {
+        if (!currentModalItem) return;
+        const statusEl = document.getElementById('conv-ai-title-author-status');
+        const origHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reading Cover &amp; Content...';
+        }
+        if (statusEl) {
+            statusEl.style.display = 'inline';
+            statusEl.style.color = '#d8b4fe';
+            statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Identifying Title &amp; Author with Gemini AI...';
+        }
+        try {
+            const curTitle = (document.getElementById('merge-input-title')?.value || currentModalItem.title || currentModalItem.orig_title || '').trim();
+            const curAuth = (document.getElementById('merge-input-author')?.value || currentModalItem.author || currentModalItem.orig_author || '').trim();
+            const curPub = (document.getElementById('merge-input-publisher')?.value || currentModalItem.publisher || currentModalItem.orig_publisher || '').trim();
+            const curIsbn = (document.getElementById('merge-input-isbn')?.value || currentModalItem.isbn || currentModalItem.orig_isbn || '').trim();
+            const resp = await fetch('/mylibrary/api/ai-title-author/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_path: currentModalItem.file_path || '',
+                    title: curTitle,
+                    authors: curAuth,
+                    publisher: curPub,
+                    isbn: curIsbn,
+                    apply_immediately: true,
+                    mode: 'title_author',
+                })
+            });
+            const res = await resp.json();
+            if (!res || !res.ok || (!res.suggested_title && !res.suggested_authors && !res.title)) {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+                if (statusEl) {
+                    statusEl.style.display = 'inline';
+                    statusEl.style.color = '#fca5a5';
+                    statusEl.textContent = (res && res.error) || 'Could not extract Title & Author.';
+                }
+                return;
+            }
+            const finalT = res.suggested_title || res.title || '';
+            const finalA = res.suggested_authors || res.authors || '';
+            const finalP = res.suggested_publisher || res.publisher || '';
+            if (finalT) {
+                currentModalItem.title = finalT;
+                const tIn = document.getElementById('merge-input-title');
+                if (tIn) tIn.value = finalT;
+                const pickNewTitle = document.getElementById('pick-new-title');
+                if (pickNewTitle) {
+                    pickNewTitle.style.color = '';
+                    pickNewTitle.style.fontStyle = '';
+                    pickNewTitle.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(finalT)}`;
+                }
+                if (typeof pickField === 'function') pickField('title', 'new', true);
+            }
+            if (finalA) {
+                currentModalItem.author = finalA;
+                const aIn = document.getElementById('merge-input-author');
+                if (aIn) aIn.value = finalA;
+                const pickNewAuth = document.getElementById('pick-new-author');
+                if (pickNewAuth) {
+                    pickNewAuth.style.color = '';
+                    pickNewAuth.style.fontStyle = '';
+                    pickNewAuth.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(finalA)}`;
+                }
+                if (typeof pickField === 'function') pickField('author', 'new', true);
+            }
+            if (finalP) {
+                currentModalItem.publisher = finalP;
+                const pIn = document.getElementById('merge-input-publisher');
+                if (pIn) pIn.value = finalP;
+            }
+            if (res.suggested_isbn && document.getElementById('merge-input-isbn') && !document.getElementById('merge-input-isbn').value.trim()) {
+                document.getElementById('merge-input-isbn').value = res.suggested_isbn;
+            }
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Regenerate Title &amp; Author';
+            }
+            if (statusEl) {
+                statusEl.style.display = 'inline';
+                statusEl.style.color = '#4ade80';
+                statusEl.innerHTML = '<i class="fa-solid fa-check"></i> Extracted &amp; saved to BookDB (click <b>Approve Selected Fields</b> to finalize)';
             }
         } catch (err) {
             if (btn) {

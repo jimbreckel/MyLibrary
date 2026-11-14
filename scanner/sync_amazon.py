@@ -107,6 +107,48 @@ def _parse_human_date(date_str: str) -> str:
     return s
 
 
+def _wait_for_stable_page(page: Any, settle_sec: float = 1.5) -> None:
+    """Wait for any in-flight navigation or client-side redirect to settle."""
+    for state in ("domcontentloaded", "load"):
+        try:
+            page.wait_for_load_state(state, timeout=15000)
+        except Exception:
+            pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=4000)
+    except Exception:
+        pass
+    if settle_sec > 0:
+        time.sleep(settle_sec)
+
+
+def _safe_evaluate(page: Any, expression: str, arg: Any = None, retries: int = 6) -> Any:
+    """
+    Run page.evaluate() resiliently, retrying if a late post-login or SPA navigation
+    destroys the frame execution context mid-call.
+    """
+    last_err: Optional[Exception] = None
+    for _ in range(retries):
+        try:
+            if arg is None:
+                return page.evaluate(expression)
+            return page.evaluate(expression, arg)
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            if (
+                "execution context was destroyed" in msg
+                or "navigation" in msg
+                or "cannot find context" in msg
+            ):
+                _wait_for_stable_page(page, settle_sec=2.0)
+                continue
+            raise
+    if last_err:
+        raise last_err
+    return None
+
+
 def fetch_amazon_via_browser(
     fetch_kindle: bool = True,
     fetch_audible: bool = True,
@@ -213,36 +255,62 @@ def fetch_amazon_via_browser(
                             pass
                     if _is_kindle_api_ready():
                         break
-                time.sleep(2)
+                _wait_for_stable_page(page, settle_sec=2.5)
 
-            # Paginate through `https://read.amazon.com/kindle-library/search` inside the authenticated page context
+            # Ensure post-login redirects have settled on `read.amazon.com`
+            _wait_for_stable_page(page, settle_sec=1.5)
+
+            # Paginate page-by-page so any late SPA reload/redirect only retries a single batch
             print("  Fetching purchased Kindle & Kindle+ books via Kindle Cloud Reader API...")
-            raw_kindle_books = page.evaluate(
-                """async () => {
-                    const results = [];
-                    let paginationToken = null;
-                    for (let pageIdx = 0; pageIdx < 100; pageIdx++) {
-                        let url = 'https://read.amazon.com/kindle-library/search?query=&libraryType=BOOKS&sortType=recency&querySize=50';
-                        if (paginationToken) {
-                            url += '&paginationToken=' + encodeURIComponent(paginationToken);
-                        }
-                        try {
-                            const resp = await fetch(url, { credentials: 'include' });
-                            if (!resp.ok) break;
-                            const data = await resp.json();
-                            const items = data.itemsList || [];
-                            for (const it of items) {
-                                results.push(it);
+            raw_kindle_books: List[Dict[str, Any]] = []
+            pagination_token: Optional[str] = None
+            for page_idx in range(1, 101):
+                if "read.amazon.com" not in page.url:
+                    try:
+                        page.goto("https://read.amazon.com/kindle-library", wait_until="domcontentloaded", timeout=60000)
+                    except Exception:
+                        pass
+                    _wait_for_stable_page(page, settle_sec=2.0)
+
+                batch = None
+                for fetch_attempt in range(3):
+                    batch = _safe_evaluate(
+                        page,
+                        """async (token) => {
+                            let url = 'https://read.amazon.com/kindle-library/search?query=&libraryType=BOOKS&sortType=recency&querySize=50';
+                            if (token) {
+                                url += '&paginationToken=' + encodeURIComponent(token);
                             }
-                            paginationToken = data.paginationToken || null;
-                            if (!paginationToken || items.length === 0) break;
-                        } catch (err) {
-                            break;
-                        }
-                    }
-                    return results;
-                }"""
-            )
+                            try {
+                                const resp = await fetch(url, { credentials: 'include' });
+                                if (!resp.ok) return { ok: false, status: resp.status, items: [], nextToken: null };
+                                const data = await resp.json();
+                                return {
+                                    ok: true,
+                                    status: resp.status,
+                                    items: data.itemsList || [],
+                                    nextToken: data.paginationToken || null,
+                                };
+                            } catch (err) {
+                                return { ok: false, status: 0, items: [], nextToken: null };
+                            }
+                        }""",
+                        pagination_token,
+                    )
+                    if batch and batch.get("ok"):
+                        break
+                    if fetch_attempt < 2:
+                        _wait_for_stable_page(page, settle_sec=2.0)
+
+                if not batch or not batch.get("ok"):
+                    break
+                page_items = batch.get("items") or []
+                raw_kindle_books.extend(page_items)
+                pagination_token = batch.get("nextToken")
+                if page_idx == 1 or page_idx % 5 == 0 or not pagination_token:
+                    print(f"    -> Fetched {len(raw_kindle_books):,} Kindle books so far...")
+                if not pagination_token or not page_items:
+                    break
 
             print(f"  Discovered {len(raw_kindle_books):,} Kindle / Kindle+ books in your Amazon library.")
             for idx, kb in enumerate(raw_kindle_books, start=1):
@@ -285,15 +353,16 @@ def fetch_amazon_via_browser(
                     page.goto("https://read.amazon.com/notebook", wait_until="domcontentloaded", timeout=60000)
                 except Exception:
                     time.sleep(3)
-                time.sleep(3)
+                _wait_for_stable_page(page, settle_sec=2.0)
                 if "signin" in page.url.lower():
-                    print("  Waiting briefly for Kindle Notebook SSO redirect...")
-                    for _ in range(60):
+                    print("  Waiting for Kindle Notebook SSO / sign-in redirect...")
+                    for _ in range(90):
                         time.sleep(1)
                         if "read.amazon.com/notebook" in page.url and "signin" not in page.url.lower():
                             break
-                    time.sleep(2)
-                notebook_books = page.evaluate(
+                    _wait_for_stable_page(page, settle_sec=2.0)
+                notebook_books = _safe_evaluate(
+                    page,
                     """() => {
                         const rows = [];
                         const els = document.querySelectorAll('.kp-notebook-library-each-book');
@@ -311,8 +380,8 @@ def fetch_amazon_via_browser(
                             });
                         });
                         return rows;
-                    }"""
-                )
+                    }""",
+                ) or []
                 print(f"  Found {len(notebook_books):,} Kindle books with saved Highlights / Notes / Bookmarks.")
 
                 for nb in notebook_books[:max_notebook_details]:
@@ -353,14 +422,14 @@ def fetch_amazon_via_browser(
             print("\n[3/3] Fetching Purchased Audible Audiobooks (https://www.audible.com/library/titles)...")
             try:
                 page.goto("https://www.audible.com/library/titles?pageSize=50", wait_until="domcontentloaded", timeout=60000)
-                time.sleep(2.5)
+                _wait_for_stable_page(page, settle_sec=2.0)
                 if "ap/signin" in page.url or "signin" in page.url.lower():
-                    print("  Waiting briefly for Audible SSO redirect...")
-                    for _ in range(60):
+                    print("  Waiting for Audible SSO / sign-in redirect (complete sign-in in Chrome if prompted)...")
+                    for _ in range(180):
                         time.sleep(1)
                         if "audible.com/library" in page.url and "signin" not in page.url.lower():
                             break
-                    time.sleep(2)
+                    _wait_for_stable_page(page, settle_sec=2.0)
 
                 audible_count = 0
                 for page_num in range(1, 40):
@@ -370,9 +439,10 @@ def fetch_amazon_via_browser(
                             wait_until="domcontentloaded",
                             timeout=45000,
                         )
-                        time.sleep(1.5)
+                        _wait_for_stable_page(page, settle_sec=1.5)
 
-                    rows = page.evaluate(
+                    rows = _safe_evaluate(
+                        page,
                         """() => {
                             const items = [];
                             const bookRows = document.querySelectorAll('div[id^="adbl-library-content-row-"], .adbl-library-content-row');
@@ -399,8 +469,8 @@ def fetch_amazon_via_browser(
                                 }
                             });
                             return items;
-                        }"""
-                    )
+                        }""",
+                    ) or []
                     if not rows:
                         break
                     new_on_page = 0

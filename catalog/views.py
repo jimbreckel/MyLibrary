@@ -306,6 +306,7 @@ def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
         recent_pub_count=Count('id', filter=Q(pub_date__gte=cutoff_1yr, pub_date__lte=today_dt)),
     )
     total_files = FileLocation.objects.count()
+    vx_files_count = FileLocation.objects.filter(library_name='Archive-X').count()
     available_formats = list(
         FileLocation.objects.order_by().values_list('file_format', flat=True).distinct().order_by('file_format')
     )
@@ -314,6 +315,7 @@ def _rebuild_dashboard_meta_cache() -> tuple[dict, list[str]]:
         'total_files': total_files or 0,
         'books_count': catalog_agg['books_count'] or 0,
         'magazines_count': catalog_agg['magazines_count'] or 0,
+        'archive_x_count': vx_files_count or 0,
         'kindle_count': catalog_agg['kindle_count'] or 0,
         'audible_count': catalog_agg['audible_count'] or 0,
         'audiobook_count': catalog_agg['audiobook_count'] or 0,
@@ -645,6 +647,15 @@ class DashboardView(ListView):
     context_object_name = 'items'
     paginate_by = 24
 
+    def dispatch(self, request, *args, **kwargs):
+        v_flag = (request.GET.get('v') or '').strip().lower()
+        if v_flag == 'x':
+            request.session['vx_unlocked'] = True
+            request.session.set_expiry(0)
+        elif v_flag in ('0', 'off', 'false', 'lock'):
+            request.session['vx_unlocked'] = False
+        return super().dispatch(request, *args, **kwargs)
+
     @staticmethod
     def _compute_bookmark_progress_groups(bm_data, amz_data, shelf=''):
         """
@@ -731,14 +742,22 @@ class DashboardView(ListView):
             get_tomags_item_ids,
         )
 
+        vx_unlocked = bool(self.request.session.get('vx_unlocked', False))
         raw_query = self.request.GET.get('q', '').strip()
         query = re.sub(r'(?:^|\s)[+!]enrich\b', '', raw_query, flags=re.IGNORECASE).strip()
         shelf = self.request.GET.get('shelf', '').strip().lower()
-        selected_tag = self.request.GET.get('tag', '').strip()
-        selected_folder = self.request.GET.get('folder', '').strip()
+        selected_tags = [t.strip() for t in self.request.GET.getlist('tag') if t.strip()]
+        selected_tag = selected_tags[0] if selected_tags else ''
+        selected_folders = [
+            f.strip()
+            for f in self.request.GET.getlist('folder')
+            if f.strip() and (vx_unlocked or f.strip().lower() != 'archive-x')
+        ]
+        selected_folder = selected_folders[0] if selected_folders else ''
+        selected_series = [s.strip() for s in self.request.GET.getlist('series') if s.strip()]
         selected_author = self.request.GET.get('author', '').strip()
         sort_by = self.request.GET.get('sort', '').strip().lower()
-        if selected_author and not sort_by:
+        if (selected_author or selected_series) and not sort_by:
             sort_by = 'pubdate_desc'
         read_status = self.request.GET.get('read_status', '').strip().lower()
         enrich_status = self.request.GET.get('enrich_status', '').strip().lower()
@@ -747,11 +766,15 @@ class DashboardView(ListView):
         item_types = [t for t in self.request.GET.getlist('type') if t]
         file_formats = [f for f in self.request.GET.getlist('format') if f]
 
-        filters = {}
+        filters = {'vx_unlocked': vx_unlocked}
         if item_types:
             filters['item_type'] = item_types
         if file_formats:
             filters['file_format'] = file_formats
+        if selected_folders:
+            filters['folders'] = selected_folders
+        if selected_series:
+            filters['series'] = selected_series
 
         # Run Postgres full-text or similarity search
         qs = perform_search(query, filters)
@@ -1031,21 +1054,20 @@ class DashboardView(ListView):
                 )
                 qs = qs.annotate(_bm_filter_order=order_expr).order_by('_bm_filter_order')
 
-        if selected_tag:
+        if selected_tags:
             tags_idx = get_enriched_tags_and_folders_index(need_paths=True)
-            tag_paths = tags_idx['tag_to_paths'].get(selected_tag, [])
-            if not tag_paths:
-                for k, v in tags_idx['tag_to_paths'].items():
-                    if k.lower() == selected_tag.lower():
-                        tag_paths = v
-                        break
-            qs = qs.filter(files__file_path__in=tag_paths).distinct()
+            combined_tag_paths: list[str] = []
+            for st in selected_tags:
+                t_paths = tags_idx['tag_to_paths'].get(st, [])
+                if not t_paths:
+                    for k, v in tags_idx['tag_to_paths'].items():
+                        if k.lower() == st.lower():
+                            t_paths = v
+                            break
+                combined_tag_paths.extend(t_paths)
+            qs = qs.filter(files__file_path__in=list(dict.fromkeys(combined_tag_paths))).distinct()
 
-        if selected_folder:
-            qs = qs.filter(
-                Q(files__file_path__startswith=f'/books/{selected_folder}/')
-                | Q(files__file_path__startswith=f'/volume1/common/Media/Books/{selected_folder}/')
-            ).distinct()
+        # Note: selected_folders and selected_series are already applied via indexed RawSQL inside perform_search()
 
         # Apply explicit Sort By selection
         if sort_by == 'title_asc':
@@ -1093,17 +1115,24 @@ class DashboardView(ListView):
             final_qs._fast_exclude_cache_key = (
                 f"{query}|{shelf}|{enrich_status}|{sort_by}|"
                 f"{','.join(sorted(item_types))}|{','.join(sorted(file_formats))}|"
-                f"{selected_tag}|{selected_folder}|{selected_author}|{read_status}"
+                f"{','.join(sorted(selected_tags))}|{','.join(sorted(selected_folders))}|{','.join(sorted(selected_series))}|"
+                f"{selected_author}|{read_status}|{vx_unlocked}"
             )
         return final_qs
 
     def get_paginator(self, queryset, per_page, orphans=0, allow_empty_first_page=True, **kwargs):
-        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids, get_needs_cover_enriched_shelf, get_packt_books_shelf_ids, get_removed_protection_item_ids, get_tomags_item_ids
+        from .opds import get_bad_metadata_item_ids, get_enriched_item_ids_index, get_interesting_item_ids, get_needs_cover_enriched_shelf, get_packt_books_shelf_ids, get_removed_protection_item_ids, get_tomags_item_ids, get_virtual_folders_summary
 
+        vx_unlocked = bool(self.request.session.get('vx_unlocked', False))
         query = self.request.GET.get('q', '').strip()
         shelf = self.request.GET.get('shelf', '').strip().lower()
-        selected_tag = self.request.GET.get('tag', '').strip()
-        selected_folder = self.request.GET.get('folder', '').strip()
+        selected_tags = [t.strip() for t in self.request.GET.getlist('tag') if t.strip()]
+        selected_folders = [
+            f.strip()
+            for f in self.request.GET.getlist('folder')
+            if f.strip() and (vx_unlocked or f.strip().lower() != 'archive-x')
+        ]
+        selected_series = [s.strip() for s in self.request.GET.getlist('series') if s.strip()]
         selected_author = self.request.GET.get('author', '').strip()
         read_status = self.request.GET.get('read_status', '').strip().lower()
         enrich_status = self.request.GET.get('enrich_status', '').strip().lower()
@@ -1111,7 +1140,11 @@ class DashboardView(ListView):
         file_formats = [f for f in self.request.GET.getlist('format') if f]
 
         precomputed_count = None
-        if not query and not selected_author and not file_formats and not selected_tag and not selected_folder and not read_status:
+        if not query and not selected_author and not file_formats and not selected_tags and not selected_series and not read_status and len(selected_folders) == 1 and not shelf and not enrich_status and not item_types:
+            f_map = {k.lower(): c for k, c in get_virtual_folders_summary(vx_unlocked=vx_unlocked)}
+            if selected_folders[0].lower() in f_map and f_map[selected_folders[0].lower()] > 0:
+                precomputed_count = f_map[selected_folders[0].lower()]
+        elif not query and not selected_author and not file_formats and not selected_tags and not selected_folders and not selected_series and not read_status:
             if not shelf and not enrich_status:
                 stats, _ = _get_cached_dashboard_meta()
                 if not item_types:
@@ -1203,10 +1236,14 @@ class DashboardView(ListView):
 
         context = super().get_context_data(**kwargs)
 
+        vx_unlocked = bool(self.request.session.get('vx_unlocked', False))
+        context['vx_unlocked'] = vx_unlocked
+
         # Get query parameters to persist in pagination links
         query_params = self.request.GET.copy()
-        if 'page' in query_params:
-            del query_params['page']
+        for strip_k in ('page', 'v'):
+            if strip_k in query_params:
+                del query_params[strip_k]
         context['query_params'] = query_params.urlencode()
 
         raw_q = self.request.GET.get('q', '').strip()
@@ -1221,21 +1258,48 @@ class DashboardView(ListView):
         context['search_keywords_spec'] = SEARCH_KEYWORDS_SPEC
         context['active_search_badges'] = parsed_q['active_badges']
         context['selected_shelf'] = self.request.GET.get('shelf', '').strip().lower()
-        context['selected_tag'] = self.request.GET.get('tag', '').strip()
-        context['selected_folder'] = self.request.GET.get('folder', '').strip()
+        selected_tags = [t.strip() for t in self.request.GET.getlist('tag') if t.strip()]
+        context['selected_tags'] = selected_tags
+        context['selected_tag'] = selected_tags[0] if selected_tags else ''
+        selected_folders = [
+            f.strip()
+            for f in self.request.GET.getlist('folder')
+            if f.strip() and (vx_unlocked or f.strip().lower() != 'archive-x')
+        ]
+        context['selected_folders'] = selected_folders
+        context['selected_folder'] = selected_folders[0] if selected_folders else ''
+        selected_series = [s.strip() for s in self.request.GET.getlist('series') if s.strip()]
+        context['selected_series_list'] = selected_series
+        context['selected_series'] = selected_series[0] if selected_series else ''
         context['selected_author'] = self.request.GET.get('author', '').strip()
         context['selected_types'] = [t for t in self.request.GET.getlist('type') if t]
         context['selected_formats'] = [f for f in self.request.GET.getlist('format') if f]
         raw_sort = self.request.GET.get('sort', '').strip().lower()
-        if context['selected_author'] and not raw_sort:
+        if (context['selected_author'] or context['selected_series']) and not raw_sort:
             raw_sort = 'pubdate_desc'
         context['selected_sort'] = raw_sort
+        try:
+            from .opds import sync_tobooks_drop_folder
+            sync_tobooks_drop_folder(run_async=True)
+        except Exception:
+            pass
         context['selected_read_status'] = self.request.GET.get('read_status', '').strip().lower()
         context['selected_enrich_status'] = self.request.GET.get('enrich_status', '').strip().lower()
         context['selected_cover_issue'] = self.request.GET.get('cover_issue', '').strip().lower()
         context['selected_review_type'] = self.request.GET.get('review_type', '').strip().lower()
 
-        stats, available_formats = _get_cached_dashboard_meta()
+        raw_stats, available_formats = _get_cached_dashboard_meta()
+        stats = dict(raw_stats)
+        vx_cnt = int(raw_stats.get('archive_x_count') or 3489)
+        raw_mags = int(raw_stats.get('magazines_count') or 0)
+        if raw_mags > vx_cnt:
+            stats['magazines_count'] = raw_mags - vx_cnt
+        if vx_unlocked:
+            stats['archive_x_count'] = vx_cnt
+        else:
+            stats['archive_x_count'] = 0
+            stats['total_items'] = max(0, int(raw_stats.get('total_items') or 0) - vx_cnt)
+            stats['total_files'] = max(0, int(raw_stats.get('total_files') or 0) - vx_cnt)
         context['available_formats'] = available_formats
         context['available_types'] = CatalogItem.ITEM_TYPES
         context['stats'] = stats
@@ -1369,9 +1433,16 @@ class DashboardView(ListView):
                         it.enrich_diag_json = json.dumps(diag_copy)
                         break
 
+        from .opds import get_periodical_series_summary, get_virtual_folders_summary
         tags_idx = get_enriched_tags_and_folders_index()
         context['enriched_tags'] = tags_idx.get('tag_counts', [])[:60]
-        context['enriched_folders'] = tags_idx.get('folder_counts', [])
+        context['enriched_folders'] = get_virtual_folders_summary(vx_unlocked=vx_unlocked)
+        series_sublist = []
+        if 'Periodicals' in selected_folders:
+            series_sublist = get_periodical_series_summary('Periodicals', vx_unlocked=vx_unlocked)
+        elif vx_unlocked and 'Archive-X' in selected_folders:
+            series_sublist = get_periodical_series_summary('Archive-X', vx_unlocked=True)
+        context['periodical_series_list'] = series_sublist
 
         return context
 
@@ -1433,7 +1504,8 @@ class SuggestAPIView(APIView):
         )
         if has_search_criteria:
             try:
-                qs = perform_search(query)
+                vx_unl = bool(request.session.get('vx_unlocked', False))
+                qs = perform_search(query, filters={'vx_unlocked': vx_unl})
                 excl_set = getattr(qs, '_fast_exclude_ids_set', None)
                 suggestions = qs.values('id', 'title', 'authors', 'item_type')[:60 if excl_set else 15]
                 seen = set()
@@ -1825,7 +1897,7 @@ def _ensure_scanner_daemon_or_trigger(scanner_dir: Path, force_trigger: bool = F
         return {'ok': False, 'error': str(e)}
 
 
-def get_conversion_and_import_status() -> dict:
+def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
     """
     Gather comprehensive metrics for the Conversion (epubmeta) & Import (MyLibrary Scanner / BookDB)
     Status Dashboard from PostgreSQL BookDB, unified SQLite scanner_state.db, and live scanner logs.
@@ -1845,11 +1917,11 @@ def get_conversion_and_import_status() -> dict:
     epubmeta_log_path = scanner_dir / 'logs' / 'epubmeta.log'
 
     # 1. PostgreSQL BookDB Catalog & File Import Metrics (cached 300s across workers with stale-while-revalidate)
-    status_cache_paths = [Path('/tmp/mylibrary_status_heavy_cache.json')]
+    status_cache_paths = [Path('/tmp/mylibrary_status_heavy_cache_v2.json')]
     for _d in (Path('/books_bad'), Path('/volume1/common/Media/Books_bad'), Path(r'U:\Media\Books_bad')):
         try:
             if _d.exists() and _d.is_dir():
-                status_cache_paths.insert(0, _d / '.status_heavy_cache.json')
+                status_cache_paths.insert(0, _d / '.status_heavy_cache_v2.json')
                 break
         except Exception:
             continue
@@ -1902,11 +1974,27 @@ def get_conversion_and_import_status() -> dict:
                     & ~Q(authors=''),
                 ),
             )
+            _vx_item_agg = CatalogItem.objects.filter(files__library_name='Archive-X').aggregate(
+                vx_items=Count('id', distinct=True),
+                vx_with_cover=Count(
+                    'id',
+                    distinct=True,
+                    filter=(Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
+                    | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url='')),
+                ),
+                vx_with_description=Count('id', distinct=True, filter=Q(description__isnull=False) & ~Q(description='')),
+                vx_with_publisher=Count('id', distinct=True, filter=Q(publisher__isnull=False) & ~Q(publisher='')),
+                vx_known_author=Count('id', distinct=True, filter=Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author')),
+            )
+            _cat_agg.update(_vx_item_agg)
             _tot_files_agg = FileLocation.objects.aggregate(
                 total_files=Count('id'),
                 valid_files=Count('id', filter=Q(is_invalid=False, has_drm=False)),
                 drm_files=Count('id', filter=Q(has_drm=True)),
                 invalid_files=Count('id', filter=Q(is_invalid=True)),
+                periodicals_files=Count('id', filter=Q(library_name='Periodicals')),
+                vx_files=Count('id', filter=Q(library_name='Archive-X')),
+                vx_valid_files=Count('id', filter=Q(library_name='Archive-X', is_invalid=False, has_drm=False)),
             )
             _tf = _tot_files_agg['total_files'] or 0
             _fmt_rows = list(
@@ -1917,16 +2005,27 @@ def get_conversion_and_import_status() -> dict:
             for _r in _fmt_rows:
                 _r['file_format'] = _r['file_format'] or 'UNKNOWN'
                 _r['pct'] = _pct(_r['count'], _tf)
-            _lib_rows = list(
+            _raw_lib_rows = list(
                 FileLocation.objects.values('library_name')
                 .annotate(count=Count('id'))
-                .order_by('-count')[:8]
+                .order_by('-count')
             )
-            for _r in _lib_rows:
-                _r['library_name'] = _r['library_name'] or 'Default Library'
-                _r['pct'] = _pct(_r['count'], _tf)
+            _merged_libs = {'NAS Books': 0, 'Periodicals': 0, 'Archive-X': 0}
+            for _r in _raw_lib_rows:
+                _ln = (_r['library_name'] or '').strip()
+                if _ln in ('Periodicals', 'NAS Periodicals'):
+                    _merged_libs['Periodicals'] += (_r['count'] or 0)
+                elif _ln in ('Archive-X', 'NAS Archive-X'):
+                    _merged_libs['Archive-X'] += (_r['count'] or 0)
+                else:
+                    _merged_libs['NAS Books'] += (_r['count'] or 0)
+            _lib_rows = [
+                {'library_name': k, 'count': v, 'pct': _pct(v, _tf)}
+                for k, v in _merged_libs.items()
+                if v > 0
+            ]
             _rec_imports = []
-            for _it in CatalogItem.objects.prefetch_related('files').order_by('-created_at')[:15]:
+            for _it in CatalogItem.objects.prefetch_related('files').order_by('-created_at')[:25]:
                 _fl = list(_it.files.all())
                 _loc = _fl[0] if _fl else None
                 if not _loc:
@@ -1936,7 +2035,7 @@ def get_conversion_and_import_status() -> dict:
                     'file_path': _loc.file_path,
                     'file_format': _loc.file_format,
                     'file_size_mb': round((_loc.file_size or 0) / (1024 * 1024), 2),
-                    'library_name': _loc.library_name or 'NAS Library',
+                    'library_name': _loc.library_name or 'NAS Books',
                     'is_invalid': _loc.is_invalid,
                     'has_drm': _loc.has_drm,
                     'scanned_at': _format_est_timestamp(_loc.scanned_at, include_tz=True) if _loc.scanned_at else '',
@@ -2343,9 +2442,47 @@ def get_conversion_and_import_status() -> dict:
                     pass
 
     # 4. Remaining to Catalog & Remaining to Enrich Queue Metrics (unified with Catalog Sidebar)
+    vx_items_cnt = int(catalog_agg.get('vx_items') or 0)
+    vx_files_cnt = int(file_agg.get('vx_files') or 0)
+    vx_valid_files_cnt = int(file_agg.get('vx_valid_files') or vx_files_cnt)
+    periodicals_files_cnt = int(file_agg.get('periodicals_files') or 0)
+    raw_total_items = int(catalog_agg.get('total_items') or 0)
+    raw_total_files = int(file_agg.get('total_files') or 0)
+    raw_mags_items = int(catalog_agg.get('magazines_count') or 0)
+    pure_mags_items = max(0, raw_mags_items - vx_items_cnt)
+    books_files_cnt = max(0, raw_total_files - periodicals_files_cnt - vx_files_cnt)
+
+    if vx_unlocked:
+        eff_total_items = raw_total_items
+        eff_total_files = raw_total_files
+        eff_valid_files = int(file_agg.get('valid_files') or 0)
+        eff_with_cover = int(catalog_agg.get('with_cover') or 0)
+        eff_with_desc = int(catalog_agg.get('with_description') or 0)
+        eff_with_pub = int(catalog_agg.get('with_publisher') or 0)
+        eff_known_author = int(catalog_agg.get('known_author') or 0)
+        eff_libraries = [dict(r) for r in library_rows]
+        eff_recent_imports = list(recent_imports)[:15]
+    else:
+        eff_total_items = max(0, raw_total_items - vx_items_cnt)
+        eff_total_files = max(0, raw_total_files - vx_files_cnt)
+        eff_valid_files = max(0, int(file_agg.get('valid_files') or 0) - vx_valid_files_cnt)
+        eff_with_cover = max(0, int(catalog_agg.get('with_cover') or 0) - int(catalog_agg.get('vx_with_cover') or 0))
+        eff_with_desc = max(0, int(catalog_agg.get('with_description') or 0) - int(catalog_agg.get('vx_with_description') or 0))
+        eff_with_pub = max(0, int(catalog_agg.get('with_publisher') or 0) - int(catalog_agg.get('vx_with_publisher') or 0))
+        eff_known_author = max(0, int(catalog_agg.get('known_author') or 0) - int(catalog_agg.get('vx_known_author') or 0))
+        eff_libraries = [
+            {'library_name': r['library_name'], 'count': r['count'], 'pct': _pct(r['count'], eff_total_files)}
+            for r in library_rows
+            if r.get('library_name') != 'Archive-X'
+        ]
+        eff_recent_imports = [
+            r for r in recent_imports
+            if r.get('library_name') != 'Archive-X' and not str(r.get('file_path') or '').startswith('/xAdult/')
+        ][:15]
+
     est_epubs = next(
         (r['count'] for r in format_rows if (r.get('file_format') or '').upper() == 'EPUB'),
-        total_files,
+        eff_total_files,
     )
     cyc_metrics = _get_scanner_cycle_metrics(
         fallback_total_files=est_epubs,
@@ -2355,10 +2492,11 @@ def get_conversion_and_import_status() -> dict:
     )
     remaining_to_catalog = cyc_metrics['remaining_to_catalog']
     catalog_sync_chunk_info = cyc_metrics['catalog_sync_chunk_info']
+    raw_tracked_books = int(sqlite_stats.get('tracked_files_count') or 0)
+    eff_tracked_total = raw_tracked_books + periodicals_files_cnt + (vx_files_cnt if vx_unlocked else 0)
     discovered_files_total = max(
-        sqlite_stats['tracked_files_count'],
-        total_files,
-        cyc_metrics['discovered_files_total'],
+        eff_tracked_total,
+        eff_total_files,
     )
     remaining_to_enrich = cyc_metrics['remaining_to_enrich']
     skipped_complete_bookdb = cyc_metrics['skipped_complete_bookdb']
@@ -2370,6 +2508,10 @@ def get_conversion_and_import_status() -> dict:
     enrich_total_scope = remaining_to_enrich + sqlite_stats['total_processed']
     enrich_progress_pct = _pct(sqlite_stats['total_processed'], enrich_total_scope) if enrich_total_scope > 0 else 0.0
 
+    sqlite_stats['tracked_books_count'] = raw_tracked_books
+    sqlite_stats['tracked_mags_count'] = periodicals_files_cnt
+    sqlite_stats['tracked_archive_x_count'] = vx_files_cnt if vx_unlocked else 0
+    sqlite_stats['tracked_files_count'] = eff_tracked_total
     sqlite_stats['remaining_to_catalog'] = remaining_to_catalog
     sqlite_stats['catalog_sync_chunk_info'] = catalog_sync_chunk_info
     sqlite_stats['discovered_files_total'] = discovered_files_total
@@ -2381,6 +2523,16 @@ def get_conversion_and_import_status() -> dict:
     sqlite_stats['cycle_net_remaining'] = cycle_net_remaining
     sqlite_stats['enrich_progress_pct'] = enrich_progress_pct
 
+    if not vx_unlocked:
+        sqlite_stats['recent_conversions'] = [
+            rc for rc in (sqlite_stats.get('recent_conversions') or [])
+            if not str(rc.get('file_path') or '').startswith('/xAdult/')
+        ]
+        sqlite_stats['attention_items'] = [
+            ai for ai in (sqlite_stats.get('attention_items') or [])
+            if not str(ai.get('file_path') or '').startswith('/xAdult/')
+        ]
+
     if sqlite_stats.get('last_synced_at'):
         sqlite_stats['last_synced_at'] = _format_est_timestamp(sqlite_stats['last_synced_at'], include_tz=True)
     for _rc in sqlite_stats.get('recent_conversions') or []:
@@ -2389,12 +2541,13 @@ def get_conversion_and_import_status() -> dict:
     for _ai in sqlite_stats.get('attention_items') or []:
         if _ai.get('updated_at'):
             _ai['updated_at'] = _format_est_timestamp(_ai['updated_at'], include_tz=True)
-    for _ri in recent_imports:
+    for _ri in eff_recent_imports:
         if _ri.get('scanned_at'):
             _ri['scanned_at'] = _format_est_timestamp(_ri['scanned_at'], include_tz=True)
 
     return {
         'generated_at': now_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+        'vx_unlocked': bool(vx_unlocked),
         'scanner': {
             'is_scanning': is_scanning,
             'daemon_active': daemon_active,
@@ -2411,32 +2564,36 @@ def get_conversion_and_import_status() -> dict:
             'epubmeta_log_lines': epubmeta_lines,
         },
         'catalog': {
-            'total_items': total_items,
-            'total_files': total_files,
+            'total_items': eff_total_items,
+            'total_files': eff_total_files,
             'books_count': catalog_agg['books_count'] or 0,
-            'magazines_count': catalog_agg['magazines_count'] or 0,
+            'magazines_count': pure_mags_items,
+            'archive_x_count': vx_items_cnt if vx_unlocked else 0,
             'kindle_count': catalog_agg['kindle_count'] or 0,
             'audible_count': catalog_agg['audible_count'] or 0,
             'audiobook_count': catalog_agg['audiobook_count'] or 0,
-            'valid_files': file_agg['valid_files'] or 0,
+            'books_files_count': books_files_cnt,
+            'periodicals_files_count': periodicals_files_cnt,
+            'archive_x_files_count': vx_files_cnt if vx_unlocked else 0,
+            'valid_files': eff_valid_files,
             'drm_files': file_agg['drm_files'] or 0,
             'invalid_files': file_agg['invalid_files'] or 0,
-            'valid_files_pct': _pct(file_agg['valid_files'] or 0, total_files),
+            'valid_files_pct': _pct(eff_valid_files, eff_total_files),
             'with_isbn': catalog_agg['with_isbn'] or 0,
-            'with_isbn_pct': _pct(catalog_agg['with_isbn'] or 0, total_items),
-            'with_description': catalog_agg['with_description'] or 0,
-            'with_description_pct': _pct(catalog_agg['with_description'] or 0, total_items),
-            'with_publisher': catalog_agg['with_publisher'] or 0,
-            'with_publisher_pct': _pct(catalog_agg['with_publisher'] or 0, total_items),
-            'with_cover': catalog_agg['with_cover'] or 0,
-            'with_cover_pct': _pct(catalog_agg['with_cover'] or 0, total_items),
-            'known_author': catalog_agg['known_author'] or 0,
-            'known_author_pct': _pct(catalog_agg['known_author'] or 0, total_items),
+            'with_isbn_pct': _pct(catalog_agg['with_isbn'] or 0, eff_total_items),
+            'with_description': eff_with_desc,
+            'with_description_pct': _pct(eff_with_desc, eff_total_items),
+            'with_publisher': eff_with_pub,
+            'with_publisher_pct': _pct(eff_with_pub, eff_total_items),
+            'with_cover': eff_with_cover,
+            'with_cover_pct': _pct(eff_with_cover, eff_total_items),
+            'known_author': eff_known_author,
+            'known_author_pct': _pct(eff_known_author, eff_total_items),
             'complete_metadata': catalog_agg['complete_metadata'] or 0,
-            'complete_metadata_pct': _pct(catalog_agg['complete_metadata'] or 0, total_items),
+            'complete_metadata_pct': _pct(catalog_agg['complete_metadata'] or 0, eff_total_items),
             'formats': format_rows,
-            'libraries': library_rows,
-            'recent_imports': recent_imports,
+            'libraries': eff_libraries,
+            'recent_imports': eff_recent_imports,
         },
         'conversion': sqlite_stats,
     }
@@ -2450,7 +2607,9 @@ class StatusDashboardView(TemplateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['dashboard'] = get_conversion_and_import_status()
+        vx_unlocked = bool(self.request.session.get('vx_unlocked', False))
+        context['vx_unlocked'] = vx_unlocked
+        context['dashboard'] = get_conversion_and_import_status(vx_unlocked=vx_unlocked)
         return context
 
 
@@ -2462,7 +2621,8 @@ class StatusDashboardAPIView(APIView):
     permission_classes = []
 
     def get(self, request):
-        return Response(get_conversion_and_import_status())
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        return Response(get_conversion_and_import_status(vx_unlocked=vx_unlocked))
 
     def post(self, request):
         action = (request.data.get('action') or 'start_scan').strip().lower()
@@ -2476,7 +2636,8 @@ class StatusDashboardAPIView(APIView):
             else nas_scanner_dir
         )
         res = _ensure_scanner_daemon_or_trigger(scanner_dir, force_trigger=True)
-        status_payload = get_conversion_and_import_status()
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        status_payload = get_conversion_and_import_status(vx_unlocked=vx_unlocked)
         return Response({
             'ok': bool(res.get('ok', True)),
             'trigger': res,
@@ -3738,19 +3899,66 @@ class MoveToMagAPIView(APIView):
         body = request.data or {}
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
+        target_bucket = str(body.get('target_bucket') or request.GET.get('target_bucket') or '').strip()
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        force_adult = vx_unlocked and target_bucket.lower() in ('archive-x', 'xadult', 'xtoadult')
+        force_standard = target_bucket.lower() in ('periodicals', 'magazine', 'magazines')
 
         if file_id:
             loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
             if not loc:
                 return Response({'ok': False, 'error': f'FileLocation not found: {file_id}'}, status=404)
-            res = move_file_location_to_tomags(loc)
+            res = move_file_location_to_tomags(loc, force_adult=force_adult, force_standard=force_standard)
             return Response(res, status=200 if res.get('ok') else 422)
 
         if item_id:
             item = resolve_catalog_item_by_id_or_fallback(item_id)
             if not item:
                 return Response({'ok': False, 'error': f'CatalogItem not found: {item_id}'}, status=404)
-            res = move_catalog_item_to_tomags(item, only_detected_mags=False)
+            res = move_catalog_item_to_tomags(
+                item,
+                only_detected_mags=False,
+                force_adult=force_adult,
+                force_standard=force_standard,
+            )
+            return Response(res, status=200 if res.get('ok') else 422)
+
+        return Response({'ok': False, 'error': 'Please provide item_id or file_id.'}, status=400)
+
+
+class MoveToBookAPIView(APIView):
+    """
+    Move a Magazine / Periodical `CatalogItem` or `FileLocation` from `/periodicals` (or `/toMags`)
+    to `/toBooks` -> `/books/<Category>/<Shard>/` (`POST /mylibrary/api/move-to-book/`),
+    converting `item_type` to `BOOK` and triggering background `epubmeta` Book Enrichment.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import (
+            move_catalog_item_to_tobooks,
+            move_file_location_to_tobooks,
+            resolve_catalog_item_by_id_or_fallback,
+        )
+
+        body = request.data or {}
+        item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
+        target_folder = (body.get('target_folder') or request.GET.get('target_folder') or '').strip() or None
+
+        if file_id:
+            loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
+            if not loc:
+                return Response({'ok': False, 'error': f'FileLocation not found: {file_id}'}, status=404)
+            res = move_file_location_to_tobooks(loc, explicit_folder=target_folder, enrich_in_background=True)
+            return Response(res, status=200 if res.get('ok') else 422)
+
+        if item_id:
+            item = resolve_catalog_item_by_id_or_fallback(item_id)
+            if not item:
+                return Response({'ok': False, 'error': f'CatalogItem not found: {item_id}'}, status=404)
+            res = move_catalog_item_to_tobooks(item, explicit_folder=target_folder, enrich_in_background=True)
             return Response(res, status=200 if res.get('ok') else 422)
 
         return Response({'ok': False, 'error': 'Please provide item_id or file_id.'}, status=400)
@@ -3784,6 +3992,79 @@ class UndoMoveToMagAPIView(APIView):
             enrich_after=enrich_after,
         )
         return Response(res, status=200 if (res.get('ok') or res.get('restored_from_tomags')) else 422)
+
+
+class RetagFolderAPIView(APIView):
+    """
+    Single & Bulk Retag / Move Folder API (`POST /mylibrary/api/retag-folder/`).
+    Physically moves one or more items/files into an existing or newly created top-level folder
+    under `/books/<target_folder>`, `/periodicals/<Series>/<Year>/` (`target_folder="Periodicals"`),
+    or `/xAdult/<Series>/<Year>/` (`target_folder="Archive-X"`, when session is unlocked),
+    and updates `FileLocation`, `processed_files`, and `file_states` atomically.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import retag_catalog_items_to_folder
+
+        body = request.data or {}
+        target_folder = (body.get('target_folder') or request.GET.get('target_folder') or '').strip()
+        raw_item_ids = body.get('item_ids') or body.get('item_id') or []
+        raw_file_ids = body.get('file_ids') or body.get('file_id') or []
+
+        if isinstance(raw_item_ids, str):
+            item_ids = [x.strip() for x in raw_item_ids.split(',') if x.strip()]
+        elif isinstance(raw_item_ids, list):
+            item_ids = [str(x).strip() for x in raw_item_ids if str(x or '').strip()]
+        else:
+            item_ids = []
+
+        if isinstance(raw_file_ids, str):
+            file_ids = [x.strip() for x in raw_file_ids.split(',') if x.strip()]
+        elif isinstance(raw_file_ids, list):
+            file_ids = [str(x).strip() for x in raw_file_ids if str(x or '').strip()]
+        else:
+            file_ids = []
+
+        if not target_folder:
+            return Response({'ok': False, 'error': 'target_folder is required.'}, status=400)
+        if not item_ids and not file_ids:
+            return Response({'ok': False, 'error': 'Provide item_ids or file_ids to move.'}, status=400)
+
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        series_name = (body.get('series_name') or request.GET.get('series_name') or '').strip()
+        res = retag_catalog_items_to_folder(
+            item_ids=item_ids,
+            file_ids=file_ids,
+            target_folder=target_folder,
+            vx_unlocked=vx_unlocked,
+            series_name=series_name,
+        )
+        return Response(res, status=200 if res.get('ok') else 422)
+
+
+class VxToggleAPIView(APIView):
+    """
+    Disguised session state toggle endpoint (`POST /mylibrary/api/vx-toggle/`).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        body = request.data or {}
+        mode = (body.get('mode') or '').strip().lower()
+        cur = bool(request.session.get('vx_unlocked', False))
+        if mode in ('1', 'true', 'on', 'x'):
+            new_state = True
+        elif mode in ('0', 'false', 'off'):
+            new_state = False
+        else:
+            new_state = not cur
+        request.session['vx_unlocked'] = new_state
+        if new_state:
+            request.session.set_expiry(0)
+        return Response({'ok': True, 'v': 'x' if new_state else '0'})
 
 
 class ToggleInterestingAPIView(APIView):
@@ -3973,13 +4254,14 @@ class CoverGenerateAPIView(APIView):
 
 class AiDescriptionGenerateAPIView(APIView):
     """
-    On-demand AI Content-Based Description Generator API (`POST /mylibrary/api/ai-description/`):
+    On-demand AI Content-Based Description & Metadata Generator API (`POST /mylibrary/api/ai-description/`):
     Generates a 2-4 sentence synopsis grounded in the book's actual content (front matter,
-    table of contents, preface, opening chapters, and/or rendered page images) when a book
-    has no description and resulted in a No Match (`NOT_FOUND` / `NO_ISBN`), and saves it to BookDB.
+    table of contents, preface, opening chapters, and/or rendered page images) and/or extracts
+    clean Title & Author(s) (`mode='description' | 'title_author' | 'all'`), saving directly to BookDB.
     """
     authentication_classes = []
     permission_classes = []
+    default_mode = 'description'
 
     def post(self, request):
         from .opds import generate_ai_description_from_content
@@ -3997,6 +4279,7 @@ class AiDescriptionGenerateAPIView(APIView):
             authors = str(raw_authors or '').strip()
         publisher = str(body.get('publisher') or '').strip()
         apply_immediately = str(body.get('apply_immediately', 'true')).lower() not in ('0', 'false', 'no')
+        mode = str(body.get('mode') or self.default_mode or 'description').strip().lower()
 
         if not (item_id or file_id or file_path or isbn or title):
             return Response({'ok': False, 'error': 'Please provide item_id, file_id, file_path, isbn, or title.'}, status=400)
@@ -4010,8 +4293,18 @@ class AiDescriptionGenerateAPIView(APIView):
             authors=authors,
             publisher=publisher,
             apply_immediately=apply_immediately,
+            mode=mode,
         )
         return Response(res, status=200 if res.get('ok') else 422)
+
+
+class AiTitleAuthorGenerateAPIView(AiDescriptionGenerateAPIView):
+    """
+    On-demand AI Title & Author Generator API (`POST /mylibrary/api/ai-title-author/`):
+    Inspects cover/title/copyright page images, front-matter text, and filename clues via Gemini AI
+    to determine and save the clean human-readable Title, Author(s), and Publisher.
+    """
+    default_mode = 'title_author'
 
 
 class BookPreviewAPIView(APIView):

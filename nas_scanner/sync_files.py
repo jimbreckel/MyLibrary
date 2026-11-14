@@ -21,11 +21,73 @@ def _connect_db():
 def process_file_metadata(args):
     abspath, item_type = args
     try:
-        meta = extract_metadata(abspath)
+        meta = extract_metadata(abspath, item_type=item_type)
         meta['item_type'] = item_type
         return abspath, meta, None
     except Exception as e:
         return abspath, None, str(e)
+
+
+def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
+    """
+    Pre-Stage 0: Automatically organize incoming periodicals from `/toMags` into `/periodicals`
+    (or `/xAdult` when classified as 'Adult Periodicals'), `/xtoAdult` into `/xAdult`,
+    and incoming books from `/toBooks` into `/books/<Category>/<Shard>/`.
+    """
+    try:
+        from pathlib import Path
+        from orgbooks.organizer import process_tobooks_directory
+        tobooks_dir = Path('/toBooks')
+        books_dir = Path('/books')
+        if tobooks_dir.exists() and books_dir.exists():
+            tb_res = process_tobooks_directory(tobooks_dir, books_dir)
+            if tb_res:
+                print(f"\n[OrgBooks] Organized {len(tb_res)} incoming book(s) from {tobooks_dir} into {books_dir}:", flush=True)
+                for r in tb_res:
+                    if r.get('ok'):
+                        print(f"  [OrgBooks] {r.get('status_msg')}", flush=True)
+                    else:
+                        print(f"  [OrgBooks] Error: {r.get('error')}", flush=True)
+    except Exception as e_tb:
+        print(f"Warning: Pre-Stage 0 OrgBooks check failed: {e_tb}", flush=True)
+
+    try:
+        from pathlib import Path
+        from orgperiodicals.crawler import find_files
+        from orgperiodicals.organizer import identify_and_organize_periodical
+        from orgperiodicals.cli import clean_empty_dirs
+
+        gemini_key = (epubmeta_config or {}).get('gemini_api_key') or os.environ.get('GEMINI_API_KEY')
+        periodicals_dir = Path('/periodicals')
+        adult_dir = Path('/xAdult')
+
+        for drop_path_str, force_adult in [('/toMags', False), ('/xtoAdult', True)]:
+            drop_dir = Path(drop_path_str)
+            if not drop_dir.exists() or not drop_dir.is_dir():
+                continue
+            files = list(find_files(drop_dir, max_levels=3))
+            if not files:
+                continue
+            print(f"\n[OrgPeriodicals] Organizing {len(files)} incoming file(s) from {drop_dir}...", flush=True)
+            for fp in files:
+                try:
+                    res = identify_and_organize_periodical(
+                        file_path=fp,
+                        periodicals_dir=periodicals_dir if periodicals_dir.exists() else None,
+                        adult_dir=adult_dir if adult_dir.exists() else None,
+                        gemini_key=gemini_key,
+                        move_file=True,
+                        force_adult=force_adult,
+                    )
+                    print(f"  [OrgPeriodicals] {res.get('status_msg')}", flush=True)
+                except Exception as f_err:
+                    print(f"  [OrgPeriodicals] Error organizing {fp.name}: {f_err}", flush=True)
+            try:
+                clean_empty_dirs(drop_dir, periodicals_dir)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Warning: Pre-Stage 0 OrgPeriodicals check failed: {e}", flush=True)
 
 
 def upload_file_metadata(args):
@@ -196,6 +258,8 @@ def scan_directory(
 
     if item_type == 'AUDIOBOOK':
         supported_extensions = {'.mp3', '.m4b', '.m4a'}
+    elif item_type == 'MAGAZINE':
+        supported_extensions = {'.epub', '.pdf', '.mobi', '.azw3', '.cbr', '.cbz'}
     else:
         supported_extensions = {'.epub', '.pdf', '.mobi', '.azw3'}
 
@@ -501,6 +565,9 @@ if __name__ == '__main__':
     try:
         with ScannerLock(lock_file):
             print(f"Connecting to central server: {server_url}")
+
+            if not args.dir:
+                process_drop_folders_with_orgperiodicals(epubmeta_config)
 
             total_dis = 0
             total_sync = 0

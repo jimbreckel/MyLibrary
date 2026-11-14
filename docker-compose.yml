@@ -9,7 +9,11 @@ services:
       - .:/app
       - /volume1/common/Media/Books:/books
       - /volume1/common/Media/Books_bad:/books_bad
+      - /volume1/common/Media/Periodicals:/periodicals
       - /volume1/common/Media/toMags:/toMags
+      - /volume1/common/Media/toBooks:/toBooks
+      - /volume1/jims_documents/Media/xAdult:/xAdult
+      - /volume1/jims_documents/Media/xtoAdult:/xtoAdult
       - /volume1/common/Media/Audiobooks:/audiobooks:ro
       - /volume1/common/webdav:/webdav
     ports:
@@ -38,12 +42,18 @@ services:
       - ./nas_scanner/scanner_state.db:/app/scanner_state.db
       - ./nas_scanner/logs:/app/logs
       - ./nas_scanner/epubmeta:/app/epubmeta
+      - ./nas_scanner/orgperiodicals:/app/orgperiodicals
+      - ./nas_scanner/orgbooks:/app/orgbooks
       - ./nas_scanner/utils:/app/utils
       - ./nas_scanner/sync_files.py:/app/sync_files.py
       - ./nas_scanner/docker_scanner_loop.py:/app/docker_scanner_loop.py
       - /volume1/common/Media/Books:/books
       - /volume1/common/Media/Books_bad:/books_bad
+      - /volume1/common/Media/Periodicals:/periodicals
       - /volume1/common/Media/toMags:/toMags
+      - /volume1/common/Media/toBooks:/toBooks
+      - /volume1/jims_documents/Media/xAdult:/xAdult
+      - /volume1/jims_documents/Media/xtoAdult:/xtoAdult
       - /volume1/common/Media/Audiobooks:/audiobooks
     env_file:
       - .env

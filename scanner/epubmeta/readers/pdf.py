@@ -91,6 +91,174 @@ def _build_xmp_packet(metadata: BookMetadata) -> str:
 <?xpacket end="w"?>"""
 
 
+def _is_valid_cover_graphic_bytes(raw_bytes: Optional[bytes]) -> bool:
+    """Return True if `raw_bytes` decodes to a non-blank, non-text-only cover image."""
+    if not raw_bytes or len(raw_bytes) < 1500:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        w, h = im.size
+        if w < 90 or h < 130:
+            return False
+        small = im.resize((64, 96))
+        px = list(small.get_flattened_data() if hasattr(small, "get_flattened_data") else small.getdata())
+        n = len(px)
+        if not n:
+            return False
+        white = 0
+        dark = 0
+        colored = 0
+        mid = 0
+        for r, g, b in px:
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            sat = mx - mn
+            if mn >= 215 and sat < 20:
+                white += 1
+            elif mx <= 85:
+                dark += 1
+            elif sat >= 26:
+                colored += 1
+            else:
+                mid += 1
+        if (white / n) >= 0.85 or (dark / n) >= 0.95:
+            return False
+        if (white / n) >= 0.72 and (colored / n) <= 0.03 and (mid / n) <= 0.16:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def extract_pdf_page0_cover_bytes(doc) -> Optional[bytes]:
+    """
+    Extract cover image bytes from Page 1 (`doc[0]`) of an open PyMuPDF document:
+      1. If Page 1 has NO external text (`len(p_text) == 0`) and contains a portrait book-cover
+         image (`0.48 <= iw / ih <= 0.78`), return that embedded image directly.
+      2. If Page 1 is a hybrid jacket / header / prologue page (an embedded portrait cover image
+         occupying `4%..52%` of the page alongside `>= 180` chars or `>= 5` lines of body/synopsis
+         text on a mostly-white page), extract the embedded portrait cover image directly instead
+         of rendering the whole text page.
+      3. Otherwise (e.g. Springer / Routledge / Elsevier / O'Reilly covers combining vector panels,
+         banners, and title/author text), render full Page 1 at 150 DPI.
+    """
+    if len(doc) == 0:
+        return None
+    p0 = doc[0]
+    p_rect = p0.rect
+    p_area = max(1.0, float(p_rect.width * p_rect.height))
+    p_text = (p0.get_text() or "").strip()
+    imgs = p0.get_images(full=True)
+
+    def _get_xref_image(img_entry):
+        xref = img_entry[0]
+        smask = img_entry[1] if len(img_entry) > 1 else 0
+        try:
+            extracted = doc.extract_image(xref)
+            raw_img = extracted.get("image") if extracted else None
+            iw = int(extracted.get("width") or 0) if extracted else 0
+            ih = int(extracted.get("height") or 0) if extracted else 0
+            ext_fmt = (extracted.get("ext") or "").lower() if extracted else ""
+            cs = int(extracted.get("colorspace") or 3) if extracted else 3
+            if smask == 0 and raw_img and ext_fmt in ("jpg", "jpeg", "png") and cs in (1, 3):
+                return raw_img, iw, ih, xref
+        except Exception:
+            pass
+        try:
+            pix = pymupdf.Pixmap(doc, xref)
+            if pix.n - pix.alpha > 3 or pix.alpha:
+                pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+            return pix.tobytes("png"), pix.width, pix.height, xref
+        except Exception:
+            return None, 0, 0, xref
+
+    portrait_cands = []
+    for entry in imgs[:8]:
+        raw_img, iw, ih, xref = _get_xref_image(entry)
+        if not raw_img or len(raw_img) < 2000 or iw < 100 or ih < 150:
+            continue
+        aspect = iw / float(ih)
+        if not (0.48 <= aspect <= 0.78):
+            continue
+        rects = p0.get_image_rects(xref)
+        r0 = (rects[0] & p_rect) if rects else None
+        r_area = float(r0.width * r0.height) if r0 else 0.0
+        portrait_cands.append((r_area or (iw * ih), raw_img, iw, ih, r0, r_area))
+
+    if portrait_cands:
+        portrait_cands.sort(key=lambda t: t[0], reverse=True)
+        _, raw_img, iw, ih, r0, r_area = portrait_cands[0]
+        area_frac = (r_area / p_area) if r0 else 0.5
+        if len(p_text) == 0 and len(portrait_cands) == 1:
+            if (r0 is None or 0.05 <= area_frac <= 0.96) and _is_valid_cover_graphic_bytes(raw_img):
+                return raw_img
+        elif r0 is not None and 0.04 <= area_frac <= 0.52 and len(p_text) >= 140:
+            try:
+                blocks = p0.get_text("blocks") or []
+                pad_rect = pymupdf.Rect(r0.x0 - 4, r0.y0 - 4, r0.x1 + 4, r0.y1 + 4)
+                ext_parts = []
+                for b in blocks:
+                    if len(b) >= 7 and b[6] != 0:
+                        continue
+                    txt_b = (b[4] or "").strip() if len(b) >= 5 else ""
+                    if not txt_b:
+                        continue
+                    cx = (float(b[0]) + float(b[2])) * 0.5
+                    cy = (float(b[1]) + float(b[3])) * 0.5
+                    if not pad_rect.contains(pymupdf.Point(cx, cy)):
+                        ext_parts.append(txt_b)
+                ext_text = "\n".join(ext_parts).strip()
+                ext_lines = [ln.strip() for ln in ext_text.splitlines() if len(ln.strip()) >= 15]
+                if len(ext_text) >= 180 or (len(ext_text) >= 120 and len(ext_lines) >= 5):
+                    # Verify the surrounding page is a white-margin document page (not a colored vector book cover)
+                    tpix = p0.get_pixmap(dpi=36)
+                    if tpix.n > 3:
+                        tpix = pymupdf.Pixmap(pymupdf.csRGB, tpix)
+                    tw, th, tn = tpix.width, tpix.height, tpix.n
+                    samples = tpix.samples
+                    sx = tw / max(1.0, float(p_rect.width))
+                    sy = th / max(1.0, float(p_rect.height))
+                    ix0, iy0 = int(r0.x0 * sx), int(r0.y0 * sy)
+                    ix1, iy1 = int(r0.x1 * sx), int(r0.y1 * sy)
+                    bx_m = max(2, int(tw * 0.07))
+                    by_m = max(2, int(th * 0.07))
+                    out_tot = out_white = bdr_tot = bdr_white = 0
+                    for py in range(th):
+                        row_off = py * tw * tn
+                        in_y_bdr = py < by_m or py >= (th - by_m)
+                        for px_x in range(tw):
+                            off = row_off + px_x * tn
+                            if tn >= 3:
+                                r_v, g_v, b_v = samples[off], samples[off + 1], samples[off + 2]
+                            else:
+                                r_v = g_v = b_v = samples[off]
+                            is_w = min(r_v, g_v, b_v) >= 225 and (max(r_v, g_v, b_v) - min(r_v, g_v, b_v)) <= 18
+                            if in_y_bdr or px_x < bx_m or px_x >= (tw - bx_m):
+                                bdr_tot += 1
+                                if is_w:
+                                    bdr_white += 1
+                            if not (ix0 <= px_x <= ix1 and iy0 <= py <= iy1):
+                                out_tot += 1
+                                if is_w:
+                                    out_white += 1
+                    if (
+                        bdr_tot > 0
+                        and out_tot > 0
+                        and (bdr_white / bdr_tot) >= 0.85
+                        and (out_white / out_tot) >= 0.60
+                        and _is_valid_cover_graphic_bytes(raw_img)
+                    ):
+                        return raw_img
+            except Exception:
+                pass
+
+    pix = p0.get_pixmap(dpi=150)
+    return pix.tobytes("png")
+
+
 class PdfReader(BaseReader):
     """Reader and in-place metadata writer for PDF documents."""
 
@@ -192,41 +360,12 @@ class PdfReader(BaseReader):
 
     def extract_cover_bytes(self) -> Optional[bytes]:
         """
-        Extract cover image bytes from Page 1 of the PDF.
-        Only extract an embedded raster image directly if Page 1 has NO text outside the image
-        (`len(p_text) == 0`) and the image has portrait book-cover proportions (`0.48 <= iw / ih <= 0.78`).
-        Otherwise (e.g. Springer / Routledge / Elsevier covers that combine a top graphic banner with
-        vector background panels and title/author text), render the full Page 1 at 150 DPI so the entire
-        cover is preserved.
+        Extract cover image bytes from Page 1 of the PDF (extracting embedded portrait covers directly
+        on blank-margin or hybrid jacket/prologue pages, while rendering full Page 1 for vector/composite covers).
         """
         doc = pymupdf.open(self.file_path)
         try:
-            if len(doc) == 0:
-                return None
-            p0 = doc[0]
-            p_rect = p0.rect
-            p_area = max(1.0, float(p_rect.width * p_rect.height))
-            p_text = (p0.get_text() or "").strip()
-            imgs = p0.get_images(full=True)
-            if len(imgs) == 1 and len(p_text) == 0:
-                xref = imgs[0][0]
-                try:
-                    extracted = doc.extract_image(xref)
-                    raw_img = extracted.get("image") if extracted else None
-                    iw = int(extracted.get("width") or 0) if extracted else 0
-                    ih = int(extracted.get("height") or 0) if extracted else 0
-                    if raw_img and len(raw_img) >= 2000 and iw >= 120 and ih >= 180 and 0.48 <= (iw / ih) <= 0.78:
-                        rects = p0.get_image_rects(xref)
-                        if not rects:
-                            return raw_img
-                        r0 = rects[0] & p_rect
-                        r_area = float(r0.width * r0.height)
-                        if 0.08 <= (r_area / p_area) <= 0.94 and (r0.height / max(1.0, float(p_rect.height))) >= 0.65:
-                            return raw_img
-                except Exception:
-                    pass
-            pix = p0.get_pixmap(dpi=150)
-            return pix.tobytes("png")
+            return extract_pdf_page0_cover_bytes(doc)
         finally:
             doc.close()
 

@@ -66,7 +66,15 @@ from django.http import (
 from django.utils import timezone
 from django.views import View
 
-from .models import CatalogItem, FileLocation, format_normalized_authors_str
+from .models import (
+    CatalogItem,
+    FileLocation,
+    compute_periodical_series_from_path,
+    compute_top_folder_from_path,
+    exclude_vx_restricted_queryset,
+    format_normalized_authors_str,
+    is_vx_restricted_path,
+)
 from .pg_scanner_db import connect_scanner_db, is_postgres_scanner_enabled
 from .search import perform_search
 from .views import _clean_single_line, _get_scanner_db_path, _moon_sanitize_stem, _norm_lookup_str, _strip_html
@@ -159,12 +167,21 @@ def _resolve_physical_file_path(nas_path: str) -> Optional[Path]:
     raw = str(nas_path).strip().replace('\\', '/')
     allowed_roots = [
         Path('/books'),
+        Path('/periodicals'),
+        Path('/xAdult'),
+        Path('/xtoAdult'),
         Path('/audiobooks'),
         Path('/toMags'),
         Path('/volume1/common/Media/Books'),
+        Path('/volume1/common/Media/Periodicals'),
+        Path('/volume1/jims_documents/Media/xAdult'),
+        Path('/volume1/jims_documents/Media/xtoAdult'),
         Path('/volume1/common/Media/Audiobooks'),
         Path('/volume1/common/Media/toMags'),
         Path(r'U:\Media\Books'),
+        Path(r'U:\Media\Periodicals'),
+        Path(r'P:\Media\xAdult'),
+        Path(r'P:\Media\xtoAdult'),
         Path(r'U:\Media\Audiobooks'),
         Path(r'U:\Media\toMags'),
     ]
@@ -173,6 +190,18 @@ def _resolve_physical_file_path(nas_path: str) -> Optional[Path]:
         rel = raw[len('/books/'):]
         candidates.append(Path('/volume1/common/Media/Books') / rel)
         candidates.append(Path(r'U:\Media\Books') / rel)
+    elif raw.startswith('/periodicals/'):
+        rel = raw[len('/periodicals/'):]
+        candidates.append(Path('/volume1/common/Media/Periodicals') / rel)
+        candidates.append(Path(r'U:\Media\Periodicals') / rel)
+    elif raw.startswith('/xAdult/'):
+        rel = raw[len('/xAdult/'):]
+        candidates.append(Path('/volume1/jims_documents/Media/xAdult') / rel)
+        candidates.append(Path(r'P:\Media\xAdult') / rel)
+    elif raw.startswith('/xtoAdult/'):
+        rel = raw[len('/xtoAdult/'):]
+        candidates.append(Path('/volume1/jims_documents/Media/xtoAdult') / rel)
+        candidates.append(Path(r'P:\Media\xtoAdult') / rel)
     elif raw.startswith('/audiobooks/'):
         rel = raw[len('/audiobooks/'):]
         candidates.append(Path('/volume1/common/Media/Audiobooks') / rel)
@@ -362,6 +391,146 @@ def _load_tags_shelf_cache_from_disk(need_paths: bool = False) -> bool:
     return False
 
 
+_VIRTUAL_FOLDERS_EPOCH_FILE = Path('/tmp/mylibrary_virtual_folders_epoch')
+
+_VIRTUAL_FOLDERS_CACHE: Dict[str, Any] = {
+    'expires_at': 0.0,
+    'epoch_mtime': 0.0,
+    'folders_all': [],          # List of (folder_name, count) including Archive-X
+    'folders_public': [],       # List of (folder_name, count) excluding Archive-X
+    'series_by_folder': {},     # top_folder -> (expires_at, List[(series_name, count)])
+}
+
+
+def _get_virtual_folders_epoch_mtime() -> float:
+    try:
+        if _VIRTUAL_FOLDERS_EPOCH_FILE.exists():
+            return _VIRTUAL_FOLDERS_EPOCH_FILE.stat().st_mtime
+    except Exception:
+        pass
+    return 0.0
+
+
+def invalidate_virtual_folders_cache() -> None:
+    """Invalidate the virtual folder and periodical series caches across all Gunicorn workers."""
+    _VIRTUAL_FOLDERS_CACHE['expires_at'] = 0.0
+    _VIRTUAL_FOLDERS_CACHE['series_by_folder'] = {}
+    try:
+        _VIRTUAL_FOLDERS_EPOCH_FILE.write_text(str(time.time()), encoding='utf-8')
+        _VIRTUAL_FOLDERS_CACHE['epoch_mtime'] = _get_virtual_folders_epoch_mtime()
+    except Exception:
+        pass
+
+
+def get_virtual_folders_summary(vx_unlocked: bool = False) -> List[Tuple[str, int]]:
+    """
+    Return `[(folder_name, item_count), ...]` computed purely virtually via the PostgreSQL
+    `catalog_top_folder(file_path)` functional index (`idx_filelocation_top_folder`).
+    Strictly omits `'Archive-X'` unless `vx_unlocked=True`.
+    """
+    now = time.monotonic()
+    ep_mtime = _get_virtual_folders_epoch_mtime()
+    if ep_mtime != _VIRTUAL_FOLDERS_CACHE.get('epoch_mtime', 0.0):
+        _VIRTUAL_FOLDERS_CACHE['expires_at'] = 0.0
+        _VIRTUAL_FOLDERS_CACHE['series_by_folder'] = {}
+        _VIRTUAL_FOLDERS_CACHE['epoch_mtime'] = ep_mtime
+    if _VIRTUAL_FOLDERS_CACHE['folders_public'] and now < _VIRTUAL_FOLDERS_CACHE['expires_at']:
+        return list(_VIRTUAL_FOLDERS_CACHE['folders_all'] if vx_unlocked else _VIRTUAL_FOLDERS_CACHE['folders_public'])
+
+    from django.db import connection
+    counts_map: Dict[str, int] = {}
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT catalog_top_folder(file_path) AS folder, COUNT(DISTINCT catalog_item_id) AS books
+                FROM catalog_filelocation
+                WHERE catalog_top_folder(file_path) IS NOT NULL
+                GROUP BY 1
+                ORDER BY 2 DESC, 1 ASC
+                """
+            )
+            for fld, cnt in cur.fetchall():
+                if fld:
+                    counts_map[str(fld)] = int(cnt or 0)
+    except Exception:
+        # Fallback if SQLite or function not yet migrated
+        for fp in FileLocation.objects.values_list('file_path', flat=True)[:50000]:
+            tf = compute_top_folder_from_path(fp)
+            if tf:
+                counts_map[tf] = counts_map.get(tf, 0) + 1
+
+    # Also include any physical top-level directories under /books (e.g. newly created empty/small folders)
+    for books_root in (Path('/books'), Path('/volume1/common/Media/Books')):
+        try:
+            if books_root.exists() and books_root.is_dir():
+                for entry in os.scandir(books_root):
+                    if entry.is_dir() and not entry.name.startswith('.') and entry.name not in (
+                        'Computer Book Code', 'File Formats', 'toMags', '@eaDir', '#recycle'
+                    ):
+                        counts_map.setdefault(entry.name, 0)
+                break
+        except Exception:
+            continue
+
+    # Ensure Periodicals is always present
+    counts_map.setdefault('Periodicals', 0)
+    # Ensure Archive-X is present in folders_all if /xAdult exists
+    counts_map.setdefault('Archive-X', 0)
+
+    folders_all = sorted(
+        [(fld, cnt) for fld, cnt in counts_map.items() if cnt > 0 or fld in ('Periodicals', 'Archive-X', 'MainFrame Files', 'Game Engine and Game Design')],
+        key=lambda x: (0 if x[0] == 'Periodicals' else (1 if x[0] == 'Archive-X' else 2), -x[1], x[0].lower()),
+    )
+    # Sort by count descending, keeping Periodicals & dedicated folders visible
+    folders_all = sorted(
+        [(fld, cnt) for fld, cnt in counts_map.items() if cnt > 0 or fld in ('Periodicals', 'Archive-X')],
+        key=lambda x: (-x[1], x[0].lower()),
+    )
+    folders_public = [(fld, cnt) for fld, cnt in folders_all if fld != 'Archive-X']
+
+    _VIRTUAL_FOLDERS_CACHE['folders_all'] = folders_all
+    _VIRTUAL_FOLDERS_CACHE['folders_public'] = folders_public
+    _VIRTUAL_FOLDERS_CACHE['expires_at'] = now + 300.0
+    return list(folders_all if vx_unlocked else folders_public)
+
+
+def get_periodical_series_summary(top_folder: str = 'Periodicals', vx_unlocked: bool = False) -> List[Tuple[str, int]]:
+    """
+    Return `[(series_name, count), ...]` inside `Periodicals` (or `Archive-X` when `vx_unlocked=True`)
+    using the `idx_filelocation_periodical_series` functional index.
+    """
+    if top_folder == 'Archive-X' and not vx_unlocked:
+        return []
+    now = time.monotonic()
+    cached = _VIRTUAL_FOLDERS_CACHE['series_by_folder'].get(top_folder)
+    if cached and now < cached[0]:
+        return list(cached[1])
+
+    from django.db import connection
+    series_list: List[Tuple[str, int]] = []
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT catalog_periodical_series(file_path) AS series, COUNT(DISTINCT catalog_item_id) AS issues
+                FROM catalog_filelocation
+                WHERE catalog_top_folder(file_path) = %s
+                  AND catalog_periodical_series(file_path) IS NOT NULL
+                GROUP BY 1
+                ORDER BY 2 DESC, 1 ASC
+                LIMIT 300
+                """,
+                [top_folder],
+            )
+            series_list = [(str(r[0]), int(r[1] or 0)) for r in cur.fetchall() if r[0]]
+    except Exception:
+        pass
+
+    _VIRTUAL_FOLDERS_CACHE['series_by_folder'][top_folder] = (now + 300.0, series_list)
+    return list(series_list)
+
+
 def get_enriched_tags_and_folders_index(need_paths: bool = False) -> Dict[str, Any]:
     """
     Build and cache (for 7200s with stale-while-revalidate) the dynamic virtual bookshelves of:
@@ -411,7 +580,7 @@ def _rebuild_tags_shelf_cache() -> Dict[str, Any]:
                     break
                 for row in batch:
                     fp, raw_json = row[0], row[1]
-                    if not fp:
+                    if not fp or is_vx_restricted_path(fp):
                         continue
                     norm_rel = str(fp).replace('\\', '/')
                     for pfx in ('/volume1/common/Media/Books/', '/books/'):
@@ -433,7 +602,7 @@ def _rebuild_tags_shelf_cache() -> Dict[str, Any]:
                                     if not isinstance(s, str):
                                         continue
                                     clean_tag = s.strip()
-                                    if len(clean_tag) < 2 or len(clean_tag) > 65:
+                                    if len(clean_tag) < 2 or len(clean_tag) > 65 or clean_tag.lower() == 'adult periodicals':
                                         continue
                                     tag_key = clean_tag
                                     if tag_key.lower() not in seen_for_book:
@@ -454,10 +623,13 @@ def _rebuild_tags_shelf_cache() -> Dict[str, Any]:
         [(tag, len(paths)) for tag, paths in tag_to_paths.items() if len(paths) >= 2],
         key=lambda x: (-x[1], x[0].lower()),
     )
-    folder_counts = sorted(
-        [(fld, cnt) for fld, cnt in folder_counts_map.items()],
-        key=lambda x: (-x[1], x[0].lower()),
-    )
+    try:
+        folder_counts = get_virtual_folders_summary(vx_unlocked=False)
+    except Exception:
+        folder_counts = sorted(
+            [(fld, cnt) for fld, cnt in folder_counts_map.items()],
+            key=lambda x: (-x[1], x[0].lower()),
+        )
 
     top_tags_set = {t for t, _ in tag_counts[:250]}
     compact_tag_to_paths = {
@@ -2423,9 +2595,13 @@ def _apply_enriched_metadata_to_catalog_item(
             item.description = str(new_desc).strip()
         new_cover_url = _clean_single_line(getattr(target_meta, 'cover_url', None))
         orig_cover_issue = classify_cover_image(item.cover_thumbnail, item.cover_image_url)
-        had_good_orig_cover = orig_cover_issue is None
+        orig_is_weak_page = (
+            has_excessive_white_border_cover(item.cover_thumbnail)
+            or is_hybrid_or_white_page_cover(item.cover_thumbnail)
+        )
+        had_good_orig_cover = (orig_cover_issue is None) and not orig_is_weak_page
         # Preserve a genuine graphic cover, or upgrade if the original cover was missing, text-only,
-        # or grayscale/low-color when the new cover is the same cover design in color.
+        # mostly-white document/prologue page, or grayscale/low-color when the new cover is in color.
         if cover_thumbnail and str(cover_thumbnail).startswith('data:image'):
             if not (item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image')):
                 item.cover_thumbnail = cover_thumbnail
@@ -2434,7 +2610,12 @@ def _apply_enriched_metadata_to_catalog_item(
         if new_cover_url and (not had_good_orig_cover or cover_colorfulness_score(item.cover_thumbnail) < 0.055):
             if not had_good_orig_cover:
                 item.cover_image_url = new_cover_url[:1024]
-            if orig_cover_issue in ('missing', 'text_only') and classify_cover_image(item.cover_thumbnail) in ('missing', 'text_only'):
+            cur_still_weak = (
+                classify_cover_image(item.cover_thumbnail) in ('missing', 'text_only')
+                or has_excessive_white_border_cover(item.cover_thumbnail)
+                or is_hybrid_or_white_page_cover(item.cover_thumbnail)
+            )
+            if (orig_cover_issue in ('missing', 'text_only') or orig_is_weak_page) and cur_still_weak:
                 try:
                     apply_book_cover_to_item(item, new_cover_url, user_selected=False)
                 except Exception:
@@ -2742,6 +2923,24 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                     f_loc.save(update_fields=['catalog_item'])
                     if f_loc.file_path:
                         existing_paths.add(f_loc.file_path)
+            if (
+                not getattr(item, 'cover_thumbnail', None)
+                or classify_cover_image(item.cover_thumbnail) in ('missing', 'text_only')
+                or is_hybrid_or_white_page_cover(item.cover_thumbnail)
+                or has_excessive_white_border_cover(item.cover_thumbnail)
+            ):
+                try:
+                    if any(str(p or '').lower().endswith('.epub') for p in existing_paths):
+                        fresh_cov = extract_original_cover_for_item(item, ignore_backup=True)
+                        if (
+                            fresh_cov
+                            and fresh_cov.startswith('data:image')
+                            and should_prefer_candidate_cover(item.cover_thumbnail, fresh_cov)
+                        ):
+                            item.cover_thumbnail = fresh_cov
+                            item_updated = True
+                except Exception:
+                    pass
             merged_ids.append(str(other.id))
             _MERGED_ITEM_ID_REDIRECTS[str(other.id)] = str(item.id)
             try:
@@ -3425,19 +3624,25 @@ def _unique_tomags_dest(tomags_dir: Path, filename: str) -> Path:
         counter += 1
 
 
-def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
+def move_file_location_to_tomags(
+    file_loc: FileLocation,
+    force_adult: bool = False,
+    force_standard: bool = False,
+) -> Dict[str, Any]:
     """
-    Move a single physical file from `/books/...` into `/toMags/` (`/volume1/common/Media/toMags`),
+    Move a single physical file from `/books/...` (or between `/periodicals/...` and `/xAdult/...`)
+    into `/periodicals/<Series>/<Year>/`, `/xAdult/<Series>/<Year>/`, or `/toMags/`,
     record its original location in `.tomags_history.json` so the move can be undone at any time,
-    and update `FileLocation.file_path = '/toMags/<filename>'` so it appears on the `Moved to toMags`
-    review shelf (`?shelf=tomags`).
+    and update `FileLocation.file_path` in PostgreSQL `BookDB`.
     """
     tomags_dir = _get_tomags_dir()
-    if not tomags_dir:
+    periodicals_dir = _get_periodicals_dir()
+    xadult_dir = _get_xadult_dir()
+    if not tomags_dir and not periodicals_dir and not xadult_dir:
         return {
             'ok': False,
             'status': 'TOMAGS_NOT_MOUNTED',
-            'message': 'toMags directory (/toMags or /volume1/common/Media/toMags) is not mounted.',
+            'message': 'toMags / periodicals directory is not mounted.',
         }
 
     item = file_loc.catalog_item
@@ -3445,7 +3650,7 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
     file_id_str = str(file_loc.id)
     item_id_str = str(item.id) if item else ''
 
-    if old_file_path.startswith('/toMags/'):
+    if old_file_path.startswith('/toMags/') and not force_adult and not force_standard:
         return {
             'ok': True,
             'status': 'MOVED_TO_MAGS',
@@ -3466,11 +3671,249 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
             'message': f'Physical file not found on NAS: {old_file_path}',
         }
 
+    # Check if this file was recently moved from Periodicals/Archive-X -> Books (`recent_tobooks_moves`):
+    # If so, clicking the BOOK pill again acts as an immediate Undo — moving it directly back where it came from!
+    try:
+        hist_chk = _load_tomags_history()
+        recent_tb = hist_chk.get('recent_tobooks_moves', {}) or {}
+        tb_ent = recent_tb.get(phys_path.name)
+        if not tb_ent and file_id_str:
+            for _, v_ent in recent_tb.items():
+                if str(v_ent.get('file_id')) == file_id_str:
+                    tb_ent = v_ent
+                    break
+        orig_per_path = str((tb_ent or {}).get('orig_file_path') or '').strip().replace('\\', '/')
+        matches_requested_bucket = (
+            (not force_adult and not force_standard)
+            or (force_adult and orig_per_path.startswith('/xAdult/'))
+            or (force_standard and orig_per_path.startswith('/periodicals/'))
+        )
+        if tb_ent and matches_requested_bucket and (orig_per_path.startswith('/periodicals/') or orig_per_path.startswith('/xAdult/')):
+            per_root = _get_xadult_dir() if orig_per_path.startswith('/xAdult/') else _get_periodicals_dir()
+            rel_per = orig_per_path.split('/', 2)[2] if len(orig_per_path.split('/')) >= 3 else phys_path.name
+            if per_root:
+                dest_per = per_root / rel_per
+                dest_per.parent.mkdir(parents=True, exist_ok=True)
+                old_parent = phys_path.parent
+                if dest_per.resolve() != phys_path.resolve():
+                    shutil.move(str(phys_path), str(dest_per))
+                    try:
+                        os.chmod(str(dest_per), 0o666)
+                    except Exception:
+                        pass
+                    try:
+                        if old_parent.exists() and not any(old_parent.iterdir()):
+                            old_parent.rmdir()
+                    except Exception:
+                        pass
+                file_loc.file_path = orig_per_path
+                file_loc.file_name = dest_per.name
+                file_loc.library_name = tb_ent.get('library_name') or 'NAS Periodicals'
+                file_loc.library_path = '/xAdult' if orig_per_path.startswith('/xAdult/') else '/periodicals'
+                file_loc.save(update_fields=['file_path', 'file_name', 'library_name', 'library_path'])
+                recent_tb.pop(phys_path.name, None)
+                not_mags = list(hist_chk.get('not_magazine_paths') or [])
+                for tok in (phys_path.name, old_file_path, orig_per_path):
+                    while tok in not_mags:
+                        not_mags.remove(tok)
+                hist_chk['not_magazine_paths'] = not_mags
+                _save_tomags_history(hist_chk)
+                if item:
+                    was_book = item.item_type == 'BOOK'
+                    item.item_type = 'MAGAZINE'
+                    if tb_ent.get('orig_title'):
+                        item.title = tb_ent['orig_title'][:510]
+                    if tb_ent.get('orig_authors'):
+                        item.authors = tb_ent['orig_authors'][:510]
+                    if 'orig_publisher' in tb_ent:
+                        item.publisher = (tb_ent.get('orig_publisher') or '')[:250]
+                    if 'orig_description' in tb_ent:
+                        item.description = tb_ent.get('orig_description') or ''
+                    item.save()
+                    if was_book:
+                        try:
+                            from .views import adjust_cached_books_count
+                            adjust_cached_books_count(-1)
+                        except Exception:
+                            pass
+                invalidate_virtual_folders_cache()
+                top_fld = compute_top_folder_from_path(orig_per_path) or 'Periodicals'
+                ser_name = compute_periodical_series_from_path(orig_per_path) or ''
+                return {
+                    'ok': True,
+                    'status': 'UNDONE_TO_PERIODICALS',
+                    'undone_to_origin': True,
+                    'moved_to_tomags': True,
+                    'moved_to_periodicals_direct': True,
+                    'item_deleted': False,
+                    'item_id': item_id_str,
+                    'file_id': file_id_str,
+                    'item_type': 'MAGAZINE',
+                    'top_folder': top_fld,
+                    'periodical_series': ser_name,
+                    'title': item.title if item else dest_per.stem,
+                    'authors': item.authors if item else (ser_name or 'Periodicals'),
+                    'cover_url': (item.cover_thumbnail if item else '') or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+                    'moved_files': [dest_per.name],
+                    'dest_path': orig_per_path,
+                    'message': f"Undid move — restored directly back to {top_fld}" + (f" › {ser_name}" if ser_name else "") + f" ({orig_per_path}).",
+                }
+    except Exception:
+        pass
+
+    # If the item is ALREADY enriched (or moving to Archive-X or between Periodicals & Archive-X),
+    # route it directly to /periodicals/<Series>/<Year>/ or /xAdult/<Series>/<Year>/ without staging in /toMags!
+    already_enriched = (
+        force_adult
+        or force_standard
+        or old_file_path.startswith('/periodicals/')
+        or old_file_path.startswith('/xAdult/')
+        or is_file_enriched(old_file_path)
+        or bool(item and item.id in (_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set()))
+    )
+    if already_enriched and (periodicals_dir or xadult_dir):
+        try:
+            from scanner.orgperiodicals.organizer import identify_and_organize_periodical
+            epubmeta_cfg = _load_scanner_epubmeta_config()
+            gemini_key = epubmeta_cfg.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY')
+            old_parent = phys_path.parent
+            info = identify_and_organize_periodical(
+                file_path=phys_path,
+                periodicals_dir=periodicals_dir,
+                adult_dir=xadult_dir,
+                gemini_key=gemini_key,
+                force_cover=False,
+                move_file=True,
+                force_adult=force_adult,
+                force_standard=force_standard,
+            )
+            target_path: Path = info.get('target_path') or phys_path
+            series_title: str = info.get('series_title') or 'Unorganized'
+            if target_path.exists():
+                try:
+                    if old_parent.exists() and not any(old_parent.iterdir()):
+                        old_parent.rmdir()
+                        if old_parent.parent.exists() and old_parent.parent.name not in ('Periodicals', 'periodicals', 'xAdult', 'Books', 'books') and not any(old_parent.parent.iterdir()):
+                            old_parent.parent.rmdir()
+                except Exception:
+                    pass
+                tp_str = str(target_path).replace('\\', '/')
+                for host_pfx, cont_pfx in (
+                    ('/volume1/common/Media/Periodicals/', '/periodicals/'),
+                    ('/volume1/jims_documents/Media/xAdult/', '/xAdult/'),
+                ):
+                    if tp_str.startswith(host_pfx):
+                        tp_str = cont_pfx + tp_str[len(host_pfx):]
+                        break
+                new_db_path = tp_str
+                top_fld_out = compute_top_folder_from_path(new_db_path) or ('Archive-X' if new_db_path.startswith('/xAdult/') else 'Periodicals')
+                # Record history so Undo still works even when routed directly to /periodicals/ or /xAdult/
+                try:
+                    hist = _load_tomags_history()
+                    h_rec = {
+                        'orig_file_path': old_file_path,
+                        'dest_file_path': new_db_path,
+                        'dest_name': target_path.name,
+                        'item_id': item_id_str,
+                        'file_id': file_id_str,
+                        'file_format': file_loc.file_format,
+                        'file_size': file_loc.file_size,
+                        'file_hash': file_loc.file_hash,
+                        'library_name': file_loc.library_name,
+                        'orig_item_type': item.item_type if item else 'BOOK',
+                        'orig_title': item.title if item else '',
+                        'orig_authors': item.authors if item else '',
+                        'orig_publisher': (item.publisher if item else '') or '',
+                        'orig_description': (item.description if item else '') or '',
+                        'orig_isbn': (item.isbn if item else '') or '',
+                        'moved_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }
+                    recent_moves = hist.setdefault('recent_moves', {})
+                    recent_moves[target_path.name] = h_rec
+                    if len(recent_moves) > 500:
+                        for k_old in list(recent_moves.keys())[:-500]:
+                            recent_moves.pop(k_old, None)
+                    _save_tomags_history(hist)
+                except Exception:
+                    pass
+
+                file_loc.file_path = new_db_path
+                file_loc.file_name = target_path.name
+                file_loc.library_name = 'NAS Periodicals'
+                file_loc.library_path = '/xAdult' if new_db_path.startswith('/xAdult/') else '/periodicals'
+                file_loc.save(update_fields=['file_path', 'file_name', 'library_name', 'library_path'])
+
+                db_path = _get_scanner_db_path()
+                if is_postgres_scanner_enabled() or db_path.exists():
+                    try:
+                        conn = connect_scanner_db(db_path, timeout=10.0)
+                        conn.execute("DELETE FROM processed_files WHERE file_path = ?", (new_db_path,))
+                        conn.execute(
+                            "UPDATE processed_files SET file_path = ?, file_name = ? WHERE file_path = ?",
+                            (new_db_path, target_path.name, old_file_path),
+                        )
+                        conn.execute("DELETE FROM file_states WHERE filepath = ?", (new_db_path,))
+                        conn.execute(
+                            "UPDATE file_states SET filepath = ? WHERE filepath = ?",
+                            (new_db_path, old_file_path),
+                        )
+                        conn.commit()
+                        conn.close()
+                    except Exception:
+                        pass
+
+                if item:
+                    was_book = item.item_type == 'BOOK'
+                    item.item_type = 'MAGAZINE'
+                    if series_title and series_title not in ('Unorganized', 'Unknown'):
+                        item.authors = series_title[:510]
+                        item.publisher = series_title[:250]
+                    item.save(update_fields=['item_type', 'authors', 'publisher', 'updated_at'])
+                    if was_book:
+                        try:
+                            from .views import adjust_cached_books_count
+                            adjust_cached_books_count(-1)
+                        except Exception:
+                            pass
+                    try:
+                        enrich_periodical_file_location_on_demand(file_loc, force_cover=False)
+                        item.refresh_from_db()
+                    except Exception:
+                        pass
+
+                invalidate_virtual_folders_cache()
+                return {
+                    'ok': True,
+                    'status': 'MOVED_TO_PERIODICALS_DIRECT',
+                    'moved_to_tomags': True,
+                    'moved_to_periodicals_direct': True,
+                    'item_deleted': False,
+                    'item_id': item_id_str,
+                    'file_id': file_id_str,
+                    'item_type': 'MAGAZINE',
+                    'top_folder': top_fld_out,
+                    'periodical_series': series_title,
+                    'title': item.title if item else target_path.stem,
+                    'authors': item.authors if item else series_title,
+                    'cover_url': (item.cover_thumbnail if item else '') or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+                    'moved_files': [target_path.name],
+                    'dest_path': new_db_path,
+                    'message': f"Moved directly to {top_fld_out} › {series_title}.",
+                }
+        except Exception:
+            pass
+
     dest_file = _unique_tomags_dest(tomags_dir, phys_path.name)
     try:
+        old_parent = phys_path.parent
         shutil.move(str(phys_path), str(dest_file))
         try:
             os.chmod(str(dest_file), 0o666)
+        except Exception:
+            pass
+        try:
+            if old_parent.exists() and not any(old_parent.iterdir()):
+                old_parent.rmdir()
         except Exception:
             pass
     except Exception as mv_err:
@@ -3483,7 +3926,7 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
     # Save history entry for 1-click Undo / Restore
     try:
         hist = _load_tomags_history()
-        hist['entries'][dest_file.name] = {
+        h_rec = {
             'orig_file_path': old_file_path,
             'dest_file_path': f'/toMags/{dest_file.name}',
             'dest_name': dest_file.name,
@@ -3494,8 +3937,19 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
             'file_hash': file_loc.file_hash,
             'library_name': file_loc.library_name,
             'orig_item_type': item.item_type if item else 'BOOK',
+            'orig_title': item.title if item else '',
+            'orig_authors': item.authors if item else '',
+            'orig_publisher': (item.publisher if item else '') or '',
+            'orig_description': (item.description if item else '') or '',
+            'orig_isbn': (item.isbn if item else '') or '',
             'moved_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
+        hist['entries'][dest_file.name] = h_rec
+        recent_moves = hist.setdefault('recent_moves', {})
+        recent_moves[dest_file.name] = dict(h_rec)
+        if len(recent_moves) > 500:
+            for k_old in list(recent_moves.keys())[:-500]:
+                recent_moves.pop(k_old, None)
         _save_tomags_history(hist)
     except Exception:
         pass
@@ -3521,6 +3975,7 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
     except Exception:
         pass
     _TOMAGS_SHELF_CACHE['expires_at'] = 0.0
+    invalidate_virtual_folders_cache()
 
     if item:
         rem_files = list(FileLocation.objects.filter(catalog_item_id=item.id).values_list('file_path', flat=True))
@@ -3554,6 +4009,17 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
                 _save_enriched_cache_to_disk()
             except Exception:
                 pass
+        # Trigger background OrgPeriodicals processing on the file in /toMags
+        import threading
+        threading.Thread(
+            target=lambda fl_id=file_id_str: (
+                enrich_periodical_file_location_on_demand(
+                    FileLocation.objects.select_related('catalog_item').filter(id=fl_id).first(),
+                    force_cover=False,
+                )
+            ),
+            daemon=True,
+        ).start()
 
     return {
         'ok': True,
@@ -3568,30 +4034,41 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
     }
 
 
-def move_catalog_item_to_tomags(item: CatalogItem, only_detected_mags: bool = False) -> Dict[str, Any]:
+def move_catalog_item_to_tomags(
+    item: CatalogItem,
+    only_detected_mags: bool = False,
+    force_adult: bool = False,
+    force_standard: bool = False,
+) -> Dict[str, Any]:
     """
     Move all physical files (or all magazine-detected files when `only_detected_mags=True`)
-    of a `CatalogItem` to `/toMags/` and record history for Undo/Review.
+    of a `CatalogItem` to `/periodicals/`, `/xAdult/`, or `/toMags/` and record history for Undo/Review.
     """
     tomags_dir = _get_tomags_dir()
-    if not tomags_dir:
+    periodicals_dir = _get_periodicals_dir()
+    xadult_dir = _get_xadult_dir()
+    if not tomags_dir and not periodicals_dir and not xadult_dir:
         return {
             'ok': False,
             'status': 'TOMAGS_NOT_MOUNTED',
-            'message': 'toMags directory (/toMags or /volume1/common/Media/toMags) is not mounted.',
+            'message': 'toMags / periodicals directory is not mounted.',
         }
 
-    files_list = [f for f in item.files.all() if not str(f.file_path or '').startswith('/toMags/')]
+    files_list = [
+        f for f in item.files.all()
+        if not str(f.file_path or '').startswith('/toMags/') or force_adult or force_standard
+    ]
     if not files_list:
         return {
             'ok': False,
             'status': 'NO_FILES',
-            'message': 'This catalog item has no physical book files left to move.',
+            'message': 'This catalog item has no physical files left to move.',
         }
 
     moved_names: List[str] = []
     errors: List[str] = []
     item_id_str = str(item.id)
+    last_ok_res: Optional[Dict[str, Any]] = None
 
     for f_loc in files_list:
         if only_detected_mags:
@@ -3604,13 +4081,22 @@ def move_catalog_item_to_tomags(item: CatalogItem, only_detected_mags: bool = Fa
             )
             if not pub:
                 continue
-        res = move_file_location_to_tomags(f_loc)
+        res = move_file_location_to_tomags(
+            f_loc,
+            force_adult=force_adult,
+            force_standard=force_standard,
+        )
         if res.get('ok'):
+            last_ok_res = res
             moved_names.extend(res.get('moved_files', []))
         else:
             errors.append(res.get('message', 'Move failed'))
 
     if moved_names:
+        if last_ok_res and last_ok_res.get('moved_to_periodicals_direct'):
+            out = dict(last_ok_res)
+            out['moved_files'] = moved_names
+            return out
         return {
             'ok': True,
             'status': 'MOVED_TO_MAGS',
@@ -3671,24 +4157,31 @@ def get_tomags_item_ids(sync_disk: bool = True) -> List[Any]:
 
     hist_data = _load_tomags_history()
     entries = hist_data.setdefault('entries', {})
+    recent_moves = hist_data.setdefault('recent_moves', {})
     hist_changed = False
 
-    # 1. Clean up any history entries whose file is no longer in `/toMags` (e.g. processed by OrgPeriodicals)
+    # 1. Archive any history entries whose file is no longer in `/toMags` (e.g. processed by OrgPeriodicals into /periodicals/)
+    #    Keep them in `recent_moves` so `Undo toMag` still works even after the file is organized into `/periodicals/`!
     stale_names = [fname for fname in list(entries.keys()) if fname not in disk_files]
     for fname in stale_names:
         ent = entries.pop(fname, {}) or {}
+        if ent:
+            recent_moves[fname] = ent
+            if len(recent_moves) > 500:
+                for k_old in list(recent_moves.keys())[:-500]:
+                    recent_moves.pop(k_old, None)
         hist_changed = True
         fid = ent.get('file_id')
         cid = ent.get('item_id')
         if fid:
             try:
-                FileLocation.objects.filter(id=fid).delete()
-            except Exception:
-                pass
-        if cid:
-            try:
-                if not FileLocation.objects.filter(catalog_item_id=cid).exists():
-                    CatalogItem.objects.filter(id=cid).delete()
+                fl_obj = FileLocation.objects.filter(id=fid).first()
+                if fl_obj and str(fl_obj.file_path or '').startswith('/toMags/'):
+                    phys_chk = _resolve_physical_file_path(fl_obj.file_path)
+                    if not phys_chk or not phys_chk.exists():
+                        fl_obj.delete()
+                        if cid and not FileLocation.objects.filter(catalog_item_id=cid).exists():
+                            CatalogItem.objects.filter(id=cid).delete()
             except Exception:
                 pass
 
@@ -3764,13 +4257,27 @@ def get_tomags_item_ids(sync_disk: bool = True) -> List[Any]:
 
 def _compute_restore_dest_path(filename: str, item: Optional[CatalogItem], hist_entry: Dict[str, Any]) -> Tuple[Path, str]:
     """
-    Determine `(physical_dest_path, db_file_path)` when restoring `filename` from `/toMags/` back to `/books/`.
+    Determine `(physical_dest_path, db_file_path)` when restoring `filename` back to its origin
+    (`/books/<Category>/<Shard>/`, `/periodicals/<Series>/<Year>/`, or `/xAdult/<Series>/<Year>/`).
     """
-    books_root = _get_books_root_dir() or Path('/books')
     orig_db_path = str(hist_entry.get('orig_file_path') or '').strip().replace('\\', '/')
 
     if orig_db_path.startswith('/volume1/common/Media/Books/'):
         orig_db_path = '/books/' + orig_db_path[len('/volume1/common/Media/Books/'):]
+    elif orig_db_path.startswith('/volume1/common/Media/Periodicals/'):
+        orig_db_path = '/periodicals/' + orig_db_path[len('/volume1/common/Media/Periodicals/'):]
+    elif orig_db_path.startswith('/volume1/jims_documents/Media/xAdult/'):
+        orig_db_path = '/xAdult/' + orig_db_path[len('/volume1/jims_documents/Media/xAdult/'):]
+
+    if orig_db_path.startswith('/periodicals/') or orig_db_path.startswith('/xAdult/'):
+        is_x = orig_db_path.startswith('/xAdult/')
+        per_root = (_get_xadult_dir() if is_x else _get_periodicals_dir()) or Path('/xAdult' if is_x else '/periodicals')
+        pfx = '/xAdult/' if is_x else '/periodicals/'
+        rel = orig_db_path[len(pfx):].lstrip('/')
+        phys_dest = per_root / rel
+        return phys_dest, orig_db_path
+
+    books_root = _get_books_root_dir() or Path('/books')
 
     # If no recorded original path, infer category from sibling files on `item` or default to `Misc`
     if not orig_db_path.startswith('/books/'):
@@ -3783,9 +4290,9 @@ def _compute_restore_dest_path(filename: str, item: Optional[CatalogItem], hist_
                     if len(parts) >= 2:
                         cat_folder = parts[0]
                         break
+        from scanner.orgbooks.organizer import compute_splitfiles_subdir
         stem = os.path.splitext(filename)[0]
-        alnum = re.sub(r'[^A-Za-z0-9]+', '', stem)
-        three_dir = (alnum[:3] if len(alnum) >= 3 else (stem[:3] or 'MIS')).upper()
+        three_dir = compute_splitfiles_subdir(stem, leading=3)
         orig_db_path = f'/books/{cat_folder}/{three_dir}/{filename}'
 
     rel = orig_db_path[len('/books/'):].lstrip('/')
@@ -3814,20 +4321,25 @@ def undo_move_from_tomags(
     enrich_after: bool = False,
 ) -> Dict[str, Any]:
     """
-    Undo a move to `/toMags/`:
-      1. Moves physical file(s) from `/toMags/` back to their original `/books/<Category>/<3-letter>/` folder.
-      2. Updates `FileLocation.file_path` and restores `CatalogItem.item_type = 'BOOK'` in PostgreSQL `BookDB`.
-      3. Whitelists the file in `.tomags_history.json` (`not_magazine_paths`) so `detect_magazine_publication`
-         never auto-moves it to `/toMags/` again.
+    Undo a move to `/toMags/`, `/periodicals/`, `/xAdult/`, `/toBooks/`, or `/books/`:
+      1. Moves physical file(s) directly back to their original folder (`orig_file_path` in `.tomags_history.json`,
+         whether `/books/<Category>/<3-letter>/`, `/periodicals/<Series>/<Year>/`, or `/xAdult/<Series>/<Year>/`).
+      2. Updates `FileLocation.file_path`, `processed_files`, and `file_states`, and restores
+         `CatalogItem.item_type` (`BOOK` or `MAGAZINE`) + original metadata in PostgreSQL `BookDB`.
+      3. Whitelists restored Books in `.tomags_history.json` (`not_magazine_paths`) so `detect_magazine_publication`
+         never auto-moves them to `/toMags/` again.
       4. When `enrich_after=True`, immediately runs `enrich_catalog_item_on_demand(item, force=True)` to enrich
          the restored book!
     """
     tomags_dir = _get_tomags_dir()
-    if not tomags_dir:
+    periodicals_dir = _get_periodicals_dir()
+    xadult_dir = _get_xadult_dir()
+    books_dir = _get_books_dir()
+    if not tomags_dir and not periodicals_dir and not xadult_dir and not books_dir:
         return {
             'ok': False,
             'status': 'TOMAGS_NOT_MOUNTED',
-            'message': 'toMags directory is not mounted.',
+            'message': 'Media directories are not mounted.',
         }
 
     # Ensure any unindexed files in /toMags are synced into BookDB first
@@ -3835,6 +4347,9 @@ def undo_move_from_tomags(
 
     hist_data = _load_tomags_history()
     entries = hist_data.get('entries', {})
+    recent_moves = hist_data.get('recent_moves', {})
+    recent_tb = hist_data.get('recent_tobooks_moves', {})
+    all_hist: Dict[str, Dict[str, Any]] = {**recent_tb, **recent_moves, **entries}
     not_mag_list: List[str] = list(hist_data.get('not_magazine_paths') or [])
 
     target_locs: List[FileLocation] = []
@@ -3842,39 +4357,39 @@ def undo_move_from_tomags(
 
     if file_id:
         loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
-        if loc and str(loc.file_path or '').startswith('/toMags/'):
+        if loc:
             target_locs.append(loc)
             target_item = loc.catalog_item
 
     if item_id and not target_locs:
         target_item = CatalogItem.objects.prefetch_related('files').filter(id=item_id).first()
         if target_item:
-            target_locs = [
-                f for f in target_item.files.all()
-                if str(f.file_path or '').startswith('/toMags/')
-            ]
+            target_locs = list(target_item.files.all())
 
     if moved_files:
         for mf in moved_files:
             clean_mf = os.path.basename(str(mf or '').strip())
             if not clean_mf:
                 continue
-            h_ent = entries.get(clean_mf) or {}
+            h_ent = all_hist.get(clean_mf) or {}
             loc = None
             if h_ent.get('file_id'):
                 loc = FileLocation.objects.select_related('catalog_item').filter(id=h_ent['file_id']).first()
+            if not loc:
+                loc = FileLocation.objects.select_related('catalog_item').filter(file_name=clean_mf).first()
             if loc and loc not in target_locs:
                 target_locs.append(loc)
                 if not target_item:
                     target_item = loc.catalog_item
 
     if not target_locs and item_id:
-        # Check history entries matching item_id
-        for dname, h_ent in entries.items():
-            if str(h_ent.get('item_id')) == str(item_id) and h_ent.get('file_id'):
-                loc = FileLocation.objects.select_related('catalog_item').filter(
-                    id=h_ent['file_id']
-                ).first()
+        for dname, h_ent in all_hist.items():
+            if str(h_ent.get('item_id')) == str(item_id):
+                loc = None
+                if h_ent.get('file_id'):
+                    loc = FileLocation.objects.select_related('catalog_item').filter(id=h_ent['file_id']).first()
+                if not loc and dname:
+                    loc = FileLocation.objects.select_related('catalog_item').filter(file_name=dname).first()
                 if loc and loc not in target_locs:
                     target_locs.append(loc)
                     if not target_item:
@@ -3884,75 +4399,148 @@ def undo_move_from_tomags(
         return {
             'ok': False,
             'status': 'NOT_FOUND_IN_TOMAGS',
-            'message': 'No matching files were found in /toMags to restore.',
+            'message': 'No matching files were found to restore.',
         }
 
     restored_files: List[str] = []
     restored_paths: List[str] = []
     errors: List[str] = []
+    last_h_ent: Dict[str, Any] = {}
 
     for loc in target_locs:
-        fname = os.path.basename(loc.file_path or loc.file_name or '')
-        phys_src = tomags_dir / fname
-        if not phys_src.exists():
-            alt_src = _resolve_physical_file_path(loc.file_path)
-            if alt_src and alt_src.exists():
-                phys_src = alt_src
-            else:
-                errors.append(f"File '{fname}' no longer exists in /toMags.")
-                continue
+        old_loc_path = str(loc.file_path or '')
+        fname = os.path.basename(old_loc_path or loc.file_name or '')
+        phys_src = _resolve_physical_file_path(old_loc_path)
+        if (not phys_src or not phys_src.exists()) and tomags_dir:
+            cand_tm = tomags_dir / fname
+            if cand_tm.exists():
+                phys_src = cand_tm
+        if not phys_src or not phys_src.exists():
+            errors.append(f"File '{fname}' no longer exists at {old_loc_path}.")
+            continue
 
-        h_ent = entries.get(fname) or {}
+        h_ent = all_hist.get(fname) or {}
+        if not h_ent:
+            for _, v_e in all_hist.items():
+                if str(v_e.get('file_id')) == str(loc.id) or (item_id and str(v_e.get('item_id')) == str(item_id)):
+                    h_ent = v_e
+                    break
+        if h_ent:
+            last_h_ent = h_ent
+        old_parent = phys_src.parent
         phys_dest, new_db_path = _compute_restore_dest_path(fname, loc.catalog_item or target_item, h_ent)
         try:
             phys_dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(phys_src), str(phys_dest))
-            try:
-                os.chmod(str(phys_dest), 0o666)
-            except Exception:
-                pass
+            if phys_dest.resolve() != phys_src.resolve():
+                shutil.move(str(phys_src), str(phys_dest))
+                try:
+                    os.chmod(str(phys_dest), 0o666)
+                except Exception:
+                    pass
+                # Clean up empty source directory
+                try:
+                    if old_parent.exists() and old_parent not in (tomags_dir, periodicals_dir, xadult_dir, books_dir) and not any(old_parent.iterdir()):
+                        old_parent.rmdir()
+                        if old_parent.parent.exists() and old_parent.parent not in (tomags_dir, periodicals_dir, xadult_dir, books_dir) and not any(old_parent.parent.iterdir()):
+                            old_parent.parent.rmdir()
+                except Exception:
+                    pass
         except Exception as mv_err:
             errors.append(f"Failed to restore '{fname}': {mv_err}")
             continue
 
+        # Update processed_files and file_states back to new_db_path
+        db_path = _get_scanner_db_path()
+        if is_postgres_scanner_enabled() or db_path.exists():
+            try:
+                conn = connect_scanner_db(db_path, timeout=10.0)
+                conn.execute("DELETE FROM processed_files WHERE file_path = ?", (new_db_path,))
+                conn.execute(
+                    "UPDATE processed_files SET file_path = ?, file_name = ? WHERE file_path = ?",
+                    (new_db_path, phys_dest.name, old_loc_path),
+                )
+                conn.execute("DELETE FROM file_states WHERE filepath = ?", (new_db_path,))
+                conn.execute(
+                    "UPDATE file_states SET filepath = ? WHERE filepath = ?",
+                    (new_db_path, old_loc_path),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+        is_per_dest = new_db_path.startswith('/periodicals/') or new_db_path.startswith('/xAdult/')
         loc.file_path = new_db_path
         loc.file_name = phys_dest.name
         if h_ent.get('library_name'):
             loc.library_name = h_ent['library_name']
-        elif loc.library_name == 'NAS toMags Queue':
-            loc.library_name = 'NAS Library'
-        loc.save(update_fields=['file_path', 'file_name', 'library_name'])
+        elif is_per_dest:
+            loc.library_name = 'NAS Periodicals'
+        elif loc.library_name in ('NAS toMags Queue', 'NAS Periodicals', 'NAS toBooks Queue'):
+            loc.library_name = 'NAS Books'
+        loc.library_path = '/xAdult' if new_db_path.startswith('/xAdult/') else ('/periodicals' if new_db_path.startswith('/periodicals/') else '/books')
+        loc.save(update_fields=['file_path', 'file_name', 'library_name', 'library_path'])
 
         if not target_item:
             target_item = loc.catalog_item
 
         restored_files.append(phys_dest.name)
         restored_paths.append(new_db_path)
-        for token in (phys_dest.name, fname, new_db_path):
-            if token and token not in not_mag_list:
-                not_mag_list.append(token)
+        if not is_per_dest:
+            for token in (phys_dest.name, fname, new_db_path):
+                if token and token not in not_mag_list:
+                    not_mag_list.append(token)
+        else:
+            for token in (phys_dest.name, fname, old_loc_path, new_db_path):
+                while token in not_mag_list:
+                    not_mag_list.remove(token)
         entries.pop(fname, None)
+        recent_moves.pop(fname, None)
+        recent_tb.pop(fname, None)
 
     hist_data['entries'] = entries
+    hist_data['recent_moves'] = recent_moves
+    hist_data['recent_tobooks_moves'] = recent_tb
     hist_data['not_magazine_paths'] = not_mag_list[-2000:]
     _save_tomags_history(hist_data)
     _TOMAGS_SHELF_CACHE['expires_at'] = 0.0
+    invalidate_virtual_folders_cache()
 
     if not restored_files:
         return {
             'ok': False,
             'status': 'RESTORE_FAILED',
-            'message': '; '.join(errors) if errors else 'Could not restore file(s) from /toMags.',
+            'message': '; '.join(errors) if errors else 'Could not restore file(s) to origin.',
         }
+
+    first_restored_path = restored_paths[0] if restored_paths else ''
+    restored_is_mag = first_restored_path.startswith('/periodicals/') or first_restored_path.startswith('/xAdult/')
+    restored_type = 'MAGAZINE' if restored_is_mag else 'BOOK'
 
     if target_item:
         target_item.refresh_from_db()
-        if target_item.item_type == 'MAGAZINE':
-            target_item.item_type = 'BOOK'
-            target_item.save(update_fields=['item_type', 'updated_at'])
+        prev_type = target_item.item_type
+        target_item.item_type = restored_type
+        if last_h_ent.get('orig_title'):
+            target_item.title = last_h_ent['orig_title'][:510]
+        if last_h_ent.get('orig_authors'):
+            target_item.authors = last_h_ent['orig_authors'][:510]
+        if 'orig_publisher' in last_h_ent:
+            target_item.publisher = (last_h_ent.get('orig_publisher') or '')[:250]
+        if 'orig_description' in last_h_ent:
+            target_item.description = last_h_ent.get('orig_description') or ''
+        elif not restored_is_mag and target_item.description and ('Periodical Issue' in target_item.description or '— Periodicals.' in target_item.description):
+            target_item.description = ''
+        target_item.save()
+        if prev_type != restored_type:
+            try:
+                from .views import adjust_cached_books_count
+                adjust_cached_books_count(1 if restored_type == 'BOOK' else -1)
+            except Exception:
+                pass
 
-    if enrich_after and target_item:
-        enr_res = enrich_catalog_item_on_demand(target_item, force=True)
+    if enrich_after and target_item and restored_type == 'BOOK':
+        enr_res = enrich_catalog_item_on_demand(target_item, force=True, skip_mag_check=True)
         enr_res['restored_from_tomags'] = True
         enr_res['restored_files'] = restored_files
         enr_res['restored_paths'] = restored_paths
@@ -3962,16 +4550,1184 @@ def undo_move_from_tomags(
             enr_res['message'] = f"Restored {', '.join(restored_files[:2])} to Books. {enr_res.get('message', '')}".strip()
         return enr_res
 
+    top_fld = compute_top_folder_from_path(first_restored_path) if first_restored_path else ('Periodicals' if restored_is_mag else 'Books')
+    ser_name = compute_periodical_series_from_path(first_restored_path) if restored_is_mag else ''
     return {
         'ok': True,
-        'status': 'RESTORED_FROM_MAGS',
+        'status': 'RESTORED_TO_ORIGIN',
         'restored_from_tomags': True,
+        'undone_to_origin': True,
         'item_id': str(target_item.id) if target_item else item_id,
+        'item_type': restored_type,
+        'top_folder': top_fld,
+        'periodical_series': ser_name,
         'title': target_item.title if target_item else restored_files[0],
         'authors': target_item.authors if target_item else 'Unknown Author',
+        'cover_url': (target_item.cover_thumbnail if target_item else '') or (f'/mylibrary/opds/cover/{target_item.id}.jpg' if target_item else ''),
         'restored_files': restored_files,
         'restored_paths': restored_paths,
-        'message': f"Restored {len(restored_files)} file(s) from toMags back to Books: {', '.join(restored_files[:3])}",
+        'message': f"Restored {len(restored_files)} file(s) back to {top_fld}" + (f" › {ser_name}" if ser_name else "") + f": {', '.join(restored_files[:3])}",
+    }
+
+
+def _get_periodicals_dir() -> Optional[Path]:
+    for p in (Path('/periodicals'), Path('/volume1/common/Media/Periodicals'), Path(r'U:\Media\Periodicals')):
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _get_xadult_dir() -> Optional[Path]:
+    for p in (Path('/xAdult'), Path('/volume1/jims_documents/Media/xAdult'), Path(r'P:\Media\xAdult')):
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _get_books_dir() -> Optional[Path]:
+    for p in (Path('/books'), Path('/volume1/common/Media/Books'), Path(r'U:\Media\Books')):
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _get_tobooks_dir() -> Optional[Path]:
+    for p in (Path('/toBooks'), Path('/volume1/common/Media/toBooks'), Path(r'P:\Media\toBooks'), Path(r'U:\Media\toBooks')):
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            continue
+    # Fallback: create /toBooks if /volume1/common/Media exists
+    for parent in (Path('/volume1/common/Media'), Path(r'P:\Media'), Path(r'U:\Media')):
+        try:
+            if parent.exists() and parent.is_dir():
+                tb = parent / 'toBooks'
+                tb.mkdir(parents=True, exist_ok=True)
+                return tb
+        except Exception:
+            continue
+    return None
+
+
+_TOBOOKS_SYNC_STATE: Dict[str, Any] = {'last_mtime': 0.0, 'running': False}
+
+
+def sync_tobooks_drop_folder(run_async: bool = False) -> Dict[str, Any]:
+    """
+    Process any book files dropped into `/toBooks` (`P:\\Media\\toBooks`):
+      1. Reads embedded EPUB/PDF metadata (preserving the metadata the user set before placing in `toBooks`).
+      2. Routes and moves each file into the matching `/books/<Category>/<3-Char-Shard>/` folder via `OrgBooks`.
+      3. Creates or updates `CatalogItem` (`item_type = 'BOOK'`) and `FileLocation` in PostgreSQL `BookDB`.
+      4. Records `status = 'SUCCESS'` in `processed_files` if embedded metadata was already present,
+         or triggers `epubmeta` enrichment if metadata is incomplete.
+    """
+    import hashlib
+    import threading
+
+    tobooks_dir = _get_tobooks_dir()
+    books_dir = _get_books_dir()
+    if not tobooks_dir or not books_dir:
+        return {'ok': False, 'processed': 0}
+
+    try:
+        cur_mtime = tobooks_dir.stat().st_mtime
+    except Exception:
+        return {'ok': False, 'processed': 0}
+
+    if _TOBOOKS_SYNC_STATE.get('running'):
+        return {'ok': True, 'processed': 0, 'status': 'already_running'}
+
+    # Quick check if any files exist in /toBooks
+    has_files = False
+    try:
+        for _, _, files in os.walk(tobooks_dir):
+            if any(not f.startswith('.') for f in files):
+                has_files = True
+                break
+    except Exception:
+        pass
+    if not has_files:
+        _TOBOOKS_SYNC_STATE['last_mtime'] = cur_mtime
+        return {'ok': True, 'processed': 0}
+
+    def _worker() -> Dict[str, Any]:
+        _TOBOOKS_SYNC_STATE['running'] = True
+        processed_count = 0
+        try:
+            from scanner.orgbooks.organizer import BOOK_EXTENSIONS, organize_book_file
+
+            found: List[Path] = []
+            for root, dirs, files in os.walk(tobooks_dir):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d.lower() != '@eadir']
+                for fn in files:
+                    if fn.startswith('.'):
+                        continue
+                    fp = Path(root) / fn
+                    if fp.suffix.lower() in BOOK_EXTENSIONS:
+                        found.append(fp)
+
+            for fp in sorted(found):
+                try:
+                    from scanner.orgbooks.organizer import extract_book_metadata_for_routing
+
+                    old_tobooks_db_path = f"/toBooks/{fp.name}"
+                    init_meta = extract_book_metadata_for_routing(fp)
+                    stat_init = fp.stat()
+                    fsize_init = stat_init.st_size
+                    mtime_dt_init = datetime.datetime.fromtimestamp(stat_init.st_mtime, tz=datetime.timezone.utc)
+                    ext_fmt_init = fp.suffix.lstrip('.').upper()[:16] or 'EPUB'
+                    fhash_init = hashlib.sha256(f"{old_tobooks_db_path}:{fsize_init}:{stat_init.st_mtime}".encode('utf-8')).hexdigest()
+
+                    loc = (
+                        FileLocation.objects.select_related('catalog_item')
+                        .filter(file_path=old_tobooks_db_path)
+                        .first()
+                    )
+                    if not loc:
+                        item = CatalogItem.objects.create(
+                            title=(init_meta.get('title') or fp.stem)[:510],
+                            authors=(init_meta.get('authors') or 'Unknown Author')[:510],
+                            publisher=(init_meta.get('publisher') or '')[:250],
+                            pub_date=init_meta.get('pub_date'),
+                            isbn=(init_meta.get('isbn') or '')[:32],
+                            item_type='BOOK',
+                            description=init_meta.get('description') or '',
+                            cover_thumbnail=init_meta.get('cover_thumbnail'),
+                        )
+                        loc = FileLocation.objects.create(
+                            catalog_item=item,
+                            file_path=old_tobooks_db_path,
+                            file_name=fp.name,
+                            file_size=fsize_init,
+                            file_format=ext_fmt_init,
+                            file_created_at=mtime_dt_init,
+                            file_modified_at=mtime_dt_init,
+                            file_hash=fhash_init,
+                            library_name='NAS toBooks Queue',
+                            library_path='/toBooks',
+                        )
+                    else:
+                        item = loc.catalog_item
+
+                    # If no embedded book metadata was preset before dropping into /toBooks,
+                    # enrich the file FIRST so epubmeta discovers its subjects, title, author, and description!
+                    if not init_meta.get('has_embedded_meta'):
+                        try:
+                            enrich_file_location_on_demand(loc, force=True, skip_mag_check=True)
+                            loc.refresh_from_db()
+                            if item:
+                                item.refresh_from_db()
+                        except Exception:
+                            pass
+
+                    hint_meta: Dict[str, Any] = {}
+                    if item:
+                        hint_meta = {
+                            'title': item.title,
+                            'authors': item.authors,
+                            'publisher': item.publisher or '',
+                            'description': item.description or '',
+                            'isbn': item.isbn or '',
+                            'pub_date': item.pub_date,
+                            'subjects': get_file_tags(loc.file_path),
+                        }
+
+                    org_res = organize_book_file(
+                        file_path=fp,
+                        books_root=books_dir,
+                        tobooks_root=tobooks_dir,
+                        move_file=True,
+                        hint_meta=hint_meta,
+                    )
+                    if not org_res.get('ok'):
+                        continue
+                    dest_path: Path = org_res['target_path']
+                    new_db_path: str = org_res['db_path']
+                    meta: Dict[str, Any] = org_res.get('meta') or {}
+                    stat = dest_path.stat()
+                    fsize = stat.st_size
+                    mtime_dt = datetime.datetime.fromtimestamp(stat.st_mtime, tz=datetime.timezone.utc)
+                    ext_fmt = dest_path.suffix.lstrip('.').upper()[:16] or 'EPUB'
+                    fhash = hashlib.sha256(f"{new_db_path}:{fsize}:{stat.st_mtime}".encode('utf-8')).hexdigest()
+
+                    loc.file_path = new_db_path
+                    loc.file_name = dest_path.name
+                    loc.file_size = fsize
+                    loc.file_format = ext_fmt
+                    loc.file_modified_at = mtime_dt
+                    loc.library_name = 'NAS Books'
+                    loc.library_path = '/books'
+                    loc.save()
+                    if item:
+                        item.item_type = 'BOOK'
+                        if meta.get('title') and (not item.title or item.title == fp.stem):
+                            item.title = meta['title'][:510]
+                        if meta.get('authors') and meta['authors'] != 'Unknown Author' and (not item.authors or item.authors == 'Unknown Author'):
+                            item.authors = meta['authors'][:510]
+                        if meta.get('publisher') and not item.publisher:
+                            item.publisher = meta['publisher'][:250]
+                        if meta.get('pub_date') and not item.pub_date:
+                            item.pub_date = meta['pub_date']
+                        if meta.get('isbn') and not item.isbn:
+                            item.isbn = meta['isbn'][:32]
+                        if meta.get('description') and not item.description:
+                            item.description = meta['description']
+                        if meta.get('cover_thumbnail') and not item.cover_thumbnail:
+                            item.cover_thumbnail = meta['cover_thumbnail']
+                        item.save()
+
+                    # Whitelist in not_magazine_paths so it won't be auto-moved to toMags
+                    try:
+                        hist = _load_tomags_history()
+                        not_mags = list(hist.get('not_magazine_paths') or [])
+                        for tok in (dest_path.name, new_db_path):
+                            if tok and tok not in not_mags:
+                                not_mags.append(tok)
+                        hist['not_magazine_paths'] = not_mags[-2000:]
+                        _save_tomags_history(hist)
+                    except Exception:
+                        pass
+
+                    # Update or record processed_files at the new /books/<Category>/<Shard>/ path
+                    db_p = _get_scanner_db_path()
+                    if is_postgres_scanner_enabled() or db_p.exists():
+                        try:
+                            conn = connect_scanner_db(db_p, timeout=10.0)
+                            if init_meta.get('has_embedded_meta'):
+                                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                                upd_json = json.dumps({
+                                    'title': item.title,
+                                    'authors': [a.strip() for a in (item.authors or '').split(',') if a.strip()],
+                                    'publisher': item.publisher or '',
+                                    'published_date': str(item.pub_date) if item.pub_date else None,
+                                    'isbn13': item.isbn or '',
+                                    'description': item.description or '',
+                                    'subjects': list(meta.get('subjects') or [org_res.get('target_folder', 'Misc')]),
+                                    'source': 'toBooks Embedded Metadata',
+                                })
+                                conn.execute(
+                                    """
+                                    INSERT INTO processed_files (
+                                        file_path, file_name, file_ext, file_size, file_mtime, file_sha256,
+                                        status, isbn, title, author, match_confidence, updated_metadata_json, updated_at
+                                    ) VALUES (?, ?, ?, ?, ?, ?, 'SUCCESS', ?, ?, ?, 1.0, ?, ?)
+                                    ON CONFLICT(file_path) DO UPDATE SET
+                                        status = 'SUCCESS',
+                                        isbn = excluded.isbn,
+                                        title = excluded.title,
+                                        author = excluded.author,
+                                        match_confidence = 1.0,
+                                        updated_metadata_json = excluded.updated_metadata_json,
+                                        updated_at = excluded.updated_at
+                                    """,
+                                    (
+                                        new_db_path,
+                                        dest_path.name,
+                                        dest_path.suffix.lower(),
+                                        fsize,
+                                        stat.st_mtime,
+                                        fhash,
+                                        item.isbn or '',
+                                        item.title,
+                                        item.authors,
+                                        upd_json,
+                                        now_iso,
+                                    ),
+                                )
+                            else:
+                                conn.execute("DELETE FROM processed_files WHERE file_path = ?", (new_db_path,))
+                                conn.execute(
+                                    "UPDATE processed_files SET file_path = ?, file_name = ? WHERE file_path = ?",
+                                    (new_db_path, dest_path.name, old_tobooks_db_path),
+                                )
+                                conn.execute("DELETE FROM file_states WHERE filepath = ?", (new_db_path,))
+                                conn.execute(
+                                    "UPDATE file_states SET filepath = ? WHERE filepath = ?",
+                                    (new_db_path, old_tobooks_db_path),
+                                )
+                            conn.commit()
+                            conn.close()
+                        except Exception:
+                            pass
+                    if isinstance(_ENRICHED_PATHS_CACHE.get('paths_set'), set):
+                        _ENRICHED_PATHS_CACHE['paths_set'].add(new_db_path)
+                    if item and isinstance(_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set'), set):
+                        _ENRICHED_PATHS_CACHE['enriched_item_ids_set'].add(item.id)
+                    processed_count += 1
+                except Exception:
+                    continue
+
+            # Clean empty dirs inside toBooks
+            for root, dirs, _ in os.walk(tobooks_dir, topdown=False):
+                for d in dirs:
+                    if not d.startswith('.'):
+                        try:
+                            dp = Path(root) / d
+                            if not any(dp.iterdir()):
+                                dp.rmdir()
+                        except Exception:
+                            pass
+            if processed_count > 0:
+                invalidate_virtual_folders_cache()
+        finally:
+            _TOBOOKS_SYNC_STATE['running'] = False
+        return {'ok': True, 'processed': processed_count}
+
+    if run_async:
+        threading.Thread(target=_worker, daemon=True).start()
+        return {'ok': True, 'processed': 0, 'status': 'started_in_background'}
+    return _worker()
+
+
+def move_file_location_to_tobooks(
+    file_loc: FileLocation,
+    explicit_folder: Optional[str] = None,
+    enrich_in_background: bool = True,
+) -> Dict[str, Any]:
+    """
+    Move a Magazine / Periodical `FileLocation` from `/periodicals/...` (or `/xAdult/...` or `/toMags/...`)
+    back to Books:
+      - If the item is ALREADY enriched with real book metadata (or has embedded book metadata / explicit_folder),
+        routes it DIRECTLY into `/books/<Category>/<3-Char-Shard>/<filename>` via `OrgBooks` (`splitfiles` logic)
+        without having to go through `/toBooks/`.
+      - If the item is NOT book-enriched yet (e.g., unenriched or only has a dummy `OrgPeriodicals` placeholder),
+        moves it into `/toBooks/<filename>` and triggers the background `/toBooks` processor (`sync_tobooks_drop_folder`)
+        which enriches the book first and then moves it into `/books/<Category>/<3-Char-Shard>/<filename>`.
+    """
+    import threading
+    from scanner.orgbooks.organizer import extract_book_metadata_for_routing, organize_book_file
+
+    books_dir = _get_books_dir()
+    tobooks_dir = _get_tobooks_dir()
+    if not books_dir:
+        return {
+            'ok': False,
+            'status': 'BOOKS_NOT_MOUNTED',
+            'message': '/books directory is not mounted.',
+        }
+
+    item = file_loc.catalog_item
+    old_file_path = str(file_loc.file_path or '')
+    file_id_str = str(file_loc.id)
+    item_id_str = str(item.id) if item else ''
+
+    phys_path = _resolve_physical_file_path(old_file_path)
+    if not phys_path or not phys_path.exists():
+        return {
+            'ok': False,
+            'status': 'NOT_FOUND',
+            'message': f'Physical file not found on NAS: {old_file_path}',
+        }
+
+    # Check if this file was previously moved from Books -> Magazines (`entries` or `recent_moves`):
+    # If so, clicking the MAGAZINE pill acts as an immediate Undo — moving it directly back where it came from!
+    if not explicit_folder:
+        try:
+            hist_chk = _load_tomags_history()
+            all_mag_hist = {**(hist_chk.get('recent_moves') or {}), **(hist_chk.get('entries') or {})}
+            has_undo_entry = phys_path.name in all_mag_hist or any(
+                str(v.get('file_id')) == file_id_str or (item_id_str and str(v.get('item_id')) == item_id_str)
+                for v in all_mag_hist.values()
+            )
+            if has_undo_entry:
+                undo_res = undo_move_from_tomags(
+                    item_id=item_id_str,
+                    file_id=file_id_str,
+                    moved_files=[phys_path.name],
+                    enrich_after=False,
+                )
+                if undo_res.get('ok'):
+                    if item:
+                        item.refresh_from_db()
+                    restored_p = (undo_res.get('restored_paths') or [''])[0]
+                    top_fld = undo_res.get('top_folder') or compute_top_folder_from_path(restored_p) or 'Books'
+                    return {
+                        'ok': True,
+                        'status': 'UNDONE_TO_BOOKS',
+                        'undone_to_origin': True,
+                        'moved_to_books': True,
+                        'moved_to_books_direct': True,
+                        'staged_in_tobooks': False,
+                        'item_id': item_id_str,
+                        'file_id': file_id_str,
+                        'item_type': 'BOOK',
+                        'target_folder': top_fld,
+                        'top_folder': top_fld,
+                        'periodical_series': '',
+                        'dest_path': restored_p,
+                        'moved_files': undo_res.get('restored_files') or [phys_path.name],
+                        'title': item.title if item else undo_res.get('title', phys_path.stem),
+                        'authors': item.authors if item else undo_res.get('authors', 'Unknown Author'),
+                        'publisher': (item.publisher if item else '') or '',
+                        'pub_date': str(item.pub_date) if (item and item.pub_date) else '',
+                        'isbn': (item.isbn if item else '') or '',
+                        'description': (item.description if item else '') or '',
+                        'cover_url': (item.cover_thumbnail if item else '') or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+                        'message': f"Undid move — restored directly back to /books/{top_fld}/ ({restored_p}).",
+                    }
+        except Exception:
+            pass
+
+    # Record original Periodicals location in `recent_tobooks_moves` so clicking the BOOK pill again undoes this move!
+    try:
+        hist_tb = _load_tomags_history()
+        recent_tb = hist_tb.setdefault('recent_tobooks_moves', {})
+        recent_tb[phys_path.name] = {
+            'orig_file_path': old_file_path,
+            'item_id': item_id_str,
+            'file_id': file_id_str,
+            'library_name': file_loc.library_name,
+            'orig_item_type': item.item_type if item else 'MAGAZINE',
+            'orig_title': item.title if item else '',
+            'orig_authors': item.authors if item else '',
+            'orig_publisher': (item.publisher if item else '') or '',
+            'orig_description': (item.description if item else '') or '',
+            'moved_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if len(recent_tb) > 500:
+            for k_old in list(recent_tb.keys())[:-500]:
+                recent_tb.pop(k_old, None)
+        _save_tomags_history(hist_tb)
+    except Exception:
+        pass
+
+    old_parent = phys_path.parent
+    emb_meta = extract_book_metadata_for_routing(phys_path)
+    old_series = compute_periodical_series_from_path(old_file_path) or ''
+    item_auth_clean = (item.authors or '').strip() if item else ''
+    item_desc_clean = (item.description or '').strip() if item else ''
+    is_dummy_periodical_meta = (
+        'Periodical Issue' in item_desc_clean
+        or '— Periodicals.' in item_desc_clean
+        or len(item_auth_clean) <= 3
+        or item_auth_clean.lower() in ('', 'unknown', 'unknown author', 'periodicals', 'archive-x', 'unorganized')
+        or (old_series and item_auth_clean.lower() == old_series.lower())
+    )
+    already_book_enriched = bool(
+        explicit_folder
+        or emb_meta.get('has_embedded_meta')
+        or (
+            (is_file_enriched(old_file_path) or bool(item and item.id in (_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set())))
+            and not is_dummy_periodical_meta
+        )
+    )
+
+    # Whitelist in .tomags_history.json so detect_magazine_publication never moves it back to toMags
+    try:
+        hist = _load_tomags_history()
+        not_mags = list(hist.get('not_magazine_paths') or [])
+        for tok in (phys_path.name, old_file_path):
+            if tok and tok not in not_mags:
+                not_mags.append(tok)
+        hist['not_magazine_paths'] = not_mags[-2000:]
+        _save_tomags_history(hist)
+    except Exception:
+        pass
+
+    # CASE 1: Item is NOT book-enriched yet and /toBooks is available -> move to /toBooks and let background processor enrich + splitfiles-route it!
+    if not already_book_enriched and tobooks_dir and tobooks_dir.exists() and enrich_in_background:
+        dest_tobooks = tobooks_dir / phys_path.name
+        if dest_tobooks.resolve() != phys_path.resolve():
+            shutil.move(str(phys_path), str(dest_tobooks))
+            try:
+                os.chmod(str(dest_tobooks), 0o666)
+            except Exception:
+                pass
+            try:
+                if old_parent.exists() and not any(old_parent.iterdir()):
+                    old_parent.rmdir()
+                    if old_parent.parent.exists() and old_parent.parent.name not in ('Periodicals', 'periodicals', 'xAdult', 'Books', 'books') and not any(old_parent.parent.iterdir()):
+                        old_parent.parent.rmdir()
+            except Exception:
+                pass
+
+        tobooks_db_path = f"/toBooks/{dest_tobooks.name}"
+        db_path = _get_scanner_db_path()
+        if is_postgres_scanner_enabled() or db_path.exists():
+            try:
+                conn = connect_scanner_db(db_path, timeout=10.0)
+                for p_del in (old_file_path, tobooks_db_path):
+                    conn.execute("DELETE FROM processed_files WHERE file_path = ?", (p_del,))
+                    conn.execute("DELETE FROM file_states WHERE filepath = ?", (p_del,))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+        file_loc.file_path = tobooks_db_path
+        file_loc.file_name = dest_tobooks.name
+        file_loc.library_name = 'NAS toBooks Queue'
+        file_loc.library_path = '/toBooks'
+        file_loc.save(update_fields=['file_path', 'file_name', 'library_name', 'library_path'])
+        invalidate_virtual_folders_cache()
+
+        if item:
+            was_mag = item.item_type == 'MAGAZINE'
+            item.item_type = 'BOOK'
+            if emb_meta.get('title'):
+                item.title = emb_meta['title'][:510]
+            if is_dummy_periodical_meta:
+                item.authors = (emb_meta.get('authors') if emb_meta.get('authors') != 'Unknown Author' else 'Unknown Author')[:510]
+                if 'Periodical Issue' in item_desc_clean or '— Periodicals.' in item_desc_clean:
+                    item.description = emb_meta.get('description') or ''
+                if item.publisher == item_auth_clean:
+                    item.publisher = emb_meta.get('publisher') or ''
+            item.save()
+            if was_mag:
+                try:
+                    from .views import adjust_cached_books_count
+                    adjust_cached_books_count(1)
+                except Exception:
+                    pass
+
+        # Kick off the background /toBooks processor (enriches first, then routes via splitfiles into /books/<Category>/<Shard>/)
+        sync_tobooks_drop_folder(run_async=True)
+        return {
+            'ok': True,
+            'status': 'MOVED_TO_TOBOOKS_QUEUE',
+            'moved_to_books': True,
+            'staged_in_tobooks': True,
+            'item_id': item_id_str,
+            'file_id': file_id_str,
+            'item_type': 'BOOK',
+            'target_folder': 'toBooks',
+            'top_folder': 'toBooks',
+            'periodical_series': '',
+            'dest_path': tobooks_db_path,
+            'moved_files': [dest_tobooks.name],
+            'title': item.title if item else (emb_meta.get('title') or dest_tobooks.stem),
+            'authors': item.authors if item else (emb_meta.get('authors') or 'Unknown Author'),
+            'publisher': (item.publisher if item else '') or '',
+            'pub_date': str(item.pub_date) if (item and item.pub_date) else '',
+            'isbn': (item.isbn if item else '') or '',
+            'description': (item.description if item else '') or '',
+            'cover_url': (item.cover_thumbnail if item else emb_meta.get('cover_thumbnail')) or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+            'message': f"Moved '{dest_tobooks.name}' to /toBooks — background processor is enriching & routing into /books/.",
+        }
+
+    # CASE 2: Already enriched (or synchronous mode / explicit_folder) -> route directly into /books/<Category>/<3-Char-Shard>/ without going to /toBooks!
+    hint_meta: Dict[str, Any] = {}
+    if item and not is_dummy_periodical_meta:
+        hint_meta = {
+            'title': item.title,
+            'authors': item.authors,
+            'publisher': item.publisher or '',
+            'description': item.description or '',
+            'isbn': item.isbn or '',
+            'pub_date': item.pub_date,
+            'subjects': get_file_tags(old_file_path),
+        }
+
+    org_res = organize_book_file(
+        file_path=phys_path,
+        books_root=books_dir,
+        tobooks_root=None,
+        explicit_folder=explicit_folder,
+        move_file=True,
+        hint_meta=hint_meta,
+    )
+    if not org_res.get('ok'):
+        return {
+            'ok': False,
+            'status': 'ORGANIZE_ERROR',
+            'message': org_res.get('error') or 'Failed to organize book into /books.',
+        }
+
+    # Clean up empty source directory in /periodicals/
+    try:
+        if old_parent.exists() and not any(old_parent.iterdir()):
+            old_parent.rmdir()
+            if old_parent.parent.exists() and old_parent.parent.name not in ('Periodicals', 'periodicals', 'xAdult', 'Books', 'books') and not any(old_parent.parent.iterdir()):
+                old_parent.parent.rmdir()
+    except Exception:
+        pass
+
+    dest_file: Path = org_res['target_path']
+    new_db_path: str = org_res['db_path']
+    target_folder: str = org_res['target_folder']
+    meta: Dict[str, Any] = org_res.get('meta') or {}
+
+    try:
+        hist = _load_tomags_history()
+        not_mags = list(hist.get('not_magazine_paths') or [])
+        if new_db_path not in not_mags:
+            not_mags.append(new_db_path)
+            hist['not_magazine_paths'] = not_mags[-2000:]
+            _save_tomags_history(hist)
+    except Exception:
+        pass
+
+    db_path = _get_scanner_db_path()
+    if is_postgres_scanner_enabled() or db_path.exists():
+        try:
+            conn = connect_scanner_db(db_path, timeout=10.0)
+            if already_book_enriched and not is_dummy_periodical_meta:
+                conn.execute("DELETE FROM processed_files WHERE file_path = ?", (new_db_path,))
+                conn.execute(
+                    "UPDATE processed_files SET file_path = ?, file_name = ? WHERE file_path = ?",
+                    (new_db_path, dest_file.name, old_file_path),
+                )
+                conn.execute("DELETE FROM file_states WHERE filepath = ?", (new_db_path,))
+                conn.execute(
+                    "UPDATE file_states SET filepath = ? WHERE filepath = ?",
+                    (new_db_path, old_file_path),
+                )
+            else:
+                for p_del in (old_file_path, new_db_path):
+                    conn.execute("DELETE FROM processed_files WHERE file_path = ?", (p_del,))
+                    conn.execute("DELETE FROM file_states WHERE filepath = ?", (p_del,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    file_loc.file_path = new_db_path
+    file_loc.file_name = dest_file.name
+    file_loc.library_name = 'NAS Books'
+    file_loc.library_path = '/books'
+    file_loc.save(update_fields=['file_path', 'file_name', 'library_name', 'library_path'])
+    invalidate_virtual_folders_cache()
+
+    if item:
+        was_mag = item.item_type == 'MAGAZINE'
+        item.item_type = 'BOOK'
+        if meta.get('title') and (is_dummy_periodical_meta or not item.title):
+            item.title = meta['title'][:510]
+        if meta.get('authors') and meta['authors'] != 'Unknown Author':
+            item.authors = meta['authors'][:510]
+        elif is_dummy_periodical_meta:
+            item.authors = 'Unknown Author'
+        if meta.get('publisher'):
+            item.publisher = meta['publisher'][:250]
+        elif is_dummy_periodical_meta and item.publisher == item_auth_clean:
+            item.publisher = ''
+        if meta.get('pub_date'):
+            item.pub_date = meta['pub_date']
+        if meta.get('isbn'):
+            item.isbn = meta['isbn'][:32]
+        if meta.get('description'):
+            item.description = meta['description']
+        elif is_dummy_periodical_meta:
+            item.description = ''
+        if meta.get('cover_thumbnail'):
+            item.cover_thumbnail = meta['cover_thumbnail']
+        item.save()
+        if was_mag:
+            try:
+                from .views import adjust_cached_books_count
+                adjust_cached_books_count(1)
+            except Exception:
+                pass
+
+    if not already_book_enriched:
+        def _run_bg_book_enrich(fl_id: str) -> None:
+            try:
+                fl_obj = FileLocation.objects.select_related('catalog_item').filter(id=fl_id).first()
+                if fl_obj:
+                    enrich_file_location_on_demand(fl_obj, force=True, skip_mag_check=True)
+            except Exception:
+                pass
+
+        if enrich_in_background:
+            threading.Thread(target=_run_bg_book_enrich, args=(file_id_str,), daemon=True).start()
+        else:
+            _run_bg_book_enrich(file_id_str)
+            if item:
+                item.refresh_from_db()
+
+    return {
+        'ok': True,
+        'status': 'MOVED_TO_BOOKS_DIRECT',
+        'moved_to_books': True,
+        'moved_to_books_direct': True,
+        'staged_in_tobooks': False,
+        'item_id': item_id_str,
+        'file_id': file_id_str,
+        'item_type': 'BOOK',
+        'target_folder': target_folder,
+        'top_folder': target_folder,
+        'periodical_series': '',
+        'dest_path': new_db_path,
+        'moved_files': [dest_file.name],
+        'title': item.title if item else (meta.get('title') or dest_file.stem),
+        'authors': item.authors if item else (meta.get('authors') or 'Unknown Author'),
+        'publisher': (item.publisher if item else '') or '',
+        'pub_date': str(item.pub_date) if (item and item.pub_date) else '',
+        'isbn': (item.isbn if item else '') or '',
+        'description': (item.description if item else '') or '',
+        'cover_url': (item.cover_thumbnail if item else meta.get('cover_thumbnail')) or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+        'message': f"Moved '{dest_file.name}' directly to Books (/books/{target_folder}/).",
+    }
+
+
+def move_catalog_item_to_tobooks(
+    item: CatalogItem,
+    explicit_folder: Optional[str] = None,
+    enrich_in_background: bool = True,
+) -> Dict[str, Any]:
+    """
+    Move all physical files of a `CatalogItem` from Periodicals/toMags into `/toBooks` -> `/books/<Category>/<Shard>/`.
+    """
+    files_list = list(item.files.all())
+    if not files_list:
+        return {
+            'ok': False,
+            'status': 'NO_FILES',
+            'message': 'This catalog item has no physical files to move.',
+        }
+    last_res: Dict[str, Any] = {'ok': False}
+    moved_files: List[str] = []
+    for f_loc in files_list:
+        res = move_file_location_to_tobooks(
+            f_loc,
+            explicit_folder=explicit_folder,
+            enrich_in_background=enrich_in_background,
+        )
+        if res.get('ok'):
+            last_res = res
+            moved_files.extend(res.get('moved_files') or [])
+    if last_res.get('ok'):
+        last_res['moved_files'] = moved_files
+    return last_res
+
+
+def enrich_periodical_file_location_on_demand(
+    file_loc: FileLocation,
+    force_cover: bool = False,
+    hint_title: str = '',
+    hint_authors: str = '',
+) -> Dict[str, Any]:
+    """
+    Magazine / Periodical enrichment pipeline:
+      1. Cover is ALWAYS Page 1 of the PDF (rendered at 150 DPI via pymupdf) or EPUB/CBR/CBZ cover.
+      2. Series title & publication year come from `/periodicals/<Series>/<Year>/` (or `/xAdult/<Series>/<Year>/`),
+         `orgperiodicals.parser`, `PeriodicalClassifier` (`magazines.json`), or Gemini cover analysis.
+      3. Never writes embedded metadata into the file on disk.
+    """
+    import io
+    from PIL import Image
+
+    item = file_loc.catalog_item
+    phys_path = _resolve_physical_file_path(file_loc.file_path)
+    if not phys_path or not phys_path.exists():
+        return {
+            'ok': False,
+            'status': 'NOT_MOUNTED',
+            'message': f'Physical periodical file not accessible: {file_loc.file_path}',
+        }
+
+    epubmeta_cfg = _load_scanner_epubmeta_config()
+    gemini_key = epubmeta_cfg.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY')
+
+    from scanner.orgperiodicals.organizer import identify_and_organize_periodical
+
+    top_fld = compute_top_folder_from_path(file_loc.file_path)
+    is_vx = (top_fld == 'Archive-X') or is_vx_restricted_path(file_loc.file_path)
+    should_organize = (
+        str(file_loc.file_path or '').startswith('/toMags/')
+        or str(file_loc.file_path or '').startswith('/xtoAdult/')
+        or '/Unorganized/' in str(file_loc.file_path or '')
+    )
+
+    info = identify_and_organize_periodical(
+        file_path=phys_path,
+        periodicals_dir=_get_periodicals_dir(),
+        adult_dir=_get_xadult_dir(),
+        gemini_key=gemini_key,
+        force_cover=force_cover,
+        move_file=should_organize,
+        force_adult=is_vx,
+    )
+
+    series_title = hint_authors or info.get('series_title') or (item.authors if item else 'Periodicals')
+    year = info.get('year')
+    bucket = info.get('bucket') or 'Periodicals'
+    cover_bytes = info.get('cover_bytes')
+    target_path = info.get('target_path') or phys_path
+
+    # Update FileLocation path if file was organized from Unorganized/toMags
+    old_db_path = file_loc.file_path
+    new_db_path = old_db_path
+    if target_path and target_path != phys_path and target_path.exists():
+        tp_str = str(target_path).replace('\\', '/')
+        for host_pfx, cont_pfx in (
+            ('/volume1/common/Media/Periodicals/', '/periodicals/'),
+            ('/volume1/jims_documents/Media/xAdult/', '/xAdult/'),
+        ):
+            if tp_str.startswith(host_pfx):
+                tp_str = cont_pfx + tp_str[len(host_pfx):]
+                break
+        new_db_path = tp_str
+        file_loc.file_path = new_db_path
+        file_loc.file_name = target_path.name
+        file_loc.save(update_fields=['file_path', 'file_name'])
+        invalidate_virtual_folders_cache()
+
+    thumb_data_uri = item.cover_thumbnail if item else None
+    if cover_bytes:
+        try:
+            with Image.open(io.BytesIO(cover_bytes)) as img:
+                img.thumbnail((360, 540))
+                if img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG', quality=82)
+                b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                thumb_data_uri = f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            pass
+
+    stem_clean = re.sub(r'[-_\.]+', ' ', Path(file_loc.file_name).stem).strip()
+    if hint_title:
+        final_title = hint_title
+    elif series_title and series_title not in ('Unorganized', 'Unknown'):
+        if series_title.lower() in stem_clean.lower():
+            final_title = stem_clean
+        else:
+            final_title = f"{series_title} - {stem_clean}"
+    else:
+        final_title = (item.title if item else None) or stem_clean
+
+    if item:
+        item.title = final_title[:510]
+        if series_title and series_title not in ('Unorganized', 'Unknown'):
+            item.authors = series_title[:510]
+            item.publisher = series_title[:250]
+        if year and not item.pub_date:
+            try:
+                item.pub_date = datetime.date(int(year), 1, 1)
+            except Exception:
+                pass
+        if thumb_data_uri:
+            item.cover_thumbnail = thumb_data_uri
+        if not item.description:
+            yr_str = f" ({year})" if year else ""
+            cat_str = bucket if bucket != 'Adult Periodicals' else 'Archive-X Periodical'
+            item.description = f"{series_title}{yr_str} — {cat_str}. Issue file: {file_loc.file_name}."
+        item.item_type = 'MAGAZINE'
+        item.save()
+
+    # Record in processed_files as SUCCESS so it shows as Enriched
+    tags = []
+    if bucket and bucket != 'Adult Periodicals':
+        tags.append(bucket)
+    if series_title and series_title not in ('Unorganized', 'Unknown') and series_title not in tags:
+        tags.append(series_title)
+
+    db_path = _get_scanner_db_path()
+    if is_postgres_scanner_enabled() or db_path.exists():
+        try:
+            conn = connect_scanner_db(db_path, timeout=10.0)
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            upd_json = json.dumps({
+                'title': item.title if item else final_title,
+                'authors': [item.authors if item else series_title],
+                'publisher': item.publisher if item else series_title,
+                'published_date': str(item.pub_date) if (item and item.pub_date) else (f"{year}-01-01" if year else None),
+                'description': item.description if item else '',
+                'subjects': tags,
+                'source': f"OrgPeriodicals ({info.get('method') or 'Page-1 Cover'})",
+            })
+            conn.execute(
+                """
+                INSERT INTO processed_files (
+                    file_path, file_name, file_ext, file_size, file_mtime, file_sha256,
+                    status, isbn, title, author, match_confidence, updated_metadata_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'SUCCESS', '', ?, ?, 1.0, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    status = 'SUCCESS',
+                    title = excluded.title,
+                    author = excluded.author,
+                    match_confidence = 1.0,
+                    updated_metadata_json = excluded.updated_metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    new_db_path,
+                    file_loc.file_name,
+                    Path(file_loc.file_name).suffix.lower(),
+                    file_loc.file_size or 0,
+                    0.0,
+                    file_loc.file_hash or '',
+                    item.title if item else final_title,
+                    item.authors if item else series_title,
+                    upd_json,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    if isinstance(_ENRICHED_PATHS_CACHE.get('paths_set'), set):
+        _ENRICHED_PATHS_CACHE['paths_set'].add(new_db_path)
+    if item and isinstance(_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set'), set):
+        _ENRICHED_PATHS_CACHE['enriched_item_ids_set'].add(item.id)
+    if item and isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set'), set):
+        _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'].add(item.id)
+
+    return {
+        'ok': True,
+        'status': 'SUCCESS',
+        'already_enriched': False,
+        'message': f"Enriched periodical (Page-1 cover & series '{series_title}'): {item.title if item else final_title}",
+        'item_id': str(item.id) if item else '',
+        'file_id': str(file_loc.id),
+        'title': item.title if item else final_title,
+        'authors': item.authors if item else series_title,
+        'publisher': item.publisher if item else series_title,
+        'pub_date': str(item.pub_date) if (item and item.pub_date) else '',
+        'description': item.description if item else '',
+        'cover_url': (item.cover_thumbnail if item else thumb_data_uri) or (f'/mylibrary/opds/cover/{item.id}.jpg' if item else ''),
+        'tags': tags,
+        'top_folder': compute_top_folder_from_path(new_db_path),
+        'periodical_series': compute_periodical_series_from_path(new_db_path),
+    }
+
+
+def retag_catalog_items_to_folder(
+    item_ids: List[str],
+    file_ids: List[str],
+    target_folder: str,
+    vx_unlocked: bool = False,
+    series_name: str = '',
+) -> Dict[str, Any]:
+    """
+    Physically move one or more books/periodicals into `target_folder` and atomically update
+    `FileLocation.file_path`, `processed_files.file_path`, and `file_states.filepath` so the
+    virtual PostgreSQL folder tag updates immediately without touching embedded file metadata.
+    Supports:
+      - Any existing or new top-level folder under `/books/<target_folder>` (e.g. `Role Playing Games`, `Mathematics`)
+      - `Periodicals` (organizes into `/periodicals/<Series>/<Year>/` via OrgPeriodicals)
+      - `Archive-X` (organizes into `/xAdult/<Series>/<Year>/` via OrgPeriodicals; requires `vx_unlocked=True`)
+    """
+    clean_target = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', (target_folder or '').strip()).strip(' .')
+    if not clean_target or clean_target in ('..', '.', 'Computer Book Code', 'File Formats', 'toMags'):
+        return {'ok': False, 'error': f'Invalid target folder name: {target_folder!r}'}
+    if clean_target.lower() in ('archive-x', 'xadult', 'xtoadult') and not vx_unlocked:
+        return {'ok': False, 'error': 'Target folder not permitted in current session.'}
+    if clean_target.lower() in ('archive-x', 'xadult', 'xtoadult'):
+        clean_target = 'Archive-X'
+    elif clean_target.lower() == 'periodicals':
+        clean_target = 'Periodicals'
+
+    locs_to_move: List[FileLocation] = []
+    seen_loc_ids = set()
+    if file_ids:
+        for fl in FileLocation.objects.select_related('catalog_item').filter(id__in=file_ids):
+            if fl.id not in seen_loc_ids:
+                seen_loc_ids.add(fl.id)
+                locs_to_move.append(fl)
+    if item_ids:
+        for fl in FileLocation.objects.select_related('catalog_item').filter(catalog_item_id__in=item_ids):
+            if fl.id not in seen_loc_ids:
+                seen_loc_ids.add(fl.id)
+                locs_to_move.append(fl)
+
+    if not locs_to_move:
+        return {'ok': False, 'error': 'No matching files found to move.'}
+
+    books_root = _get_books_dir()
+    periodicals_root = _get_periodicals_dir()
+    xadult_root = _get_xadult_dir()
+
+    moved_items: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    affected_items: Dict[str, CatalogItem] = {}
+
+    db_path = _get_scanner_db_path()
+    conn = None
+    if is_postgres_scanner_enabled() or db_path.exists():
+        try:
+            conn = connect_scanner_db(db_path, timeout=10.0)
+        except Exception:
+            conn = None
+
+    try:
+        from scanner.orgperiodicals.organizer import identify_and_organize_periodical, get_unique_target_path
+
+        for fl in locs_to_move:
+            old_fp = str(fl.file_path or '')
+            phys = _resolve_physical_file_path(old_fp)
+            if not phys or not phys.exists():
+                errors.append(f"File not found on disk: {fl.file_name}")
+                continue
+
+            old_parent = phys.parent
+            new_phys: Optional[Path] = None
+            new_db_path: str = ''
+
+            if clean_target in ('Periodicals', 'Archive-X'):
+                force_adult = (clean_target == 'Archive-X')
+                dest_root = xadult_root if force_adult else periodicals_root
+                if not dest_root:
+                    errors.append(f"{clean_target} directory is not mounted.")
+                    continue
+                clean_series_override = re.sub(r'[\\/:*?"<>|]+', '', (series_name or '').strip()).strip('. ')
+                if clean_series_override:
+                    yr_m = re.search(r'\b(19\d{2}|20\d{2})\b', phys.name)
+                    yr_str = yr_m.group(1) if yr_m else (
+                        str(fl.catalog_item.pub_date.year)
+                        if (fl.catalog_item and fl.catalog_item.pub_date)
+                        else 'Unknown'
+                    )
+                    target_dir = dest_root / clean_series_override / yr_str
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    dest_cand = get_unique_target_path(target_dir, phys.name, source_path=phys)
+                    if dest_cand is None:
+                        phys.unlink(missing_ok=True)
+                        new_phys = target_dir / phys.name
+                    elif dest_cand.resolve() != phys.resolve():
+                        shutil.move(str(phys), str(dest_cand))
+                        new_phys = dest_cand
+                    else:
+                        new_phys = phys
+                else:
+                    org_res = identify_and_organize_periodical(
+                        file_path=phys,
+                        periodicals_dir=periodicals_root,
+                        adult_dir=xadult_root,
+                        move_file=True,
+                        force_adult=force_adult,
+                    )
+                    new_phys = org_res.get('target_path')
+                if not new_phys or not new_phys.exists():
+                    errors.append(f"Failed to organize {fl.file_name} into {clean_target}")
+                    continue
+                rel = new_phys.resolve().relative_to(dest_root.resolve())
+                prefix = '/xAdult' if force_adult else '/periodicals'
+                new_db_path = f"{prefix}/{str(rel).replace(chr(92), '/')}"
+            else:
+                if not books_root:
+                    errors.append("/books directory is not mounted.")
+                    continue
+                from scanner.orgbooks.organizer import move_file_with_splitfiles
+                target_folder_dir = books_root / clean_target
+                use_shard = True
+                if target_folder_dir.exists():
+                    try:
+                        subdirs = [e.name for _, e in zip(range(30), os.scandir(target_folder_dir)) if e.is_dir() and not e.name.startswith('.')]
+                        if not subdirs:
+                            files_in_root = [e.name for _, e in zip(range(10), os.scandir(target_folder_dir)) if e.is_file() and not e.name.startswith('.')]
+                            if files_in_root:
+                                use_shard = False
+                    except Exception:
+                        pass
+                new_phys, _ = move_file_with_splitfiles(
+                    source_path=phys,
+                    dest_parent_dir=target_folder_dir,
+                    leading=3,
+                    use_shard=use_shard,
+                )
+                rel = new_phys.resolve().relative_to(books_root.resolve())
+                new_db_path = f"/books/{str(rel).replace(chr(92), '/')}"
+
+            # Clean up empty source shard directory if it became empty
+            try:
+                if old_parent.exists() and old_parent != books_root and old_parent != periodicals_root and old_parent != xadult_root:
+                    if not any(old_parent.iterdir()):
+                        old_parent.rmdir()
+            except Exception:
+                pass
+
+            # Update FileLocation in PostgreSQL BookDB
+            fl.file_path = new_db_path
+            fl.file_name = new_phys.name
+            fl.save(update_fields=['file_path', 'file_name'])
+
+            # Update processed_files and file_states paths so enrichment history stays linked
+            if conn is not None and old_fp != new_db_path:
+                try:
+                    conn.execute("DELETE FROM processed_files WHERE file_path = ?", (new_db_path,))
+                    conn.execute(
+                        "UPDATE processed_files SET file_path = ?, file_name = ? WHERE file_path = ?",
+                        (new_db_path, new_phys.name, old_fp),
+                    )
+                    conn.execute("DELETE FROM file_states WHERE filepath = ?", (new_db_path,))
+                    conn.execute(
+                        "UPDATE file_states SET filepath = ? WHERE filepath = ?",
+                        (new_db_path, old_fp),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+
+            if fl.catalog_item:
+                affected_items[str(fl.catalog_item.id)] = fl.catalog_item
+
+            moved_items.append({
+                'file_id': str(fl.id),
+                'item_id': str(fl.catalog_item_id),
+                'old_path': old_fp,
+                'new_path': new_db_path,
+                'top_folder': compute_top_folder_from_path(new_db_path),
+                'periodical_series': compute_periodical_series_from_path(new_db_path),
+            })
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Update CatalogItem.item_type if moved into or out of Periodicals / Archive-X
+    for item_obj in affected_items.values():
+        desired_type = 'MAGAZINE' if clean_target in ('Periodicals', 'Archive-X') else 'BOOK'
+        was_mag = (item_obj.item_type == 'MAGAZINE')
+        if item_obj.item_type != desired_type:
+            item_obj.item_type = desired_type
+            item_obj.save(update_fields=['item_type', 'updated_at'])
+        if clean_target in ('Periodicals', 'Archive-X'):
+            # Also trigger fast Page-1 cover & series metadata enrichment if missing cover
+            first_fl = item_obj.files.first()
+            if first_fl:
+                try:
+                    enrich_periodical_file_location_on_demand(first_fl)
+                except Exception:
+                    pass
+        elif was_mag and desired_type == 'BOOK':
+            # Moved from Periodicals to a Books folder: clear dummy periodical description/author & enrich as Book in bg
+            if item_obj.description and ('Periodical Issue' in item_obj.description or '— Periodicals.' in item_obj.description):
+                item_obj.description = ''
+            if item_obj.authors and len(item_obj.authors) <= 3:
+                item_obj.authors = 'Unknown Author'
+            item_obj.save(update_fields=['description', 'authors', 'updated_at'])
+            first_fl = item_obj.files.first()
+            if first_fl:
+                import threading
+                threading.Thread(
+                    target=lambda fl_id=str(first_fl.id): (
+                        enrich_file_location_on_demand(
+                            FileLocation.objects.select_related('catalog_item').filter(id=fl_id).first(),
+                            force=True,
+                            skip_mag_check=True,
+                        )
+                    ),
+                    daemon=True,
+                ).start()
+
+    invalidate_virtual_folders_cache()
+
+    return {
+        'ok': len(moved_items) > 0,
+        'target_folder': clean_target,
+        'moved_count': len(moved_items),
+        'moved_files': len(moved_items),
+        'moved_items': len(affected_items),
+        'moved': moved_items,
+        'errors': errors,
+        'message': f"Moved {len(moved_items)} file(s) across {len(affected_items)} item(s) to '{clean_target}'." + (f" ({len(errors)} errors)" if errors else ""),
     }
 
 
@@ -3986,6 +5742,7 @@ def enrich_file_location_on_demand(
     force_ai_vision: bool = False,
     review_only: bool = False,
     ai_describe_no_match: bool = False,
+    skip_mag_check: bool = False,
 ) -> Dict[str, Any]:
     """
     Perform on-demand `epubmeta` enrichment for a single `FileLocation` (`.epub` or `.pdf`):
@@ -3997,6 +5754,8 @@ def enrich_file_location_on_demand(
     """
     import sys
 
+    if not file_loc:
+        return {'ok': False, 'status': 'NOT_FOUND', 'message': 'FileLocation not found.'}
     item = file_loc.catalog_item
     phys_path = _resolve_physical_file_path(file_loc.file_path)
     if not phys_path or not phys_path.exists():
@@ -4016,9 +5775,19 @@ def enrich_file_location_on_demand(
             'message': f'On-demand enrichment supports {", ".join(ENRICHABLE_EXTENSIONS)} files (got {ext}).',
         }
 
-    # Pre-check if this file is a Magazine / Periodical BEFORE querying external book providers!
+    # Route Magazines / Periodicals directly to the Page-1 Cover + OrgPeriodicals enrichment pipeline!
+    top_fld_now = compute_top_folder_from_path(file_loc.file_path)
+    if (item and item.item_type == 'MAGAZINE') or top_fld_now in ('Periodicals', 'Archive-X'):
+        return enrich_periodical_file_location_on_demand(
+            file_loc,
+            force_cover=force_ai_vision,
+            hint_title=hint_title,
+            hint_authors=hint_authors,
+        )
+
+    # Pre-check if this file in /books is a Magazine / Periodical BEFORE querying external book providers!
     # This prevents magazines like IT.Week.Magazine.February.13.2006.PDF.eBook-YYePG.pdf from matching "So B. It".
-    pre_mag_pub = detect_magazine_publication(
+    pre_mag_pub = None if skip_mag_check else detect_magazine_publication(
         title=hint_title or (item.title if item else ''),
         authors=hint_authors or (item.authors if item else ''),
         isbn=hint_isbn or (item.isbn if item else '') or '',
@@ -4416,6 +6185,7 @@ def enrich_file_location_on_demand(
         and len(str(item.cover_thumbnail)) > 500
         and not is_partial_banner_cover(item.cover_thumbnail)
         and not has_excessive_white_border_cover(item.cover_thumbnail)
+        and not is_hybrid_or_white_page_cover(item.cover_thumbnail)
         and not (ext == '.pdf' and is_legacy_scanner_pdf_cover(item.cover_thumbnail))
     ):
         orig_cover_thumb = item.cover_thumbnail
@@ -4465,6 +6235,8 @@ def enrich_file_location_on_demand(
         _record_in_memory_diag(file_loc, phys_path, fail_status, msg)
 
         ai_gen_desc = ''
+        ai_title_fixed = ''
+        ai_authors_fixed = ''
         use_auto_ai_desc = bool(ai_describe_no_match or epubmeta_cfg.get('ai_describe_no_match', False))
         if (
             use_auto_ai_desc
@@ -4485,6 +6257,16 @@ def enrich_file_location_on_demand(
                 if ai_desc_res.get('ok') and ai_desc_res.get('description'):
                     ai_gen_desc = str(ai_desc_res['description']).strip()
                     orig_meta_payload['candidate_description'] = ai_gen_desc
+                    if ai_desc_res.get('suggested_title'):
+                        orig_meta_payload['candidate_title'] = ai_desc_res['suggested_title']
+                    if ai_desc_res.get('suggested_authors'):
+                        orig_meta_payload['candidate_authors'] = ai_desc_res['suggested_authors']
+                    if ai_desc_res.get('suggested_publisher'):
+                        orig_meta_payload['candidate_publisher'] = ai_desc_res['suggested_publisher']
+                    if ai_desc_res.get('title_updated') and ai_desc_res.get('title'):
+                        ai_title_fixed = str(ai_desc_res['title']).strip()
+                    if ai_desc_res.get('authors_updated') and ai_desc_res.get('authors'):
+                        ai_authors_fixed = str(ai_desc_res['authors']).strip()
                     msg = f'{msg} (✨ AI description generated from book content)'
             except Exception:
                 pass
@@ -4499,6 +6281,12 @@ def enrich_file_location_on_demand(
         if ai_gen_desc:
             out_no_match['ai_generated_description'] = ai_gen_desc
             out_no_match['description'] = ai_gen_desc
+        if ai_title_fixed:
+            out_no_match['title'] = ai_title_fixed
+            out_no_match['title_updated'] = True
+        if ai_authors_fixed:
+            out_no_match['authors'] = ai_authors_fixed
+            out_no_match['authors_updated'] = True
         return out_no_match
 
     orig_title_has_alnum = bool(re.search(r'[A-Za-z0-9]{3,}', (item.title or '')))
@@ -4667,7 +6455,16 @@ def enrich_file_location_on_demand(
 
     orig_payload_issue = classify_cover_image(orig_cover_thumb, item.cover_image_url or '')
     orig_is_low_color = bool(orig_cover_thumb and cover_colorfulness_score(orig_cover_thumb) < 0.055)
-    if not getattr(target_meta, 'cover_url', None) and (orig_payload_issue in ('missing', 'text_only') or orig_is_low_color):
+    orig_is_white_page = bool(
+        orig_cover_thumb
+        and (
+            has_excessive_white_border_cover(orig_cover_thumb)
+            or is_hybrid_or_white_page_cover(orig_cover_thumb)
+        )
+    )
+    if not getattr(target_meta, 'cover_url', None) and (
+        orig_payload_issue in ('missing', 'text_only') or orig_is_low_color or orig_is_white_page
+    ):
         try:
             from epubmeta.matcher import score_title as _cov_score_title
             web_covs = search_book_covers_web(
@@ -4684,7 +6481,7 @@ def enrich_file_location_on_demand(
                 if wc.get('same_cover_in_color'):
                     target_meta.cover_url = cu
                     break
-                if orig_payload_issue in ('missing', 'text_only') and 'Web Image Search' not in wc_src:
+                if (orig_payload_issue in ('missing', 'text_only') or orig_is_white_page) and 'Web Image Search' not in wc_src:
                     if 'Open Library (ISBN)' in wc_src or _cov_score_title(wc.get('title') or '', target_meta.title or '') >= 0.65:
                         target_meta.cover_url = cu
                         break
@@ -5218,9 +7015,11 @@ def revert_catalog_item_enrichment(
         clean_stem = re.sub(r'\.(?:PDF|EPUB|MOBI|AZW3|eBook)(?:-[A-Za-z0-9]+)?$', '', clean_stem, flags=re.I)
         clean_stem = clean_stem.replace('.', ' ').strip()
 
-    # If orig_title is missing, untitled, or an internal 3-digit PDF production slug (like 000_ITWK_..., 001_ITWK_...) when clean_stem has real words, prefer clean_stem
-    if not orig_title or re.match(r'^(?:untitled\b|\d{3}_[A-Za-z0-9_]+$|0{2,}\d*[_-])', orig_title.strip(), re.I):
-        if clean_stem:
+    # If orig_title is missing, untitled, or a raw DTP/filename production slug (like 6289_biofuels_rd5.indd or 000_ITWK_...) when clean_stem has real words, prefer clean_stem
+    if not orig_title or _is_raw_filename_or_junk_title(orig_title.strip()):
+        if clean_stem and not _is_raw_filename_or_junk_title(clean_stem):
+            orig_title = clean_stem
+        elif not orig_title and clean_stem:
             orig_title = clean_stem
     if orig_author and orig_author.strip().lower() in ('asura01', 'yyepg', 'admin', 'administrator'):
         orig_author = ''
@@ -5334,6 +7133,7 @@ def extract_original_cover_for_item(item: Optional[CatalogItem], ignore_backup: 
                 orig_bkp
                 and not is_partial_banner_cover(orig_bkp)
                 and not has_excessive_white_border_cover(orig_bkp)
+                and not is_hybrid_or_white_page_cover(orig_bkp)
                 and not (is_pdf_item and is_legacy_scanner_pdf_cover(orig_bkp))
             ):
                 return orig_bkp
@@ -5389,6 +7189,15 @@ def extract_original_cover_for_item(item: Optional[CatalogItem], ignore_backup: 
                     doc = pymupdf.open(phys)
                     try:
                         if (not doc.needs_pass or doc.authenticate("")) and len(doc) > 0:
+                            try:
+                                from epubmeta.readers.pdf import extract_pdf_page0_cover_bytes
+                                emb_pdf_cov = extract_pdf_page0_cover_bytes(doc)
+                                if emb_pdf_cov and len(emb_pdf_cov) >= 1000:
+                                    thumb = generate_cover_thumbnail(emb_pdf_cov, max_size=(360, 540))
+                                    if thumb and thumb.startswith('data:image') and not is_partial_banner_cover(thumb):
+                                        return thumb
+                            except Exception:
+                                pass
                             pix = doc[0].get_pixmap(dpi=150)
                             png_bytes = pix.tobytes("png")
                             if png_bytes and len(png_bytes) >= 1000:
@@ -5758,9 +7567,11 @@ def search_book_covers_web(
                 and ci.cover_thumbnail
                 and (
                     is_partial_banner_cover(ci.cover_thumbnail)
+                    or is_hybrid_or_white_page_cover(ci.cover_thumbnail)
                     or (_item_has_pdf_file(ci) and is_legacy_scanner_pdf_cover(ci.cover_thumbnail))
                 )
                 and not is_partial_banner_cover(orig_cov)
+                and not is_hybrid_or_white_page_cover(orig_cov)
             ):
                 try:
                     ci.cover_thumbnail = orig_cov
@@ -6112,10 +7923,17 @@ def _snapshot_original_cover_if_needed(item: Optional[CatalogItem]) -> Optional[
         return existing.get('original_cover') or ''
 
     _ensure_generated_covers_table()
-    # Snapshot the item's existing cover_thumbnail in BookDB first so reverting restores the exact byte-for-byte original cover
+    # Snapshot the item's existing cover_thumbnail in BookDB first so reverting restores the exact byte-for-byte original cover,
+    # unless it is a partial banner, excessive white-border page, or hybrid white PDF text page (in which case try fresh extraction first).
     orig_thumb = ''
-    if item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image'):
-        orig_thumb = str(item.cover_thumbnail)
+    existing_thumb = str(item.cover_thumbnail) if (item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image')) else ''
+    if (
+        existing_thumb
+        and not is_partial_banner_cover(existing_thumb)
+        and not has_excessive_white_border_cover(existing_thumb)
+        and not is_hybrid_or_white_page_cover(existing_thumb)
+    ):
+        orig_thumb = existing_thumb
 
     if not orig_thumb:
         try:
@@ -6144,6 +7962,8 @@ def _snapshot_original_cover_if_needed(item: Optional[CatalogItem]) -> Optional[
                     pass
         except Exception:
             pass
+    if not orig_thumb and existing_thumb:
+        orig_thumb = existing_thumb
     orig_url = str(item.cover_image_url or '').strip()
 
     try:
@@ -6419,11 +8239,52 @@ def _is_raw_filename_or_junk_title(t: str) -> bool:
     s = (t or '').strip()
     if not s or len(s) < 3:
         return True
-    if re.search(r'\.(?:pdf|epub|mobi|azw3?|djvu|cbz|cbr|txt|doc|docx|ppt|pptx)$', s, flags=re.I):
+    if re.search(
+        r'\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|pdf|epub|mobi|azw3?|djvu|cbz|cbr|txt|doc|docx|ppt|pptx|xls|xlsx|ps|eps|dvi|tex|rtf|tmp|html?|xml)$',
+        s,
+        flags=re.I,
+    ):
+        return True
+    if re.match(
+        r'^(?:microsoft\s+word\s*-\s*|untitled\b|document\s*\d*$|slide\s*\d+$|layout\s*\d+$|ffirs\b|ftoc\b|fbetw\b)',
+        s,
+        flags=re.I,
+    ):
         return True
     if '_' in s or re.match(r'^\d+[\-_][a-z0-9]+', s, flags=re.I):
         return True
     if re.match(r'^(?:97[89]\d{10}|\d{9}[\dXx])\b', s):
+        return True
+    return False
+
+
+def _is_placeholder_or_junk_author(a: str) -> bool:
+    s = (a or '').strip()
+    if not s:
+        return True
+    low = s.lower()
+    if low in (
+        'unknown',
+        'unknown author',
+        'unknown authors',
+        'n/a',
+        'na',
+        'none',
+        'null',
+        'anonymous',
+        'admin',
+        'administrator',
+        'user',
+        'owner',
+        'author',
+        'mstory',
+        '..',
+        '.',
+    ):
+        return True
+    if re.search(r'\b(?:adobe\s+indesign|acrobat\s+distiller|quarkxpress|microsoft\s+word|pdftk|ghostscript)\b', low):
+        return True
+    if _is_raw_filename_or_junk_title(s):
         return True
     return False
 
@@ -7412,7 +9273,7 @@ def generate_book_cover_for_item(
     }
 
 
-def generate_ai_description_from_content(
+def generate_ai_title_author_from_content(
     item_or_id: Any = None,
     file_id: str = '',
     file_path: str = '',
@@ -7423,14 +9284,51 @@ def generate_ai_description_from_content(
     apply_immediately: bool = True,
 ) -> Dict[str, Any]:
     """
-    On-demand AI Content-Based Description Generator (`POST /mylibrary/api/ai-description/`):
-    Designed specifically for books that have no description and resulted in a No Match
-    (`NOT_FOUND` / `NO_ISBN`), reading the actual content inside the EPUB/PDF/ebook file
-    (front matter, table of contents, preface, opening chapters, and/or rendered page images
-    for scanned PDFs) and synthesizing a grounded 2-4 sentence synopsis via Gemini AI.
+    On-demand AI Title & Author Generator (`POST /mylibrary/api/ai-title-author/`):
+    Inspects the book's cover & front-matter page images, extracted text, and filename/folder clues
+    via Gemini AI to extract and save clean human-readable Title, Author(s), Publisher, Published Year, and ISBN.
+    """
+    return generate_ai_description_from_content(
+        item_or_id=item_or_id,
+        file_id=file_id,
+        file_path=file_path,
+        isbn=isbn,
+        title=title,
+        authors=authors,
+        publisher=publisher,
+        apply_immediately=apply_immediately,
+        mode='title_author',
+    )
+
+
+def generate_ai_description_from_content(
+    item_or_id: Any = None,
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    publisher: str = '',
+    apply_immediately: bool = True,
+    mode: str = 'description',
+) -> Dict[str, Any]:
+    """
+    On-demand AI Content-Based Metadata & Description Generator
+    (`POST /mylibrary/api/ai-description/` and `POST /mylibrary/api/ai-title-author/`):
+    - `mode='description'` (default): Generates a grounded 2-4 sentence synopsis from the book's actual content,
+      and automatically repairs clearly broken/junk titles (e.g. `*.indd`) or `Unknown Author`.
+    - `mode='title_author'`: Inspects cover/title-page images, front-matter text, and filename clues to extract
+      and save the accurate Title, Author(s), and Publisher without overwriting an existing synopsis.
+    - `mode='all'`: Extracts and saves Title, Author(s), Publisher, AND Description together.
     """
     import base64
+    import datetime as _dt
     import sys
+
+    norm_mode = (mode or 'description').strip().lower()
+    if norm_mode not in ('description', 'title_author', 'all'):
+        norm_mode = 'description'
+    focus_title_author = norm_mode in ('title_author', 'all')
 
     item: Optional[CatalogItem] = None
     if item_or_id or file_id or file_path or isbn or title:
@@ -7500,12 +9398,20 @@ def generate_ai_description_from_content(
         }
     gemini_model = epubmeta_cfg.get('gemini_model') or os.environ.get('GEMINI_MODEL') or 'gemini-3.5-flash-lite'
 
-    # 1. Extract rich content text (front matter + TOC + opening chapters/pages) and fallback page images for scanned PDFs
+    # 1. Extract rich content text (front matter + TOC + opening chapters/pages) AND front/cover page images
     content_chunks: List[str] = []
     page_images_bytes: List[bytes] = []
     emb_title = ''
     emb_authors = ''
     emb_pub = ''
+
+    cur_item_title = (title or (item.title if item else '') or '').strip()
+    cur_item_authors = (authors or (item.authors if item else '') or '').strip()
+    want_cover_images = (
+        focus_title_author
+        or _is_raw_filename_or_junk_title(cur_item_title)
+        or _is_placeholder_or_junk_author(cur_item_authors)
+    )
 
     try:
         from epubmeta.readers import get_reader
@@ -7525,7 +9431,7 @@ def generate_ai_description_from_content(
                     content_chunks.append(ft.strip())
             except Exception:
                 pass
-            if sum(len(c) for c in content_chunks) < 350:
+            if want_cover_images or sum(len(c) for c in content_chunks) < 350:
                 try:
                     imgs = rdr.extract_front_images(max_pages=4) or []
                     for im_b in imgs[:4]:
@@ -7536,30 +9442,31 @@ def generate_ai_description_from_content(
     except Exception:
         pass
 
-    # Supplement with deeper chapter/page sampling via preview/PyMuPDF if front matter was short (e.g. cover/copyright only)
+    # Supplement with deeper chapter/page sampling via preview/PyMuPDF if front matter was short or cover images needed
     combined_text = '\n\n'.join(content_chunks).strip()
-    if len(combined_text) < 1200 and phys_path.suffix.lower() == '.pdf':
+    if phys_path.suffix.lower() == '.pdf' and (len(combined_text) < 1200 or (want_cover_images and not page_images_bytes)):
         try:
             import pymupdf
             doc = pymupdf.open(phys_path)
             try:
                 n_pages = len(doc)
-                sample_indices = list(range(min(18, n_pages)))
-                if n_pages > 20:
-                    mid = min(n_pages - 1, max(18, n_pages // 5))
-                    sample_indices.extend(range(mid, min(n_pages, mid + 4)))
-                extra_txt: List[str] = []
-                seen_idx = set()
-                for pi in sample_indices:
-                    if pi in seen_idx:
-                        continue
-                    seen_idx.add(pi)
-                    ptxt = (doc[pi].get_text() or '').strip()
-                    if ptxt:
-                        extra_txt.append(f'[Page {pi + 1}]\n{ptxt[:2500]}')
-                if extra_txt:
-                    combined_text = '\n\n'.join(extra_txt).strip()
-                if len(combined_text) < 350 and not page_images_bytes:
+                if len(combined_text) < 1200:
+                    sample_indices = list(range(min(18, n_pages)))
+                    if n_pages > 20:
+                        mid = min(n_pages - 1, max(18, n_pages // 5))
+                        sample_indices.extend(range(mid, min(n_pages, mid + 4)))
+                    extra_txt: List[str] = []
+                    seen_idx = set()
+                    for pi in sample_indices:
+                        if pi in seen_idx:
+                            continue
+                        seen_idx.add(pi)
+                        ptxt = (doc[pi].get_text() or '').strip()
+                        if ptxt:
+                            extra_txt.append(f'[Page {pi + 1}]\n{ptxt[:2500]}')
+                    if extra_txt:
+                        combined_text = '\n\n'.join(extra_txt).strip()
+                if (want_cover_images or len(combined_text) < 350) and not page_images_bytes:
                     for pi in range(min(4, n_pages)):
                         pix = doc[pi].get_pixmap(dpi=120)
                         page_images_bytes.append(pix.tobytes('png'))
@@ -7567,14 +9474,14 @@ def generate_ai_description_from_content(
                 doc.close()
         except Exception:
             pass
-    elif len(combined_text) < 800:
+    elif len(combined_text) < 800 or (want_cover_images and not page_images_bytes):
         try:
             prev = extract_book_preview_data(file_path=raw_path or str(phys_path), item_id=str(item.id) if item else None)
             if prev.get('ok'):
                 p_texts = [f"[{p.get('label', 'Section')}]\n{str(p.get('text') or '').strip()}" for p in (prev.get('pages') or []) if str(p.get('text') or '').strip()]
                 if p_texts and len('\n\n'.join(p_texts)) > len(combined_text):
                     combined_text = '\n\n'.join(p_texts)
-                if len(combined_text) < 350 and not page_images_bytes:
+                if (want_cover_images or len(combined_text) < 350) and not page_images_bytes:
                     for im_obj in (prev.get('images') or [])[:4]:
                         d_uri = str(im_obj.get('data_uri') or '')
                         if d_uri.startswith('data:image') and ',' in d_uri:
@@ -7582,7 +9489,14 @@ def generate_ai_description_from_content(
         except Exception:
             pass
 
-    if not combined_text.strip() and not page_images_bytes:
+    # If item already has a stored cover thumbnail data URI and no page images were extracted yet, include it for title/author vision!
+    if want_cover_images and not page_images_bytes and item and (item.cover_thumbnail or '').startswith('data:image') and ',' in (item.cover_thumbnail or ''):
+        try:
+            page_images_bytes.append(base64.b64decode(item.cover_thumbnail.split(',', 1)[1]))
+        except Exception:
+            pass
+
+    if not combined_text.strip() and not page_images_bytes and not focus_title_author:
         return {
             'ok': False,
             'error': f'Could not extract readable text or page images from {phys_path.name} to summarize.',
@@ -7605,6 +9519,19 @@ def generate_ai_description_from_content(
     ai_parsed: Dict[str, Any] = {}
     last_ai_err = ''
 
+    def _has_needed_ai_fields(d: Dict[str, Any]) -> bool:
+        if not isinstance(d, dict):
+            return False
+        if norm_mode == 'title_author':
+            t_cand = str(d.get('title') or '').strip()
+            a_cand = d.get('authors') or []
+            if isinstance(a_cand, str):
+                a_cand = [x.strip() for x in a_cand.split(',') if x.strip()]
+            has_good_t = bool(t_cand and not _is_raw_filename_or_junk_title(t_cand))
+            has_good_a = any(not _is_placeholder_or_junk_author(str(x)) for x in a_cand)
+            return has_good_t or has_good_a
+        return bool(str(d.get('description') or '').strip())
+
     # 2. Try GeminiBookExtractor first (tracks daily AI token usage in scanner_state.db)
     tracker = None
     try:
@@ -7623,46 +9550,75 @@ def generate_ai_description_from_content(
             batch_mode=False,
         )
         if hasattr(extractor, 'generate_description_from_content'):
-            ai_parsed = extractor.generate_description_from_content(
-                text=combined_text[:16000] if combined_text else None,
-                images=page_images_bytes[:4] if page_images_bytes else None,
-                title=eff_title,
-                authors=eff_authors,
-                publisher=eff_pub,
-                file_path_hint=rel_hint,
-            ) or {}
+            try:
+                ai_parsed = extractor.generate_description_from_content(
+                    text=combined_text[:16000] if combined_text else None,
+                    images=page_images_bytes[:4] if page_images_bytes else None,
+                    title=eff_title,
+                    authors=eff_authors,
+                    publisher=eff_pub,
+                    file_path_hint=rel_hint,
+                    focus_title_author=focus_title_author,
+                ) or {}
+            except TypeError:
+                ai_parsed = extractor.generate_description_from_content(
+                    text=combined_text[:16000] if combined_text else None,
+                    images=page_images_bytes[:4] if page_images_bytes else None,
+                    title=eff_title,
+                    authors=eff_authors,
+                    publisher=eff_pub,
+                    file_path_hint=rel_hint,
+                ) or {}
     except Exception as ext_err:
         last_ai_err = str(ext_err)
 
     # 3. Direct Gemini REST fallback across candidate models (works even if google-genai SDK is absent in web container)
-    if not (ai_parsed.get('description') or '').strip():
+    if not _has_needed_ai_fields(ai_parsed):
         try:
             import requests
-            prompt_text = (
-                "You are an expert literary and technical book cataloger. "
-                "This book/document did not match external ISBN catalogs and currently has no description. "
-                "Carefully read the provided actual book content (front matter, table of contents, preface, "
-                "introduction, opening chapters, and/or rendered page images) along with the file clues below, "
-                "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content.\n\n"
-                f"Current Title: {eff_title}\n"
-                f"Current Author(s): {eff_authors}\n"
-                f"Current Publisher: {eff_pub}\n"
-                f"Collection / Folder: {folder_name}\n"
-                f"File Path: {rel_hint}\n\n"
-            )
+            if focus_title_author:
+                prompt_text = (
+                    "You are an expert literary, academic, and technical book cataloger. "
+                    "The user is fixing a book/document whose stored Title or Author is wrong, missing, or a raw DTP/filename slug (such as '*.indd', 'Untitled', or 'Unknown Author'). "
+                    "Carefully inspect the rendered cover/title/copyright page images, extracted front-matter text, and file path/filename clues below to determine the exact, clean human-readable Title, Author(s), Publisher, Published Year, and ISBN.\n\n"
+                    f"File Name: {phys_path.name}\n"
+                    f"File Path: {rel_hint}\n"
+                    f"Collection / Folder: {folder_name}\n"
+                    f"Current Stored Title (potentially wrong/junk — verify against cover & content): {eff_title}\n"
+                    f"Current Stored Author(s) (potentially wrong/missing — verify against cover & content): {eff_authors}\n"
+                    f"Current Publisher: {eff_pub}\n\n"
+                )
+            else:
+                prompt_text = (
+                    "You are an expert literary and technical book cataloger. "
+                    "This book/document did not match external ISBN catalogs and currently has no description. "
+                    "Carefully read the provided actual book content (front matter, table of contents, preface, "
+                    "introduction, opening chapters, and/or rendered page images) along with the file clues below, "
+                    "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content, "
+                    "along with its clean human-readable title and author(s).\n\n"
+                    f"File Name: {phys_path.name}\n"
+                    f"File Path: {rel_hint}\n"
+                    f"Collection / Folder: {folder_name}\n"
+                    f"Current Title: {eff_title}\n"
+                    f"Current Author(s): {eff_authors}\n"
+                    f"Current Publisher: {eff_pub}\n\n"
+                )
             if combined_text.strip():
                 prompt_text += f"--- EXTRACTED BOOK CONTENT ---\n{combined_text[:15000]}\n--- END CONTENT ---\n\n"
             prompt_text += (
                 "Respond ONLY with a valid JSON object with these keys:\n"
                 "{\n"
+                '  "title": "clean human-readable title (include concise subtitle with \': \' when prominent on cover/title page), else null",\n'
+                '  "authors": ["First Last", ...],\n'
+                '  "publisher": "publisher or issuing organization if identifiable, else null",\n'
+                '  "published_year": "4-digit publication year if stated on copyright/title page, else null",\n'
+                '  "isbn": "ISBN-13 or ISBN-10 digits if printed in front matter, else null",\n'
                 '  "description": "2-4 sentence informative synopsis based strictly on the document content",\n'
-                '  "title": "clean human-readable title if identifiable from content, else null",\n'
-                '  "authors": ["author 1", ...],\n'
-                '  "publisher": "publisher or organization if identifiable, else null",\n'
                 '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
                 "}\n"
-                "Rules: Base the description directly on the actual content inside the book. "
-                "Never output generic filler like 'This PDF document contains pages.' Keep it 2-4 sentences (40-110 words)."
+                "Rules: Never output raw filenames, DTP production slugs (like '*.indd', '*.qxd', 'Microsoft Word - ...'), or 'Unknown Author'. "
+                "Format person authors in 'First Last' order (using full names from cover/title page when filename only has surnames; if corporate/institutional with no named person author, use the authoring organization). "
+                "Base any description directly on the actual content inside the book (40-110 words, 2-4 sentences)."
             )
             parts_payload: List[Dict[str, Any]] = [{'text': prompt_text}]
             for im_b in page_images_bytes[:4]:
@@ -7682,9 +9638,9 @@ def generate_ai_description_from_content(
                     url,
                     json={
                         'contents': [{'parts': parts_payload}],
-                        'generationConfig': {'temperature': 0.35, 'maxOutputTokens': 700},
+                        'generationConfig': {'temperature': 0.25 if focus_title_author else 0.35, 'maxOutputTokens': 750},
                     },
-                    timeout=18.0,
+                    timeout=20.0,
                 )
                 if resp.status_code == 200:
                     resp_json = resp.json()
@@ -7694,7 +9650,7 @@ def generate_ai_description_from_content(
                     m_json = re.search(r'\{.*\}', cand_text, re.S)
                     if m_json:
                         parsed_obj = json.loads(m_json.group(0))
-                        if isinstance(parsed_obj, dict) and parsed_obj.get('description'):
+                        if isinstance(parsed_obj, dict) and _has_needed_ai_fields(parsed_obj):
                             ai_parsed = parsed_obj
                             if tracker and hasattr(tracker, 'record_ai_usage'):
                                 try:
@@ -7713,16 +9669,39 @@ def generate_ai_description_from_content(
         except Exception as rest_err:
             last_ai_err = str(rest_err)
 
-    # 4. Fallback if Gemini API is unreachable: synthesize a clean 2-4 sentence synopsis
-    #    strictly from THIS book's own extracted Preface / Introduction / opening prose.
-    if not (ai_parsed.get('description') or '').strip() and combined_text.strip():
+    # 4a. Fallback for Title / Author / Publisher if Gemini API is unreachable: parse filename + front-matter lines
+    if not (ai_parsed.get('title') or '').strip() or _is_raw_filename_or_junk_title(str(ai_parsed.get('title') or '')):
+        try:
+            from epubmeta.filename_parser import parse_filename
+            fn_clues = parse_filename(phys_path) or {}
+            fn_t = str(fn_clues.get('title') or '').strip()
+            fn_a = str(fn_clues.get('author') or '').strip()
+            if fn_t and not _is_raw_filename_or_junk_title(fn_t):
+                ai_parsed['title'] = fn_t
+            if fn_a and not _is_placeholder_or_junk_author(fn_a) and not ai_parsed.get('authors'):
+                ai_parsed['authors'] = [fn_a]
+        except Exception:
+            pass
+        # Also extract trailing `(Publisher)` from filename stem if present, e.g. `Title Authors (World Resources Institute).pdf`
+        stem_clean = phys_path.stem.strip()
+        m_paren_pub = re.match(r'^(.+?)\s*\(([^()]{3,80})\)\s*$', stem_clean)
+        if m_paren_pub:
+            lead_part = m_paren_pub.group(1).strip()
+            paren_part = m_paren_pub.group(2).strip()
+            if not ai_parsed.get('publisher') and not re.fullmatch(r'\d{4}', paren_part):
+                ai_parsed['publisher'] = paren_part
+            if (not ai_parsed.get('title') or ai_parsed.get('title') == stem_clean) and not _is_raw_filename_or_junk_title(lead_part):
+                ai_parsed['title'] = lead_part
+
+    # 4b. Fallback for Description if Gemini API is unreachable: synthesize a clean 2-4 sentence synopsis
+    #     strictly from THIS book's own extracted Preface / Introduction / opening prose.
+    if norm_mode != 'title_author' and not (ai_parsed.get('description') or '').strip() and combined_text.strip():
         raw_lines = [ln.strip() for ln in combined_text.splitlines()]
         noise_re = re.compile(
             r'^(?:\[Page\s+\d+\]|\[Section.*\]|page\s+\d+|table of contents|contents|copyright|all rights reserved|'
             r'isbn[\s:-]|printed in|published by|library of congress|www\.|http://|https://|\d+\s*$)',
             re.I,
         )
-        # Look for Preface / Introduction / Abstract / Overview / About This Book section first
         prose_paras: List[str] = []
         cur_buf: List[str] = []
         in_intro_sec = False
@@ -7743,7 +9722,6 @@ def generate_ai_description_from_content(
                 continue
             if noise_re.match(ln):
                 continue
-            # Skip TOC leader lines like "Chapter 1 ..... 12"
             if re.search(r'\.{3,}\s*\d+$', ln) or re.match(r'^(?:chapter|part|section)\s+\d+\b', ln, re.I):
                 continue
             cur_buf.append(ln)
@@ -7763,29 +9741,125 @@ def generate_ai_description_from_content(
                 ai_parsed['description'] = best_text[:650]
 
     gen_desc = _strip_html(str(ai_parsed.get('description') or '').strip())
-    if not gen_desc:
-        return {
-            'ok': False,
-            'error': f'Gemini AI could not generate a description from book content ({last_ai_err or "empty response"}).',
-        }
-
     sugg_title = str(ai_parsed.get('title') or '').strip()
+    if _is_raw_filename_or_junk_title(sugg_title):
+        sugg_title = ''
+
     raw_sugg_authors = ai_parsed.get('authors') or []
     if isinstance(raw_sugg_authors, str):
         raw_sugg_authors = [a.strip() for a in raw_sugg_authors.split(',') if a.strip()]
-    sugg_authors = format_normalized_authors_str(raw_sugg_authors) or ', '.join(str(a).strip() for a in raw_sugg_authors if str(a).strip())
+    clean_author_list = [str(a).strip() for a in raw_sugg_authors if str(a).strip() and not _is_placeholder_or_junk_author(str(a).strip())]
+    sugg_authors = (
+        format_normalized_authors_str(clean_author_list)
+        or ', '.join(clean_author_list)
+    ).strip()
+    if _is_placeholder_or_junk_author(sugg_authors):
+        sugg_authors = ''
+
     sugg_pub = str(ai_parsed.get('publisher') or '').strip()
+    if sugg_pub.lower() in ('null', 'none', 'unknown', 'n/a'):
+        sugg_pub = ''
+    sugg_year_raw = str(ai_parsed.get('published_year') or '').strip()
+    m_yr = re.search(r'\b(1[89]\d{2}|20\d{2})\b', sugg_year_raw)
+    sugg_year = m_yr.group(1) if m_yr else ''
+
+    sugg_isbn = ''
+    for ik in ('isbn13', 'isbn10', 'isbn'):
+        iv = str(ai_parsed.get(ik) or '').strip()
+        if iv:
+            try:
+                from epubmeta.isbn.validator import normalize_isbn
+                i13, i10 = normalize_isbn(iv)
+                if i13 or i10:
+                    sugg_isbn = i13 or i10 or ''
+                    break
+            except Exception:
+                digits_only = re.sub(r'[^0-9Xx]', '', iv)
+                if len(digits_only) in (10, 13):
+                    sugg_isbn = digits_only.upper()
+                    break
+
     sugg_subjects = [str(s).strip() for s in (ai_parsed.get('subjects') or []) if str(s).strip()][:8]
 
-    applied = False
-    if apply_immediately and item is not None:
-        item.description = gen_desc[:4000]
-        upd_fields = ['description', 'updated_at']
-        item.save(update_fields=upd_fields)
-        applied = True
+    if norm_mode == 'title_author':
+        if not sugg_title and not sugg_authors:
+            return {
+                'ok': False,
+                'error': f'Gemini AI could not determine a clean Title or Author from this file ({last_ai_err or "no identifiable title/author"}).',
+            }
+    else:
+        if not gen_desc:
+            return {
+                'ok': False,
+                'error': f'Gemini AI could not generate a description from book content ({last_ai_err or "empty response"}).',
+            }
 
-    # Also update candidate_metadata_json / updated_metadata_json in scanner_state.db if tracked,
-    # while preserving orig_description untouched so Revert to Original remains non-destructive.
+    applied = False
+    title_updated = False
+    authors_updated = False
+    publisher_updated = False
+    desc_updated = False
+    merged_item_ids: List[str] = []
+
+    if apply_immediately and item is not None:
+        upd_fields: List[str] = []
+        if norm_mode in ('description', 'all') and gen_desc:
+            item.description = gen_desc[:4000]
+            upd_fields.append('description')
+            desc_updated = True
+        elif norm_mode == 'title_author' and gen_desc and not (item.description or '').strip():
+            # Bonus: fill empty description if item had none at all, never overwriting an existing synopsis!
+            item.description = gen_desc[:4000]
+            upd_fields.append('description')
+            desc_updated = True
+
+        # Update Title when explicitly requested (`title_author` / `all`) OR when current stored title is junk (e.g. `6289_biofuels_rd5.indd`)
+        if sugg_title and (focus_title_author or _is_raw_filename_or_junk_title(item.title or '')):
+            if sugg_title[:490] != (item.title or ''):
+                item.title = sugg_title[:490]
+                upd_fields.append('title')
+                title_updated = True
+
+        # Update Authors when explicitly requested (`title_author` / `all`) OR when current stored author is placeholder/junk (`Unknown Author`)
+        if sugg_authors and (focus_title_author or _is_placeholder_or_junk_author(item.authors or '')):
+            if sugg_authors[:490] != (item.authors or ''):
+                item.authors = sugg_authors[:490]
+                upd_fields.append('authors')
+                authors_updated = True
+
+        if sugg_pub and (focus_title_author or not (item.publisher or '').strip()):
+            if sugg_pub[:250] != (item.publisher or ''):
+                item.publisher = sugg_pub[:250]
+                upd_fields.append('publisher')
+                publisher_updated = True
+
+        if sugg_year and not item.pub_date:
+            try:
+                item.pub_date = _dt.date(int(sugg_year), 1, 1)
+                upd_fields.append('pub_date')
+            except Exception:
+                pass
+
+        if sugg_isbn and not (item.isbn or '').strip():
+            item.isbn = sugg_isbn[:32]
+            upd_fields.append('isbn')
+
+        if upd_fields:
+            upd_fields.append('updated_at')
+            item.save(update_fields=list(dict.fromkeys(upd_fields)))
+            applied = True
+            if title_updated or authors_updated:
+                try:
+                    clear_book_bad_metadata(item.id)
+                except Exception:
+                    pass
+                try:
+                    merged_item_ids = merge_duplicate_catalog_items_for_item(item) or []
+                except Exception:
+                    merged_item_ids = []
+
+    # Also update processed_files in scanner_state.db if tracked, preserving orig_title / orig_author / orig_description
+    # untouched so Revert to Original remains 100% non-destructive.
     if apply_immediately:
         try:
             db_path = _get_scanner_db_path()
@@ -7811,7 +9885,7 @@ def generate_ai_description_from_content(
                     cur = conn.cursor()
                     placeholders = ','.join(['?'] * len(path_variants))
                     cur.execute(
-                        f"SELECT file_path, candidate_metadata_json, updated_metadata_json FROM processed_files WHERE file_path IN ({placeholders})",
+                        f"SELECT file_path, title, author, orig_title, orig_author, candidate_metadata_json, updated_metadata_json FROM processed_files WHERE file_path IN ({placeholders})",
                         tuple(path_variants),
                     )
                     rows = cur.fetchall()
@@ -7826,13 +9900,52 @@ def generate_ai_description_from_content(
                             upd_d = json.loads(r['updated_metadata_json'] or '{}') if r['updated_metadata_json'] else {}
                         except Exception:
                             upd_d = {}
-                        cand_d['description'] = gen_desc
+
+                        if sugg_title:
+                            cand_d['title'] = sugg_title
+                        if clean_author_list:
+                            cand_d['authors'] = clean_author_list
+                        if sugg_pub:
+                            cand_d['publisher'] = sugg_pub
+                        if gen_desc:
+                            cand_d['description'] = gen_desc
                         if sugg_subjects and not cand_d.get('subjects'):
                             cand_d['subjects'] = sugg_subjects
-                        upd_d['description'] = gen_desc
+
+                        if desc_updated and gen_desc:
+                            upd_d['description'] = gen_desc
+                        if title_updated and sugg_title:
+                            upd_d['title'] = sugg_title
+                        if authors_updated and clean_author_list:
+                            upd_d['authors'] = clean_author_list
+                        if publisher_updated and sugg_pub:
+                            upd_d['publisher'] = sugg_pub
+
+                        new_db_title = sugg_title if title_updated else r['title']
+                        new_db_author = sugg_authors if authors_updated else r['author']
+                        pres_orig_title = r['orig_title'] if r['orig_title'] else r['title']
+                        pres_orig_author = r['orig_author'] if r['orig_author'] else r['author']
+
                         cur.execute(
-                            "UPDATE processed_files SET candidate_metadata_json = ?, updated_metadata_json = ? WHERE file_path = ?",
-                            (json.dumps(cand_d, ensure_ascii=False), json.dumps(upd_d, ensure_ascii=False), r['file_path']),
+                            """
+                            UPDATE processed_files
+                            SET title = ?,
+                                author = ?,
+                                orig_title = COALESCE(orig_title, ?),
+                                orig_author = COALESCE(orig_author, ?),
+                                candidate_metadata_json = ?,
+                                updated_metadata_json = ?
+                            WHERE file_path = ?
+                            """,
+                            (
+                                new_db_title,
+                                new_db_author,
+                                pres_orig_title,
+                                pres_orig_author,
+                                json.dumps(cand_d, ensure_ascii=False),
+                                json.dumps(upd_d, ensure_ascii=False),
+                                r['file_path'],
+                            ),
                         )
                     if rows:
                         conn.commit()
@@ -7843,21 +9956,41 @@ def generate_ai_description_from_content(
             if isinstance(diag_map, dict):
                 for pv in path_variants:
                     if pv in diag_map and isinstance(diag_map[pv], dict):
-                        diag_map[pv]['candidate_description'] = gen_desc
+                        if gen_desc:
+                            diag_map[pv]['candidate_description'] = gen_desc
+                        if sugg_title:
+                            diag_map[pv]['candidate_title'] = sugg_title
+                        if sugg_authors:
+                            diag_map[pv]['candidate_authors'] = sugg_authors
+                        if sugg_pub:
+                            diag_map[pv]['candidate_publisher'] = sugg_pub
         except Exception:
             pass
 
     return {
         'ok': True,
+        'mode': norm_mode,
         'item_id': str(item.id) if item else '',
         'file_id': str(resolved_loc.id) if resolved_loc else file_id,
         'file_path': raw_path or str(phys_path),
-        'description': gen_desc,
+        'title': (item.title if item else (sugg_title or eff_title)),
+        'authors': (item.authors if item else (sugg_authors or eff_authors)),
+        'publisher': (item.publisher if item else (sugg_pub or eff_pub)),
+        'pub_date': str(item.pub_date) if (item and item.pub_date) else sugg_year,
+        'isbn': (item.isbn if item else (sugg_isbn or isbn)),
+        'description': (item.description if (item and not gen_desc) else gen_desc),
         'suggested_title': sugg_title,
         'suggested_authors': sugg_authors,
         'suggested_publisher': sugg_pub,
+        'suggested_year': sugg_year,
+        'suggested_isbn': sugg_isbn,
         'subjects': sugg_subjects,
         'applied': applied,
+        'title_updated': title_updated,
+        'authors_updated': authors_updated,
+        'publisher_updated': publisher_updated,
+        'description_updated': desc_updated,
+        'merged_item_ids': [str(mid) for mid in merged_item_ids],
         'source': 'ai-content',
     }
 
@@ -8546,6 +10679,72 @@ def is_legacy_scanner_pdf_cover(cover_data_or_bytes: Any) -> bool:
     return False
 
 
+def is_hybrid_or_white_page_cover(cover_data_or_bytes: Any) -> bool:
+    """
+    Return True if `cover_data_or_bytes` is a rendered mostly-white document/jacket/prologue PDF page
+    (e.g., a small embedded cover thumbnail in a corner/top half with synopsis/prologue text across a
+    white sheet), rather than a full-bleed or graphic book cover.
+    """
+    raw_bytes = _decode_cover_bytes(cover_data_or_bytes)
+    if not raw_bytes or len(raw_bytes) < 400:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw_bytes)) as im:
+            w, h = im.size
+            if w <= 0 or h <= 0:
+                return False
+            rgb = im.convert('RGB').resize((100, 140), Image.Resampling.BILINEAR)
+            px = list(rgb.getdata())
+        n = len(px)
+        if n != 14000:
+            return False
+        bdr_white = 0
+        bdr_tot = 0
+        tot_white = 0
+        top_white = 0
+        top_col = 0
+        top_tot = 63 * 100
+        bot_white = 0
+        bot_col = 0
+        bot_tot = (140 - 77) * 100
+        for idx, (r, g, b) in enumerate(px):
+            ry = idx // 100
+            cx = idx % 100
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            sp = mx - mn
+            is_w = (mn >= 225 and sp <= 18)
+            is_c = (sp >= 26 and mx >= 35)
+            if is_w:
+                tot_white += 1
+            if ry < 9 or ry >= 131 or cx < 7 or cx >= 93:
+                bdr_tot += 1
+                if is_w:
+                    bdr_white += 1
+            if ry < 63:
+                if is_w:
+                    top_white += 1
+                if is_c:
+                    top_col += 1
+            elif ry >= 77:
+                if is_w:
+                    bot_white += 1
+                if is_c:
+                    bot_col += 1
+        if bdr_tot <= 0 or (bdr_white / float(bdr_tot)) < 0.88:
+            return False
+        if (tot_white / float(n)) < 0.55:
+            return False
+        plain_top = (top_white / float(top_tot)) >= 0.80 and (top_col / float(top_tot)) <= 0.035
+        plain_bot = (bot_white / float(bot_tot)) >= 0.80 and (bot_col / float(bot_tot)) <= 0.035
+        return bool(plain_top or plain_bot)
+    except Exception:
+        return False
+
+
 def should_prefer_candidate_cover(orig_cover: Any, cand_cover: Any) -> bool:
     """
     Return True if `cand_cover` should be preferred over `orig_cover`:
@@ -8553,7 +10752,8 @@ def should_prefer_candidate_cover(orig_cover: Any, cand_cover: Any) -> bool:
       2. `orig_cover` is a partial top-of-cover banner/square slice (`is_partial_banner_cover`) and `cand_cover` is not, OR
       3. `orig_cover` is a legacy `200x300` `pypdf` `first_page.images[0]` thumbnail (missing overlaid Page 1 text) and `cand_cover` is not, OR
       4. `orig_cover` has an excessive white page border around a small cover and `cand_cover` does not, OR
-      5. `cand_cover` has the same cover layout/design as `orig_cover` AND is in color
+      5. `orig_cover` is a mostly-white hybrid document/prologue page render (`is_hybrid_or_white_page_cover`) and `cand_cover` is not, OR
+      6. `cand_cover` has the same cover layout/design as `orig_cover` AND is in color
          while `orig_cover` is grayscale/monochrome or significantly less colorful.
     """
     if classify_cover_image(cand_cover) is not None:
@@ -8565,6 +10765,13 @@ def should_prefer_candidate_cover(orig_cover: Any, cand_cover: Any) -> bool:
     if is_legacy_scanner_pdf_cover(orig_cover) and not is_legacy_scanner_pdf_cover(cand_cover):
         return True
     if has_excessive_white_border_cover(orig_cover) and not has_excessive_white_border_cover(cand_cover):
+        return True
+    if (
+        is_hybrid_or_white_page_cover(orig_cover)
+        and not is_hybrid_or_white_page_cover(cand_cover)
+        and not has_excessive_white_border_cover(cand_cover)
+        and not is_partial_banner_cover(cand_cover)
+    ):
         return True
     orig_col = cover_colorfulness_score(orig_cover)
     cand_col = cover_colorfulness_score(cand_cover)

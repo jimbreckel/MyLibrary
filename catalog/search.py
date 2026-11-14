@@ -2,7 +2,64 @@ import datetime
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from django.db.models import Case, F, IntegerField, Q, Value, When
-from .models import CatalogItem, FileLocation
+from django.db.models.expressions import RawSQL
+from .models import CatalogItem, FileLocation, exclude_vx_restricted_queryset
+
+
+def build_top_folder_q_filter(folders: List[str], vx_unlocked: bool = False) -> Q:
+    """
+    Build an indexed Q filter on `CatalogItem` matching one or more virtual top-level folders
+    using PostgreSQL's `idx_filelocation_top_folder_lower` functional index.
+    """
+    clean_folders = [
+        str(f).strip().lower()
+        for f in (folders or [])
+        if str(f or '').strip() and (vx_unlocked or str(f).strip().lower() != 'archive-x')
+    ]
+    if not clean_folders:
+        return Q()
+    placeholders = ', '.join(['%s'] * len(clean_folders))
+    return Q(
+        id__in=RawSQL(
+            f"SELECT catalog_item_id FROM catalog_filelocation WHERE LOWER(catalog_top_folder(file_path)) IN ({placeholders})",
+            clean_folders,
+        )
+    )
+
+
+def build_periodical_series_q_filter(series_names: List[str]) -> Q:
+    """
+    Build an indexed Q filter on `CatalogItem` matching one or more periodical series/publications
+    using PostgreSQL's `idx_filelocation_periodical_series` functional index + `authors` index,
+    automatically expanding 'The X' <-> 'X' and CamelCase variants (e.g. 'TheWallStreetJournal').
+    """
+    clean_series = [str(s).strip() for s in (series_names or []) if str(s or '').strip()]
+    if not clean_series:
+        return Q()
+    expanded: List[str] = []
+    for s in clean_series:
+        spaced = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', s).strip()
+        base_variants = [s, spaced]
+        for bv in list(base_variants):
+            if bv.lower().startswith('the ') and len(bv) > 4:
+                base_variants.append(bv[4:].strip())
+            else:
+                base_variants.append(f"The {bv}")
+        for bv in list(base_variants):
+            no_space = re.sub(r'\s+', '', bv)
+            for cand in (bv, no_space):
+                if cand and cand not in expanded:
+                    expanded.append(cand)
+    placeholders = ', '.join(['%s'] * len(expanded))
+    return (
+        Q(
+            id__in=RawSQL(
+                f"SELECT catalog_item_id FROM catalog_filelocation WHERE catalog_periodical_series(file_path) IN ({placeholders})",
+                expanded,
+            )
+        )
+        | Q(item_type='MAGAZINE', authors__in=expanded)
+    )
 
 
 # Structured reference of all supported search keywords & operators for UI hints and autocomplete
@@ -675,8 +732,8 @@ def get_keyword_autocomplete_suggestions(query_string: str) -> List[Dict[str, st
         k_part, val_part = last_tok.split(':', 1)
         val_clean = val_part.strip('"\'').lower()
         try:
-            from .opds import get_enriched_tags_and_folders_index
-            f_counts = get_enriched_tags_and_folders_index().get('folder_counts') or []
+            from .opds import get_virtual_folders_summary
+            f_counts = get_virtual_folders_summary(vx_unlocked=False)
         except Exception:
             f_counts = []
         if not f_counts:
@@ -829,12 +886,27 @@ def perform_search(query_string, filters=None):
     Executes a high-performance search with keyword operator filtering on CatalogItem (1.15M+ rows)
     without expensive unindexed cross-table tsvector/trigram joins.
     """
-    queryset = CatalogItem.objects.prefetch_related('files')
+    vx_unlocked = bool((filters or {}).get('vx_unlocked', False))
+    queryset = exclude_vx_restricted_queryset(
+        CatalogItem.objects.prefetch_related('files'),
+        vx_unlocked=vx_unlocked,
+    )
 
-    # Apply explicit form/API type & format filters
+    # Apply explicit form/API type, format, folder & series filters
     item_types = list((filters or {}).get('item_type') or [])
     file_formats = list((filters or {}).get('file_format') or [])
+    explicit_folders = list((filters or {}).get('folders') or [])
+    explicit_series = list((filters or {}).get('series') or [])
     neg_file_formats: List[str] = []
+
+    if explicit_folders:
+        f_q = build_top_folder_q_filter(explicit_folders, vx_unlocked=vx_unlocked)
+        if f_q:
+            queryset = queryset.filter(f_q)
+    if explicit_series:
+        s_q = build_periodical_series_q_filter(explicit_series)
+        if s_q:
+            queryset = queryset.filter(s_q)
 
     parsed = parse_search_query(query_string or '')
 
@@ -918,29 +990,11 @@ def perform_search(query_string, filters=None):
             except Exception:
                 pass
         elif canon_field == 'category':
-            try:
-                from .opds import get_enriched_tags_and_folders_index
-                tags_idx = get_enriched_tags_and_folders_index()
-                fld_to_titles = tags_idx.get('folder_to_titles') or {}
-                matched_fld_titles: set = set()
-                val_low = val.lower()
-                exact_fld_name = val
-                for f_name, t_list in fld_to_titles.items():
-                    if f_name.lower() == val_low or val_low in f_name.lower():
-                        matched_fld_titles.update(t_list)
-                        if f_name.lower() == val_low:
-                            exact_fld_name = f_name
-                if matched_fld_titles:
-                    c_cond = Q(title__in=list(matched_fld_titles)[:4500])
-                    queryset = queryset.exclude(c_cond) if negated else queryset.filter(c_cond)
-                else:
-                    p_cond = (
-                        Q(files__file_path__istartswith=f'/books/{exact_fld_name}/')
-                        | Q(files__file_path__istartswith=f'/volume1/common/Media/Books/{exact_fld_name}/')
-                    )
-                    queryset = (queryset.exclude(p_cond) if negated else queryset.filter(p_cond)).distinct()
-            except Exception:
-                pass
+            f_q = build_top_folder_q_filter([val], vx_unlocked=vx_unlocked)
+            if f_q:
+                queryset = queryset.exclude(f_q) if negated else queryset.filter(f_q)
+            elif not negated:
+                queryset = queryset.none()
 
     if item_types:
         queryset = queryset.filter(item_type__in=item_types)

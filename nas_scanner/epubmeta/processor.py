@@ -172,16 +172,81 @@ def _are_covers_same_design_bytes(bytes_a: Optional[bytes], bytes_b: Optional[by
         return False, 0.0
 
 
+def _is_mostly_white_page_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
+    """
+    Return True if `raw_bytes` is a rendered white document/jacket/prologue page (e.g. a small inset
+    cover or box on a white PDF page with wide white borders and plain white/monochrome-text upper or lower half).
+    """
+    if not raw_bytes or len(raw_bytes) < 900:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        rgb = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        w, h = rgb.size
+        if w < 60 or h < 80:
+            return False
+        SW, SH = 100, 140
+        small = rgb.resize((SW, SH))
+        px = list(small.get_flattened_data() if hasattr(small, "get_flattened_data") else small.getdata())
+        n = len(px)
+        if not n:
+            return False
+
+        tot_white = bdr_tot = bdr_white = 0
+        top_tot = top_white = top_col = 0
+        bot_tot = bot_white = bot_col = 0
+        top_limit = int(SH * 0.45)
+        bot_start = int(SH * 0.55)
+
+        for idx, (r, g, b) in enumerate(px):
+            ry, cx = divmod(idx, SW)
+            mx = max(r, g, b)
+            mn = min(r, g, b)
+            is_w = mn >= 225 and (mx - mn) <= 18
+            is_c = (mx - mn) >= 26 and mx >= 35
+            if is_w:
+                tot_white += 1
+            if ry < 9 or ry >= (SH - 9) or cx < 7 or cx >= (SW - 7):
+                bdr_tot += 1
+                if is_w:
+                    bdr_white += 1
+            if ry < top_limit:
+                top_tot += 1
+                if is_w:
+                    top_white += 1
+                if is_c:
+                    top_col += 1
+            elif ry >= bot_start:
+                bot_tot += 1
+                if is_w:
+                    bot_white += 1
+                if is_c:
+                    bot_col += 1
+
+        if bdr_tot == 0 or (bdr_white / bdr_tot) < 0.88 or (tot_white / n) < 0.55:
+            return False
+        top_is_plain = top_tot > 0 and (top_white / top_tot) >= 0.80 and (top_col / top_tot) <= 0.035
+        bot_is_plain = bot_tot > 0 and (bot_white / bot_tot) >= 0.80 and (bot_col / bot_tot) <= 0.035
+        return bool(top_is_plain or bot_is_plain)
+    except Exception:
+        return False
+
+
 def _should_prefer_candidate_cover_bytes(orig_bytes: Optional[bytes], cand_bytes: Optional[bytes]) -> bool:
     """
     Return True if `cand_bytes` should replace `orig_bytes`:
       1. `orig_bytes` is missing or text-only and `cand_bytes` is a graphic cover, OR
-      2. `cand_bytes` is the same cover design as `orig_bytes` (or `orig_bytes` is B&W/grayscale)
+      2. `orig_bytes` is a mostly-white PDF document/jacket/prologue page render and `cand_bytes` is a clean cover, OR
+      3. `cand_bytes` is the same cover design as `orig_bytes` (or `orig_bytes` is B&W/grayscale)
          and `cand_bytes` is in color while `orig_bytes` has significantly lower color saturation.
     """
     if not cand_bytes or len(cand_bytes) < 1000 or _is_text_only_cover_bytes(cand_bytes):
         return False
     if not orig_bytes or len(orig_bytes) < 1000 or _is_text_only_cover_bytes(orig_bytes):
+        return True
+    if _is_mostly_white_page_cover_bytes(orig_bytes) and not _is_mostly_white_page_cover_bytes(cand_bytes):
         return True
     orig_col = _cover_colorfulness_score_bytes(orig_bytes)
     cand_col = _cover_colorfulness_score_bytes(cand_bytes)
