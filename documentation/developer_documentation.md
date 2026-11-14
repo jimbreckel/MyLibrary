@@ -109,13 +109,15 @@ MyLibrary/
    - Batch enrichment lookup for `calibre_moon_sync.py`. Matches Calibre books (`calibre_id`, `sha256`, `isbn`, `title`, `authors`, `file_name`) and Moon+ Reader cache filenames (`moon_filenames`) against `processed_files WHERE status = 'SUCCESS'`.
 9. **`GET | POST /mylibrary/api/wishlist/check/` (`WishlistCheckAPIView`)**
    - Batch & single-book lookup used by the Chrome Extension (`chrome_wishlist_extension/`). Accepts `{ books: [{ key, asin, isbn, pub_year, edition, title, author, wishlist_name }] }`, expands ISBN-10 ↔ ISBN-13, checks `CatalogItem` and `scanner_state.db`, enforces strict ISBN/ASIN/Publication Year/Edition/Subtitle conflict detection to prevent same-title multi-edition false positives, and returns `in_library`, `matches`, `other_editions`, and prebuilt Anna's Archive ISBN & Title search URLs.
-10. **`POST /mylibrary/api/interesting/toggle/` (`ToggleInterestingAPIView`) & `POST /mylibrary/api/bad-metadata/toggle/` (`ToggleBadMetadataAPIView`)**
+10. **`POST /mylibrary/api/interesting/` (`ToggleInterestingAPIView`) & `POST /mylibrary/api/bad-metadata/` (`ToggleBadMetadataAPIView`)**
     - Toggles `interesting_books` and `bad_metadata_books` state in `scanner_state.db` (`csrf_exempt`, `authentication_classes = []`).
 11. **`GET | POST /mylibrary/api/duplicates/` (`DuplicatesAPIView`)**
     - Scans and resolves duplicate enriched files of the same format and verified content, moving redundant copies safely to `/books_bad/duplicates/`.
-12. **`GET | POST /mylibrary/api/cover-search/` (`CoverSearchAPIView`) & `GET /mylibrary/api/suggest/?repair_covers=start|status`**
-    - Searches Web Images, Goodreads, Apple Books, Google Books, and Open Library for book covers (scoring full-color covers ahead of grayscale scans and auto-cropping white borders). `repair_covers=start` launches a background worker (`repair_stale_enriched_covers_without_user_override`) that scans and fixes enriched items with text-only covers or excessive white margins.
-13. **`GET | POST /mylibrary/api/book-preview/` (`BookPreviewAPIView`)**
+12. **`GET | POST /mylibrary/api/cover-search/` (`CoverSearchAPIView`), `POST /mylibrary/api/cover-apply/` (`CoverApplyAPIView`), `POST /mylibrary/api/cover-generate/` (`CoverGenerateAPIView`) & `GET /mylibrary/api/suggest/?repair_covers=start|status`**
+    - Searches Web Images, Goodreads, Apple Books, Google Books, and Open Library for book covers (scoring full-color covers ahead of grayscale scans and auto-cropping white borders), generates custom AI covers from book synopses/content (`CoverGenerateAPIView`), applies or reverts covers (`CoverApplyAPIView`), and auto-heals composite PDF covers (`is_partial_banner_cover`, `is_legacy_scanner_pdf_cover`). `repair_covers=start` launches a background worker (`repair_stale_enriched_covers_without_user_override`) that scans and fixes enriched items with text-only covers or excessive white margins.
+13. **`POST /mylibrary/api/ai-description/` (`AiDescriptionGenerateAPIView`)**
+    - Reads the actual front-matter text, table of contents, and opening pages of the book file on the NAS and uses `GeminiBookExtractor.generate_description_from_content()` to generate a factual 2–4 sentence synopsis, optionally persisting it directly to `BookDB` (`CatalogItem.description`) and `scanner_state.db` (`processed_files`).
+14. **`GET | POST /mylibrary/api/book-preview/` (`BookPreviewAPIView`)**
     - Extracts front-matter text, page renders, and detected ISBNs from EPUB/PDF files and supports Gemini AI Vision re-evaluation (`POST` with `action: "ai_vision_reevaluate"`).
 
 ### B. OPDS 1.2 & Calibre Content Server Endpoints (`catalog/opds.py`)
@@ -131,7 +133,7 @@ MyLibrary/
 - `GET /mylibrary/opds/authors/` (`OPDSAuthorsIndexView`) — A–Z author navigation & per-author acquisition feeds.
 - `GET /mylibrary/opds/formats/` (`OPDSFormatsView`) — Format navigation (`EPUB`, `PDF`, `MOBI`, `AZW3`, `MP3`, `M4B`).
 - `GET /mylibrary/opds/all/` (`OPDSAllFeedView`) — Full catalog A–Z acquisition feed.
-- `GET /mylibrary/opds/cover/<uuid>.jpg` (`OPDSCoverView`) — Cover image extraction & streaming.
+- `GET /mylibrary/opds/cover/<uuid>.jpg` (`OPDSCoverView`) — Cover image extraction & streaming with automatic on-the-fly self-healing for partial top-banner PDF covers (`is_partial_banner_cover`), legacy unrendered `pypdf` `first_page.images[0]` thumbnails (`is_legacy_scanner_pdf_cover`), and excessive white borders (`has_excessive_white_border_cover`).
 - `GET /mylibrary/opds/download/<file_id>/<filename>` (`OPDSDownloadFileView`) — Streams book with Calibre-normalized filename (`<Title> - <Author>.epub`) and auto-migrates matching `.po` and `.an` files in `/webdav/Apps/Books/.Moon+/Cache`.
 - `GET /mylibrary/opds/ajax/books`, `/mylibrary/opds/ajax/search`, `/mylibrary/opds/ajax/book/<uuid>` (`CalibreAjaxBooksView`) — Calibre Content Server JSON emulation.
 

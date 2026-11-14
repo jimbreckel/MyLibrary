@@ -1166,8 +1166,8 @@
             <div class="conv-modal-field full">
                 <label><i class="fa-solid fa-gauge-high"></i> 1. Status Dashboard, Enriched Duplicates, On-Demand Enrichment &amp; OPDS Server</label>
                 <div style="font-size:0.82rem; line-height:1.55; color:#cbd5e1;">
-                    • <strong>Time-Series Charts &amp; Mix-and-Match Review:</strong> Click any number on the <strong>epubmeta Enrichments</strong> card or <strong>Local Metadata Cache</strong> to view hourly/daily charts. Click any Explorer row to cherry-pick <strong>Before vs. After</strong> fields, open <strong>Preview Inside Book</strong> (with <em>AI Re-Evaluate from Image(s)</em>), or search covers with <strong>Find Covers</strong>.<br>
-                    • <strong>Web Catalog &amp; Duplicates Manager (<code>/mylibrary/</code> &amp; <code>/mylibrary/duplicates/</code>):</strong> Search with structured operators (<code>author:</code>, <code>title:</code>, <code>cat:</code>, <code>tag:</code>, <code>isbn:</code>, <code>format:</code>, <code>year:</code>, <code>is:enriched</code>, <code>is:interesting</code>, <code>missing:cover</code>), enrich books on demand (<strong>✨ Enrich Now</strong> / <strong>✨ Enrich Page</strong>), move periodicals to <code>/toMags</code>, and clean up duplicate enriched files safely.<br>
+                    • <strong>Time-Series Charts &amp; Mix-and-Match Review:</strong> Click any number on the <strong>epubmeta Enrichments</strong> card or <strong>Local Metadata Cache</strong> to view hourly/daily charts. Click any Explorer row to cherry-pick <strong>Before vs. After</strong> fields, click <strong>✨ AI Generate Description from Content</strong> to generate a synopsis from the book's actual pages, open <strong>Preview Inside Book</strong> (with <em>AI Re-Evaluate from Image(s)</em>), or search/generate covers with <strong>Find Covers</strong>.<br>
+                    • <strong>Web Catalog, Cover Self-Healing &amp; Duplicates Manager (<code>/mylibrary/</code> &amp; <code>/mylibrary/duplicates/</code>):</strong> Search with structured operators (<code>author:</code>, <code>title:</code>, <code>cat:</code>, <code>tag:</code>, <code>isbn:</code>, <code>format:</code>, <code>year:</code>, <code>is:enriched</code>, <code>is:interesting</code>, <code>missing:cover</code>), enrich books on demand (<strong>✨ Enrich Now</strong> / <strong>✨ Enrich Page</strong>), auto-heal partial top-banner or textless background PDF covers on the fly, move periodicals to <code>/toMags</code>, and clean up duplicate enriched files safely.<br>
                     • <strong>OPDS 1.2 &amp; Calibre Content Server (<code>/mylibrary/opds/?v=2</code>):</strong> Add <code>http://192.168.1.43:8080/mylibrary/opds/?v=2</code> in <strong>Moon+ Reader</strong>. Downloading any unenriched book automatically enriches it on the fly before streaming <code>&lt;Title&gt; - &lt;Author&gt;.epub</code> and migrating Moon+ WebDAV `.po`/`.an` bookmarks.
                 </div>
             </div>
@@ -1216,10 +1216,11 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                 <label><i class="fa-solid fa-code"></i> 5. OPDS &amp; REST API Endpoints</label>
                 <div style="font-size:0.74rem; line-height:1.55; color:#cbd5e1; font-family:monospace;">
                     POST /mylibrary/api/enrich/ (On-Demand Enrich)<br>
+                    POST /mylibrary/api/ai-description/ (AI Synopsis)<br>
                     POST /mylibrary/api/wishlist/check/ (Wishlist/Book Check)<br>
-                    POST /mylibrary/api/interesting/toggle/ (☆ Interesting)<br>
-                    POST /mylibrary/api/bad-metadata/toggle/ (⚑ Bad Meta)<br>
-                    GET|POST /mylibrary/api/cover-search/ (Find Cover)<br>
+                    POST /mylibrary/api/interesting/ (☆ Interesting)<br>
+                    POST /mylibrary/api/bad-metadata/ (⚑ Bad Meta)<br>
+                    GET|POST /mylibrary/api/cover-search/ &amp; /api/cover-generate/<br>
                     GET|POST /mylibrary/api/book-preview/ (Peek &amp; AI Vision)<br>
                     GET|POST /mylibrary/api/duplicates/ (Duplicates API)<br>
                     GET  /mylibrary/opds/?v=2 (OPDS 1.2 Root)<br>

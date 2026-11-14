@@ -2248,9 +2248,11 @@ def ensure_isolated_catalog_item_for_file(
 
         # Reset `item`'s cover_thumbnail and cover_image_url to `file_loc`'s own embedded cover
         # so `item` never retains a cover image that belonged to one of the unrelated siblings!
+        if hasattr(item, '_prefetched_objects_cache') and isinstance(item._prefetched_objects_cache, dict):
+            item._prefetched_objects_cache.pop('files', None)
         item.cover_image_url = None
         item.cover_thumbnail = None
-        emb_cov = extract_original_cover_for_item(item)
+        emb_cov = extract_original_cover_for_item(item, ignore_backup=True)
         if emb_cov and emb_cov.startswith('data:image'):
             item.cover_thumbnail = emb_cov
         item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
@@ -2804,8 +2806,10 @@ def _hydrate_catalog_item_for_single_file(item: CatalogItem, f_loc: FileLocation
         item.cover_thumbnail = ''
 
     # Always extract the actual embedded cover from `f_loc`'s physical file if `cover_thumbnail` is empty or belonged to another book
+    if hasattr(item, '_prefetched_objects_cache') and isinstance(item._prefetched_objects_cache, dict):
+        item._prefetched_objects_cache.pop('files', None)
     item.save()
-    emb_cov = extract_original_cover_for_item(item)
+    emb_cov = extract_original_cover_for_item(item, ignore_backup=True)
     if emb_cov and emb_cov.startswith('data:image'):
         item.cover_thumbnail = emb_cov
         item.save(update_fields=['cover_thumbnail', 'updated_at'])
@@ -4294,13 +4298,16 @@ def enrich_file_location_on_demand(
         }
 
     orig_cover_thumb = ''
+    user_has_custom_cover = False
+    try:
+        user_has_custom_cover = has_user_selected_cover(item.id)
+    except Exception:
+        user_has_custom_cover = False
     if (
-        item.cover_thumbnail
+        user_has_custom_cover
+        and item.cover_thumbnail
         and str(item.cover_thumbnail).startswith('data:image')
         and len(str(item.cover_thumbnail)) > 500
-        and not is_partial_banner_cover(item.cover_thumbnail)
-        and not has_excessive_white_border_cover(item.cover_thumbnail)
-        and not (ext == '.pdf' and is_legacy_scanner_pdf_cover(item.cover_thumbnail))
     ):
         orig_cover_thumb = item.cover_thumbnail
     if not orig_cover_thumb:
@@ -4311,9 +4318,19 @@ def enrich_file_location_on_demand(
                 orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
         except Exception:
             pass
+    if (
+        not orig_cover_thumb
+        and item.cover_thumbnail
+        and str(item.cover_thumbnail).startswith('data:image')
+        and len(str(item.cover_thumbnail)) > 500
+        and not is_partial_banner_cover(item.cover_thumbnail)
+        and not has_excessive_white_border_cover(item.cover_thumbnail)
+        and not (ext == '.pdf' and is_legacy_scanner_pdf_cover(item.cover_thumbnail))
+    ):
+        orig_cover_thumb = item.cover_thumbnail
     if not orig_cover_thumb:
         try:
-            extracted_orig = extract_original_cover_for_item(item)
+            extracted_orig = extract_original_cover_for_item(item, ignore_backup=True)
             if extracted_orig and str(extracted_orig).startswith('data:image'):
                 orig_cover_thumb = extracted_orig
         except Exception:
@@ -5242,6 +5259,8 @@ def extract_original_cover_for_item(item: Optional[CatalogItem], ignore_backup: 
                 return 2
             return 3
 
+        if hasattr(item, '_prefetched_objects_cache') and isinstance(item._prefetched_objects_cache, dict):
+            item._prefetched_objects_cache.pop('files', None)
         files_list = sorted(
             list(item.files.all()),
             key=lambda f: (
@@ -9837,6 +9856,8 @@ def _render_acquisition_feed(
 
         moon_info = getattr(item, 'moon_bookmark_info', None)
         # Sort physical files with largest/full edition first (and non-DRM/valid preferred)
+        if hasattr(item, '_prefetched_objects_cache') and isinstance(item._prefetched_objects_cache, dict):
+            item._prefetched_objects_cache.pop('files', None)
         files_list = sorted(
             list(item.files.all()),
             key=lambda f: (bool(f.has_drm), bool(f.is_invalid), -(f.file_size or 0)),
