@@ -24,11 +24,12 @@ JUNK_SUFFIXES = [
 ]
 
 
-# Internal DTP / Acrobat / Word production artifact titles (InDesign, Quark, PageMaker, FrameMaker, Word)
+# Internal DTP / Acrobat / Word production artifact titles (InDesign, Quark, PageMaker, FrameMaker, Word, Amazon image slugs)
 _GARBAGE_EMBEDDED_TITLE_RE = re.compile(
     r"^(?:"
     r"untitled\b|"
-    r".*\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|doc|docx|pdf|ps|eps|dvi|tex|rtf|tmp)$|"
+    r".*\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|doc|docx|pdf|ps|eps|dvi|tex|rtf|tmp|jpg|jpeg|png|gif|bmp|tif|tiff|webp)$|"
+    r".*(?:_SCLZZZZ|_SS\d{2,4}_|_SY\d{2,4}_|_SX\d{2,4}_).*|"
     r"\d{2,4}[_\-\s].*(?:ffirs|ftoc|fbetw|flast|fpref|c01|ch01|cover|front|final|title)|"
     r"0\d\s+cover\b|"
     r"cover\s+final|"
@@ -55,6 +56,8 @@ def is_garbage_embedded_author(raw_author: Optional[str]) -> bool:
     if not raw_author:
         return True
     s = str(raw_author).strip()
+    if len(s) <= 1:
+        return True
     low = s.lower()
     if low in (
         "", "unknown", "unknown author", "..", ".", "admin", "administrator",

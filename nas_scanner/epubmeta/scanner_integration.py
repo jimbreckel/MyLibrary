@@ -84,6 +84,7 @@ class EnrichmentSession:
         self.batch_size = int(self.cfg.get("batch_size", 20))
         self.batch_pause = float(self.cfg.get("batch_pause", 5.0))
         self.ai_batch_mode = bool(self.cfg.get("ai_batch_mode", True))
+        self.ai_describe_no_match = bool(self.cfg.get("ai_describe_no_match", False))
 
         self.allowed_exts: Set[str] = set(SUPPORTED_EXTENSIONS)
         if self.ignore_pdfs:
@@ -317,6 +318,7 @@ class EnrichmentSession:
             update_cover=self.update_cover,
             min_confidence=self.min_confidence,
             pdf_require_isbn=self.pdf_require_isbn,
+            ai_describe_no_match=self.ai_describe_no_match,
             scanner_bridge=self.scanner_bridge,
             mylibrary_client=self.mylibrary_client,
         )

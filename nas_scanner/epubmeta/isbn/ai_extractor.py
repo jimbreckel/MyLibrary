@@ -35,7 +35,8 @@ class GeminiBookExtractor:
         "- Clean hyphens and spaces from the ISBN numbers if possible.\n"
         "- Use any FILE PATH CONTEXT (such as series/game folder names like 'Classic Traveller') together with the cover/page image to determine the full accurate title, author/designer, and publisher.\n"
         "- If no explicit person author is printed on the cover, use the known designer/author of the work or the publisher/studio (e.g. 'Marc Miller' or 'Game Designers\\' Workshop').\n"
-        "- If you cannot determine a field, set it to null (or empty list for authors/subjects).\n"
+        "- Always provide a concise 1-3 sentence 'description' summarizing what this book, manual, rulebook, or document is about based on its title, subject, and front matter (do not leave 'description' null when the work is identifiable).\n"
+        "- If you cannot determine another field, set it to null (or empty list for authors/subjects).\n"
     )
 
     def __init__(
@@ -210,6 +211,7 @@ class GeminiBookExtractor:
         self,
         text: Optional[str] = None,
         images: Optional[List[bytes]] = None,
+        file_path_hint: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Analyze front-matter text and/or images to extract book metadata.
@@ -221,6 +223,8 @@ class GeminiBookExtractor:
             "authors": List[str],
             "publisher": Optional[str],
             "published_year": Optional[str],
+            "description": Optional[str],
+            "subjects": List[str],
         }
         """
         if not self.is_available:
@@ -228,6 +232,9 @@ class GeminiBookExtractor:
             return {}
 
         contents: List[Any] = [self.PROMPT_INSTRUCTIONS]
+
+        if file_path_hint:
+            contents.append(f"--- FILE PATH CONTEXT ---\n{file_path_hint}\n--- END FILE PATH ---")
 
         if text:
             # Send sample of front matter (limit to 12,000 characters to stay concise)
@@ -242,7 +249,7 @@ class GeminiBookExtractor:
                     types.Part.from_bytes(data=img_bytes, mime_type="image/png")
                 )
 
-        if len(contents) == 1:
+        if len(contents) == 1 or (len(contents) == 2 and file_path_hint and not text and not images):
             # Neither text nor images provided
             return {}
 
@@ -282,6 +289,104 @@ class GeminiBookExtractor:
                 logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED). Disabling AI for remaining files.")
             else:
                 logger.warning("Gemini AI extraction failed: %s", exc)
+            return {}
+
+    DESCRIPTION_PROMPT_INSTRUCTIONS = (
+        "You are an expert literary and technical book cataloger. "
+        "This book/document did not match external ISBN catalogs and currently has no description. "
+        "Carefully read the provided actual book content (front matter, table of contents, preface, "
+        "introduction, opening chapters, and/or rendered page images) along with any title/author/path clues, "
+        "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content.\n\n"
+        "Respond ONLY with a valid JSON object with these keys:\n"
+        "{\n"
+        '  "description": "2-4 sentence informative synopsis based strictly on the document content",\n'
+        '  "title": "clean human-readable title if identifiable from content, else null",\n'
+        '  "authors": ["author 1", ...],\n'
+        '  "publisher": "publisher or organization if identifiable, else null",\n'
+        '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
+        "}\n"
+        "Important rules:\n"
+        "- Base the description directly on the actual topics, chapters, narrative, or technical material inside the document.\n"
+        "- Do NOT invent plot points unsupported by the text, and do NOT write generic filler like 'This PDF document contains text.'\n"
+        "- Keep the description clear, natural, and catalog-ready (roughly 40 to 110 words, 2 to 4 sentences).\n"
+    )
+
+    def generate_description_from_content(
+        self,
+        text: Optional[str] = None,
+        images: Optional[List[bytes]] = None,
+        title: Optional[str] = None,
+        authors: Optional[str] = None,
+        publisher: Optional[str] = None,
+        file_path_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a catalog-ready 2-4 sentence description grounded in the book's actual content."""
+        if not self.is_available:
+            logger.debug("Gemini API key not configured; skipping AI content description.")
+            return {}
+
+        contents: List[Any] = [self.DESCRIPTION_PROMPT_INSTRUCTIONS]
+        meta_lines: List[str] = []
+        if title:
+            meta_lines.append(f"Current Title: {title}")
+        if authors:
+            meta_lines.append(f"Current Author(s): {authors}")
+        if publisher:
+            meta_lines.append(f"Current Publisher: {publisher}")
+        if file_path_hint:
+            meta_lines.append(f"File Path: {file_path_hint}")
+        if meta_lines:
+            contents.append("--- EXISTING METADATA / FILE CLUES ---\n" + "\n".join(meta_lines) + "\n--- END CLUES ---")
+
+        has_payload = False
+        if text:
+            snippet = text[:16000].strip()
+            if snippet:
+                contents.append(f"--- EXTRACTED BOOK CONTENT ---\n{snippet}\n--- END CONTENT ---")
+                has_payload = True
+
+        if images:
+            from google.genai import types
+            for img_bytes in images[:4]:
+                contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/png"))
+                has_payload = True
+
+        if not has_payload:
+            return {}
+
+        self._check_daily_budget()
+        if not self.is_available:
+            return {}
+
+        try:
+            client = self._get_client()
+            from google.genai import types
+            config = types.GenerateContentConfig(
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            )
+            response = client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+            self._record_call_usage(
+                response,
+                fallback_chars=len(text[:16000]) if text else 3500,
+            )
+            raw_text = response.text or ""
+            return self.parse_ai_response_text(raw_text)
+        except Exception as exc:
+            err_str = str(exc)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
+                if self.raise_on_quota:
+                    from ..exceptions import RateLimitExceededError
+                    retry_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+                    retry_sec = float(retry_match.group(1)) if retry_match else None
+                    raise RateLimitExceededError("Gemini AI", err_str, retry_after=retry_sec) from exc
+                self.quota_exhausted = True
+                logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED).")
+            else:
+                logger.warning("Gemini AI description generation failed: %s", exc)
             return {}
 
     def submit_queued_batch_jobs(self, chunk_size: int = 500) -> List[str]:

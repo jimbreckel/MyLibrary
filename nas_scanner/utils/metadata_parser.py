@@ -429,7 +429,19 @@ def get_epub_cover(filepath):
 
 
 def get_pdf_cover(filepath):
-    """Extract the first image on the first page of a PDF file, if available."""
+    """Render the full first page cover of a PDF file (avoiding partial header/banner XObject slices)."""
+    try:
+        import pymupdf
+        doc = pymupdf.open(filepath)
+        try:
+            if (not doc.needs_pass or doc.authenticate("")) and len(doc) > 0:
+                p0 = doc[0]
+                pix = p0.get_pixmap(dpi=150)
+                return pix.tobytes("png")
+        finally:
+            doc.close()
+    except Exception:
+        pass
     try:
         import pypdf
         with open(filepath, 'rb') as f:
@@ -443,7 +455,7 @@ def get_pdf_cover(filepath):
     return None
 
 
-def generate_thumbnail(image_bytes, max_size=(200, 300)):
+def generate_thumbnail(image_bytes, max_size=(360, 540)):
     """Generate a base64 encoded JPEG thumbnail from raw image bytes."""
     if not image_bytes or len(image_bytes) > 8 * 1024 * 1024:
         return None

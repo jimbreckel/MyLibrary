@@ -24,12 +24,13 @@ class OpenLibraryProvider(BaseProvider):
     def __init__(self, timeout: int = 15, raise_on_quota: bool = False):
         self.timeout = timeout
         self.raise_on_quota = raise_on_quota
+        self._disabled = False
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
 
     def _fetch_work_description(self, work_key: str) -> Optional[str]:
         """Fetch the full description from an Open Library work object."""
-        if not work_key:
+        if not work_key or self._disabled:
             return None
         url = f"https://openlibrary.org{work_key}.json"
         try:
@@ -42,11 +43,14 @@ class OpenLibraryProvider(BaseProvider):
                 elif isinstance(desc, dict) and "value" in desc:
                     return str(desc["value"]).strip()
         except Exception as e:
+            self._disabled = True
             logger.debug("Failed to fetch work description from %s: %s", url, e)
         return None
 
     def fetch_by_isbn(self, isbn: str) -> Optional[BookMetadata]:
         """Query Open Library by ISBN."""
+        if self._disabled:
+            return None
         cleaned = clean_isbn(isbn)
         if not cleaned:
             return None
@@ -64,11 +68,16 @@ class OpenLibraryProvider(BaseProvider):
             elif resp.status_code == 429 and self.raise_on_quota:
                 from ..exceptions import RateLimitExceededError
                 raise RateLimitExceededError("Open Library", "Open Library API rate limit reached (429)")
+            elif resp.status_code >= 500 or resp.status_code == 429:
+                self._disabled = True
+                return None
         except Exception as e:
             from ..exceptions import RateLimitExceededError
             if isinstance(e, RateLimitExceededError):
                 raise
+            self._disabled = True
             logger.warning("Open Library API request error: %s", e)
+            return None
 
         # 2. Query Search API to get work_key and fallback fields
         work_key = None
@@ -163,7 +172,7 @@ class OpenLibraryProvider(BaseProvider):
 
     def fetch_by_query(self, title: str, author: Optional[str] = None) -> Optional[BookMetadata]:
         """Search Open Library by title and author."""
-        if not title:
+        if not title or self._disabled:
             return None
         import re as _re
         fields_str = "key,title,subtitle,author_name,first_publish_year,isbn,publisher,subject,cover_i"
@@ -173,8 +182,11 @@ class OpenLibraryProvider(BaseProvider):
 
         try:
             resp = self.session.get("https://openlibrary.org/search.json", params=params, timeout=self.timeout)
+            if resp.status_code >= 500 or resp.status_code == 429:
+                self._disabled = True
+                return None
             docs = resp.json().get("docs", []) if resp.status_code == 200 else []
-            if not docs and (":" in title or " - " in title or (author and "." in author)):
+            if not docs and not self._disabled and (":" in title or " - " in title or (author and "." in author)):
                 short_title = _re.split(r"\s*(?::| - )\s*", title, maxsplit=1)[0].strip() or title
                 alt_author = author
                 if author and "." in author and len(author.split()) >= 2:
@@ -265,5 +277,6 @@ class OpenLibraryProvider(BaseProvider):
                             break
                     return merged
         except Exception as e:
+            self._disabled = True
             logger.warning("Open Library search query error: %s", e)
         return None

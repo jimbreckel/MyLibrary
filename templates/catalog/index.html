@@ -145,11 +145,17 @@
             </div>
         </div>
 
-        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin-top:0.55rem; padding:0 0.35rem; font-size:0.8rem; color:#94a3b8;">
-            <label style="display:inline-flex; align-items:center; gap:0.45rem; cursor:pointer; user-select:none;" title="When checked (or when you append +enrich to your search query), MyLibrary automatically runs epubmeta on-demand enrichment on the top unenriched search results!">
-                <input type="checkbox" name="enrich" value="1" {% if enrich_on_search %}checked{% endif %} style="accent-color:#4ade80; width:15px; height:15px; cursor:pointer;">
-                <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enrich search results on demand (or type <code>+enrich</code> in search)</span>
-            </label>
+        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.65rem; margin-top:0.55rem; padding:0 0.35rem; font-size:0.8rem; color:#94a3b8;">
+            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:1rem;">
+                <label style="display:inline-flex; align-items:center; gap:0.45rem; cursor:pointer; user-select:none;" title="When checked (or when you append +enrich to your search query), MyLibrary automatically runs epubmeta on-demand enrichment on the top unenriched search results!">
+                    <input type="checkbox" name="enrich" value="1" {% if enrich_on_search %}checked{% endif %} style="accent-color:#4ade80; width:15px; height:15px; cursor:pointer;">
+                    <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enrich search results on demand (or type <code>+enrich</code> in search)</span>
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.45rem; cursor:pointer; user-select:none;" title="When checked, if an enriched/checked book has no description and results in No Match, Gemini AI automatically generates a description based on the book's actual content">
+                    <input type="checkbox" id="opt-ai-desc-no-match" style="accent-color:#c084fc; width:15px; height:15px; cursor:pointer;">
+                    <span style="color:#d8b4fe; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Auto AI-describe if No Match &amp; no description</span>
+                </label>
+            </div>
             <span style="font-size:0.75rem; opacity:0.85;">Tip: Click <strong>✨ Enrich Now</strong> on any book card or inside <em>View Details</em> to enrich its EPUB/PDF on demand.</span>
         </div>
         <!-- Autocomplete dropdown -->
@@ -811,6 +817,18 @@
                                             <i class="fa-solid fa-newspaper"></i> toMag
                                         </button>
                                     </div>
+                                    <div class="card-ai-desc-row" data-item-id="{{ item.id }}" style="display:{% if not item.is_enriched and item.enrich_diag and item.enrich_diag.status != 'FAILED' and item.enrich_diag.status != 'NEEDS_REVIEW' and item.enrich_diag.status != 'HAS_DRM' and item.enrich_diag.status != 'QUARANTINED' and not item.description %}flex{% else %}none{% endif %}; gap:0.38rem; align-items:center; width:100%;">
+                                        <button
+                                            type="button"
+                                            class="btn-ai-desc-card"
+                                            data-item-id="{{ item.id }}"
+                                            onclick="event.stopPropagation(); if(window.generateAiDescriptionForItem) window.generateAiDescriptionForItem({ itemId: '{{ item.id }}', mode: 'card', btn: this });"
+                                            title="No Match &amp; No Description — Use Gemini AI to generate a synopsis based on this book's actual content"
+                                            style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.32rem; padding:0.4rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.52); color:#e9d5ff; transition:all 0.2s;"
+                                        >
+                                            <i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description
+                                        </button>
+                                    </div>
                                     {% endif %}
                                     {% if item.cover_issue %}
                                     <div class="card-cover-actions-row" style="display:flex; gap:0.38rem; align-items:center; width:100%;">
@@ -906,6 +924,7 @@
         padding-right: 0.25rem;
     }
     .cover-cand-card {
+        position: relative;
         background: rgba(15, 23, 42, 0.85);
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
@@ -918,6 +937,60 @@
     .cover-cand-card:hover {
         transform: translateY(-2px);
         border-color: #38bdf8;
+    }
+    .cover-cand-zoom-btn {
+        position: absolute;
+        top: 5px;
+        right: 5px;
+        z-index: 3;
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+        border: 1px solid rgba(56, 189, 248, 0.55);
+        background: rgba(2, 6, 23, 0.82);
+        color: #38bdf8;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.72rem;
+        cursor: zoom-in;
+        opacity: 0.88;
+        transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease;
+    }
+    .cover-cand-zoom-btn:hover {
+        opacity: 1;
+        transform: scale(1.08);
+        background: rgba(15, 23, 42, 0.96);
+        color: #f8fafc;
+    }
+    .modal-cover-wrap {
+        position: relative;
+        cursor: zoom-in;
+    }
+    .card-header-image img.cover-image,
+    #er-field-cover-orig img,
+    #er-field-cover-cand img {
+        cursor: zoom-in;
+    }
+    .modal-cover-zoom-hint {
+        position: absolute;
+        bottom: 6px;
+        right: 6px;
+        background: rgba(2, 6, 23, 0.82);
+        border: 1px solid rgba(56, 189, 248, 0.5);
+        color: #38bdf8;
+        border-radius: 6px;
+        padding: 2px 6px;
+        font-size: 0.66rem;
+        font-weight: 700;
+        pointer-events: none;
+        opacity: 0.85;
+        transition: opacity 0.15s ease;
+    }
+    .modal-cover-wrap:hover .modal-cover-zoom-hint {
+        opacity: 1;
+        color: #f8fafc;
+        background: rgba(14, 165, 233, 0.32);
     }
     .cover-cand-card img {
         width: 100%;
@@ -938,9 +1011,10 @@
         <div class="modal-body">
             <div class="modal-header-section">
                 <div style="display:flex; flex-direction:column; align-items:center; gap:0.5rem;">
-                    <div class="modal-cover-wrap">
+                    <div class="modal-cover-wrap" onclick="openCoverZoomLightbox(document.getElementById('modal-cover')?.src, document.getElementById('modal-title')?.textContent)" title="Click to zoom in and inspect cover in full resolution">
                         <img id="modal-cover" src="" alt="Cover thumbnail" style="display: none;">
                         <i id="modal-cover-fallback" class="fa-solid fa-book card-icon-fallback" style="font-size: 4rem; display: none;"></i>
+                        <span id="modal-cover-zoom-badge" class="modal-cover-zoom-hint"><i class="fa-solid fa-magnifying-glass-plus"></i> Zoom</span>
                     </div>
                     <button type="button" id="btn-find-cover" onclick="toggleCoverFinder()" style="width:140px; background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; border-radius:7px; padding:0.35rem 0.5rem; font-size:0.76rem; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.35rem;" title="Search the web for book covers (like Moon+ Reader)">
                         <i class="fa-solid fa-images"></i> Find Cover
@@ -959,13 +1033,19 @@
             <!-- Moon+ Reader Style Web Cover Finder Drawer -->
             <div id="modal-cover-finder" style="display:none; background:rgba(15,23,42,0.82); border:1px solid rgba(56,189,248,0.35); border-radius:12px; padding:0.9rem 1rem; margin-bottom:1.4rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.55rem; gap:0.5rem; flex-wrap:wrap;">
-                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-globe"></i> Web &amp; Image Cover Search (Web Images · Goodreads · Apple Books · Google Books · Open Library)</strong>
+                    <strong style="font-size:0.8rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-globe"></i> Web &amp; Image Cover Search + On-Demand AI Cover Generator</strong>
                     <button type="button" onclick="document.getElementById('modal-cover-finder').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem;">✕ Hide</button>
                 </div>
-                <div style="display:flex; gap:0.5rem; align-items:center;">
-                    <input type="text" id="cover-search-input" placeholder="Search title, author, or ISBN..." onkeydown="if(event.key==='Enter'){event.preventDefault(); runWebCoverSearch();}" style="flex:1; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.42rem 0.7rem; color:#f8fafc; font-size:0.83rem;">
-                    <button type="button" id="btn-run-cover-search" onclick="runWebCoverSearch()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.42rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer; white-space:nowrap;">
+                <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                    <input type="text" id="cover-search-input" placeholder="Search title, author, ISBN, or optional style hint for Generate Cover..." onkeydown="if(event.key==='Enter'){event.preventDefault(); runWebCoverSearch();}" style="flex:1; min-width:210px; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.42rem 0.7rem; color:#f8fafc; font-size:0.83rem;">
+                    <button type="button" id="btn-run-cover-search" onclick="runWebCoverSearch()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.42rem 0.85rem; font-size:0.82rem; font-weight:600; cursor:pointer; white-space:nowrap;" title="Search Web Images, Goodreads, Apple Books, Google Books &amp; Open Library">
                         <i class="fa-solid fa-magnifying-glass"></i> Search Web
+                    </button>
+                    <button type="button" id="btn-generate-cover" onclick="generateBookCover('modal')" style="background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.58); color:#e9d5ff; border-radius:7px; padding:0.42rem 0.85rem; font-size:0.82rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="Generate a custom cover based on the book's synopsis, opening content, tags &amp; title, and save it in BookDB (click again to add another generated variation)">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Generate Cover
+                    </button>
+                    <button type="button" id="btn-revert-original-cover" onclick="revertBookCoverToOriginal('modal')" style="background:rgba(244,63,94,0.16); border:1px solid rgba(244,63,94,0.48); color:#fda4af; border-radius:7px; padding:0.42rem 0.75rem; font-size:0.8rem; font-weight:600; cursor:pointer; white-space:nowrap;" title="Revert back to the book's original cover (while keeping any generated covers saved in BookDB)">
+                        <i class="fa-solid fa-rotate-left"></i> Original Cover
                     </button>
                 </div>
                 <div id="cover-finder-status" style="font-size:0.76rem; color:#94a3b8; margin-top:0.45rem;"></div>
@@ -985,15 +1065,31 @@
                             <i class="fa-solid fa-up-right-from-square"></i> Open Full File
                         </a>
                     </div>
-                    <button type="button" onclick="document.getElementById('modal-book-peek-drawer').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem;">✕ Hide</button>
+                    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem;">
+                        <span style="font-size:0.7rem; color:#94a3b8;">Highlight any text below &amp; click:</span>
+                        <button type="button" onmousedown="event.preventDefault()" onclick="window.modalPeekUseSelectedText('title', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Title">&rarr; Title</button>
+                        <button type="button" onmousedown="event.preventDefault()" onclick="window.modalPeekUseSelectedText('author', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Author">&rarr; Author</button>
+                        <button type="button" onmousedown="event.preventDefault()" onclick="window.modalPeekUseSelectedText('publisher', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Publisher">&rarr; Publisher</button>
+                        <button type="button" onmousedown="event.preventDefault()" onclick="window.modalPeekUseSelectedText('desc', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Description">&rarr; Synopsis</button>
+                        <button type="button" onclick="document.getElementById('modal-book-peek-drawer').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.8rem; margin-left:0.25rem;">✕ Hide</button>
+                    </div>
                 </div>
+                <div id="modal-peek-copy-status" style="display:none; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.6rem; padding:0.45rem 0.7rem; border-radius:7px; background:rgba(16,185,129,0.16); border:1px solid rgba(74,222,128,0.5); color:#f8fafc; font-size:0.76rem;"></div>
                 <div id="modal-peek-isbns-bar" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.6rem; font-size:0.74rem;"></div>
                 <div id="modal-peek-images-strip" style="display:none; gap:0.65rem; overflow-x:auto; padding-bottom:0.55rem; margin-bottom:0.65rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
                 <div id="modal-peek-section-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.5rem;"></div>
                 <div id="modal-peek-text-body" style="background:rgba(15,23,42,0.92); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:0.75rem 0.9rem; font-size:0.81rem; line-height:1.6; color:#e2e8f0; max-height:260px; overflow-y:auto; white-space:pre-wrap; font-family:Georgia, 'Times New Roman', serif;"></div>
             </div>
             
-            <div class="modal-section-title">Synopsis</div>
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.4rem;">
+                <div class="modal-section-title" style="margin-bottom:0;">Synopsis</div>
+                <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    <span id="modal-ai-desc-status" style="font-size:0.74rem; color:#4ade80; display:none;"></span>
+                    <button type="button" id="modal-btn-ai-desc" onclick="if(window.generateAiDescriptionForItem) window.generateAiDescriptionForItem({ mode: 'modal', btn: this });" style="display:inline-flex; align-items:center; gap:0.35rem; background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.58); color:#e9d5ff; border-radius:7px; padding:0.3rem 0.7rem; font-size:0.76rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="Read the book's actual content (front matter, table of contents &amp; opening pages) and generate a 2-4 sentence description with Gemini AI">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content
+                    </button>
+                </div>
+            </div>
             <div id="modal-desc" class="modal-desc">Book description...</div>
             
             <div class="modal-section-title">Physical & Digital Files</div>
@@ -1034,13 +1130,19 @@
         <!-- Expandable Web & Image Cover Search Drawer inside Enrichment Review Modal -->
         <div id="er-cover-finder-drawer" style="display:none; background:rgba(15,23,42,0.88); border:1px solid rgba(56,189,248,0.4); border-radius:10px; padding:0.85rem 1rem; margin-bottom:0.95rem;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; gap:0.5rem; flex-wrap:wrap;">
-                <strong style="font-size:0.78rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-images"></i> Find Covers — Web Image Search · Goodreads · Apple Books · Google Books · Open Library</strong>
+                <strong style="font-size:0.78rem; color:#38bdf8; text-transform:uppercase;"><i class="fa-solid fa-images"></i> Find Covers — Web Image Search · Book Catalogs · On-Demand AI Cover Generator</strong>
                 <button type="button" onclick="document.getElementById('er-cover-finder-drawer').style.display='none';" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:0.78rem;">✕ Hide</button>
             </div>
-            <div style="display:flex; gap:0.5rem; align-items:center;">
-                <input type="text" id="er-cover-search-input" placeholder="Search title, author, or ISBN for cover images..." onkeydown="if(event.key==='Enter'){event.preventDefault(); window.erRunCoverSearch();}" style="flex:1; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.4rem 0.7rem; color:#f8fafc; font-size:0.82rem;">
+            <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                <input type="text" id="er-cover-search-input" placeholder="Search title, author, ISBN, or optional style hint for Generate Cover..." onkeydown="if(event.key==='Enter'){event.preventDefault(); window.erRunCoverSearch();}" style="flex:1; min-width:200px; background:#1e293b; border:1px solid rgba(255,255,255,0.18); border-radius:7px; padding:0.4rem 0.7rem; color:#f8fafc; font-size:0.82rem;">
                 <button type="button" id="er-btn-run-cover-search" onclick="window.erRunCoverSearch()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:7px; padding:0.4rem 0.85rem; font-size:0.8rem; font-weight:600; cursor:pointer; white-space:nowrap;">
                     <i class="fa-solid fa-magnifying-glass"></i> Search Covers
+                </button>
+                <button type="button" id="er-btn-generate-cover" onclick="window.generateBookCover('review')" style="background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.58); color:#e9d5ff; border-radius:7px; padding:0.4rem 0.85rem; font-size:0.8rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="Generate a custom cover from the book's synopsis, content &amp; title, and save it in BookDB">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Generate Cover
+                </button>
+                <button type="button" id="er-btn-revert-original-cover" onclick="window.revertBookCoverToOriginal('review')" style="background:rgba(244,63,94,0.16); border:1px solid rgba(244,63,94,0.48); color:#fda4af; border-radius:7px; padding:0.4rem 0.75rem; font-size:0.78rem; font-weight:600; cursor:pointer; white-space:nowrap;" title="Revert back to the book's original cover">
+                    <i class="fa-solid fa-rotate-left"></i> Original Cover
                 </button>
             </div>
             <div id="er-cover-finder-status" style="font-size:0.75rem; color:#94a3b8; margin-top:0.4rem;"></div>
@@ -1059,12 +1161,13 @@
                 </div>
                 <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem;">
                     <span style="font-size:0.7rem; color:#94a3b8;">Highlight any text below &amp; click:</span>
-                    <button type="button" onclick="window.erUseSelectedPreviewText('title')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Title">&rarr; Title</button>
-                    <button type="button" onclick="window.erUseSelectedPreviewText('author')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Author">&rarr; Author</button>
-                    <button type="button" onclick="window.erUseSelectedPreviewText('publisher')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Publisher">&rarr; Publisher</button>
-                    <button type="button" onclick="window.erUseSelectedPreviewText('desc')" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Description">&rarr; Synopsis</button>
+                    <button type="button" onmousedown="event.preventDefault()" onclick="window.erUseSelectedPreviewText('title', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Title">&rarr; Title</button>
+                    <button type="button" onmousedown="event.preventDefault()" onclick="window.erUseSelectedPreviewText('author', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Author">&rarr; Author</button>
+                    <button type="button" onmousedown="event.preventDefault()" onclick="window.erUseSelectedPreviewText('publisher', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Publisher">&rarr; Publisher</button>
+                    <button type="button" onmousedown="event.preventDefault()" onclick="window.erUseSelectedPreviewText('desc', this)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.4); color:#38bdf8; border-radius:5px; font-size:0.68rem; font-weight:600; padding:0.15rem 0.45rem; cursor:pointer;" title="Copy currently highlighted preview text into Description">&rarr; Synopsis</button>
                 </div>
             </div>
+            <div id="er-preview-copy-status" style="display:none; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.6rem; padding:0.45rem 0.7rem; border-radius:7px; background:rgba(16,185,129,0.16); border:1px solid rgba(74,222,128,0.5); color:#f8fafc; font-size:0.76rem;"></div>
             <div id="er-preview-isbns-bar" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.6rem; font-size:0.74rem;"></div>
             <div id="er-preview-images-strip" style="display:none; gap:0.65rem; overflow-x:auto; padding-bottom:0.55rem; margin-bottom:0.65rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
             <div id="er-preview-section-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.5rem;"></div>
@@ -1119,8 +1222,17 @@
                     </div>
                 </div>
                 <div style="grid-column:1 / -1;">
-                    <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Description / Synopsis</label>
-                    <textarea id="er-input-desc" rows="2" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.8rem; resize:vertical;"></textarea>
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.45rem; margin-bottom:0.25rem;">
+                        <div style="display:flex; align-items:center; gap:0.45rem; flex-wrap:wrap;">
+                            <label style="font-size:0.7rem; color:#94a3b8; margin:0;">Description / Synopsis</label>
+                            <span id="er-no-match-desc-hint" style="display:none; background:rgba(245,158,11,0.18); border:1px solid rgba(245,158,11,0.48); color:#fcd34d; border-radius:999px; padding:0.08rem 0.5rem; font-size:0.65rem; font-weight:700;">No Match &amp; No Description</span>
+                            <span id="er-ai-desc-status" style="font-size:0.7rem; color:#4ade80; display:none;"></span>
+                        </div>
+                        <button type="button" id="er-btn-ai-desc" onclick="if(window.generateAiDescriptionForItem) window.generateAiDescriptionForItem({ mode: 'review', btn: this });" style="display:inline-flex; align-items:center; gap:0.32rem; background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.58); color:#e9d5ff; border-radius:6px; padding:0.22rem 0.65rem; font-size:0.72rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="Read the book's actual content (front matter, table of contents &amp; opening pages) and generate a 2-4 sentence description with Gemini AI">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content
+                        </button>
+                    </div>
+                    <textarea id="er-input-desc" rows="3" style="width:100%; background:#1e293b; border:1px solid rgba(255,255,255,0.16); border-radius:6px; padding:0.4rem 0.6rem; color:#f8fafc; font-size:0.8rem; resize:vertical;"></textarea>
                 </div>
                 <div style="grid-column:1 / -1;">
                     <label style="font-size:0.7rem; color:#94a3b8; display:block; margin-bottom:0.15rem;">Tags (Read-Only)</label>
@@ -1228,8 +1340,43 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
         </div>
     </div>
 </div>
+
+<!-- Full-Screen Interactive Cover Zoom Lightbox -->
+<div id="cover-zoom-lightbox" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(2, 6, 23, 0.94); backdrop-filter:blur(8px); flex-direction:column; user-select:none;">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:0.75rem 1.25rem; background:rgba(15, 23, 42, 0.92); border-bottom:1px solid rgba(255,255,255,0.12); gap:0.8rem; flex-wrap:wrap; z-index:2;">
+        <div style="display:flex; align-items:center; gap:0.6rem; min-width:0;">
+            <i class="fa-solid fa-magnifying-glass-plus" style="color:#38bdf8; font-size:1rem;"></i>
+            <span id="cover-zoom-title" style="color:#f8fafc; font-weight:700; font-size:0.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:480px;">Book Cover Preview</span>
+            <span style="color:#94a3b8; font-size:0.76rem;">(Scroll wheel or click buttons to zoom • Drag to pan • Double-click image to toggle 2.25×)</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.45rem;">
+            <button type="button" onclick="adjustCoverZoom(-0.35)" style="background:rgba(30,41,59,0.9); border:1px solid rgba(255,255,255,0.2); color:#f8fafc; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.82rem; font-weight:700; cursor:pointer;" title="Zoom Out">
+                <i class="fa-solid fa-minus"></i>
+            </button>
+            <span id="cover-zoom-level" style="min-width:56px; text-align:center; font-family:monospace; font-size:0.82rem; font-weight:700; color:#38bdf8;">100%</span>
+            <button type="button" onclick="adjustCoverZoom(0.35)" style="background:rgba(30,41,59,0.9); border:1px solid rgba(255,255,255,0.2); color:#f8fafc; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.82rem; font-weight:700; cursor:pointer;" title="Zoom In">
+                <i class="fa-solid fa-plus"></i>
+            </button>
+            <button type="button" onclick="resetCoverZoom(1)" style="background:rgba(56,189,248,0.16); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.78rem; font-weight:600; cursor:pointer;" title="Reset to Fit Screen (100%)">
+                Fit (100%)
+            </button>
+            <button type="button" onclick="resetCoverZoom(2.25)" style="background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.5); color:#e9d5ff; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.78rem; font-weight:600; cursor:pointer;" title="Zoom to 225% to read fine text and diagrams">
+                225% Detail
+            </button>
+            <button type="button" id="cover-zoom-apply-btn" style="display:none; background:rgba(74,222,128,0.22); border:1px solid rgba(74,222,128,0.55); color:#4ade80; border-radius:6px; padding:0.32rem 0.75rem; font-size:0.8rem; font-weight:700; cursor:pointer;">
+                <i class="fa-solid fa-check"></i> Apply This Cover
+            </button>
+            <button type="button" onclick="closeCoverZoomLightbox()" style="background:rgba(239,68,68,0.2); border:1px solid rgba(239,68,68,0.5); color:#fca5a5; border-radius:6px; padding:0.32rem 0.75rem; font-size:0.82rem; font-weight:700; cursor:pointer;" title="Close (Esc)">
+                <i class="fa-solid fa-xmark"></i> Close
+            </button>
+        </div>
+    </div>
+    <div id="cover-zoom-stage" style="flex:1; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; cursor:grab;">
+        <img id="cover-zoom-img" src="" alt="Zoomed Book Cover" draggable="false" style="max-height:86vh; max-width:90vw; object-fit:contain; border-radius:8px; box-shadow:0 20px 60px rgba(0,0,0,0.85); transform-origin:center center; transition:transform 0.08s ease-out;">
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/search.js' %}?v=20261113c"></script>
+<script src="{% static 'js/search.js' %}?v=20261113k"></script>
 {% endblock %}

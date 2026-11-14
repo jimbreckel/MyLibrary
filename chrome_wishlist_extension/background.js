@@ -466,6 +466,66 @@ async function checkBookOnAnnasArchive(book) {
   };
 }
 
+const packtSummaryCache = new Map();
+const packtAuthorCache = new Map();
+
+async function enrichPacktBookIfNeeded(b) {
+  if (!b || !/packt/i.test(b.wishlist_name || '')) return b;
+  const isbn = String(b.isbn || '').replace(/[^0-9]/g, '');
+  if (!/^97[89][0-9]{10}$/.test(isbn)) return b;
+  if (b.title && b.author && b.pub_year) return b;
+
+  try {
+    let summary = packtSummaryCache.get(isbn);
+    if (!summary) {
+      const resp = await fetch(`https://static.packt-cdn.com/products/${isbn}/summary`, { method: 'GET' });
+      if (resp.ok) {
+        summary = await resp.json();
+        packtSummaryCache.set(isbn, summary);
+      }
+    }
+    if (!summary) return b;
+
+    const updated = { ...b };
+    if (!updated.title && summary.title) {
+      updated.title = String(summary.title).replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '').trim();
+    }
+    if (!updated.pub_year && summary.publicationDate) {
+      const ym = String(summary.publicationDate).match(/\b(19[7-9]\d|20[0-3]\d)\b/);
+      if (ym) updated.pub_year = parseInt(ym[1], 10);
+    }
+    if (!updated.author && Array.isArray(summary.authors) && summary.authors.length > 0) {
+      const resolvedNames = [];
+      for (const rawAuth of summary.authors.slice(0, 3)) {
+        const authStr = String(rawAuth || '').trim();
+        if (!authStr) continue;
+        if (!/^\d+$/.test(authStr)) {
+          resolvedNames.push(authStr);
+          continue;
+        }
+        let authorName = packtAuthorCache.get(authStr);
+        if (!authorName) {
+          const aResp = await fetch(`https://static.packt-cdn.com/authors/${authStr}`, { method: 'GET' });
+          if (aResp.ok) {
+            const aData = await aResp.json();
+            if (aData && aData.author) {
+              authorName = String(aData.author).trim();
+              packtAuthorCache.set(authStr, authorName);
+            }
+          }
+        }
+        if (authorName) resolvedNames.push(authorName);
+      }
+      if (resolvedNames.length > 0) {
+        updated.author = resolvedNames.join(', ');
+      }
+    }
+    return updated;
+  } catch (_) {
+    return b;
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
@@ -479,10 +539,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const settings = await getSettings();
       const apiUrl = `${settings.mylibraryBaseUrl}/api/wishlist/check/`;
       try {
+        const inputBooks = Array.isArray(msg.books) ? msg.books : [];
+        const enrichedBooks = await Promise.all(inputBooks.map((b) => enrichPacktBookIfNeeded(b)));
         const resp = await fetch(apiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ books: msg.books || [] })
+          body: JSON.stringify({ books: enrichedBooks })
         });
         const data = await resp.json();
         sendResponse({

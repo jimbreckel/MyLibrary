@@ -135,10 +135,10 @@ class PdfReader(BaseReader):
             keywords_str = meta.get("keywords") or ""
             subjects = [k.strip() for k in re.split(r"[,;]\s*", keywords_str) if k.strip()]
 
-            # Look for ISBN in keywords, subject, or title
+            # Look for ISBN in keywords, subject, or title (including raw_title before garbage filter, e.g. 3135239039.01._SS500_SCLZZZZZZZ_.jpg)
             isbn13 = None
             isbn10 = None
-            search_corpus = f"{keywords_str} {subject or ''} {title or ''}"
+            search_corpus = f"{keywords_str} {subject or ''} {raw_title or ''} {title or ''}"
             isbns = extract_isbns_from_text(search_corpus)
             if isbns:
                 isbn13, _ = normalize_isbn(isbns[0][0])
@@ -193,10 +193,11 @@ class PdfReader(BaseReader):
     def extract_cover_bytes(self) -> Optional[bytes]:
         """
         Extract cover image bytes from Page 1 of the PDF.
-        If Page 1 is a cover/title page (`< 300` chars of text) with a single cover-proportioned raster image
-        floating inside wide white page margins (e.g. Liquid Silver Books / Boson Books PDFs where a 240x360 or
-        510x680 cover JPEG is placed on a blank 8.5x11" page), extract that embedded cover image directly so it
-        fills the cover frame without an excessive white page border.
+        Only extract an embedded raster image directly if Page 1 has NO text outside the image
+        (`len(p_text) == 0`) and the image has portrait book-cover proportions (`0.48 <= iw / ih <= 0.78`).
+        Otherwise (e.g. Springer / Routledge / Elsevier covers that combine a top graphic banner with
+        vector background panels and title/author text), render the full Page 1 at 150 DPI so the entire
+        cover is preserved.
         """
         doc = pymupdf.open(self.file_path)
         try:
@@ -207,20 +208,20 @@ class PdfReader(BaseReader):
             p_area = max(1.0, float(p_rect.width * p_rect.height))
             p_text = (p0.get_text() or "").strip()
             imgs = p0.get_images(full=True)
-            if len(imgs) == 1 and len(p_text) < 300:
+            if len(imgs) == 1 and len(p_text) == 0:
                 xref = imgs[0][0]
                 try:
                     extracted = doc.extract_image(xref)
                     raw_img = extracted.get("image") if extracted else None
                     iw = int(extracted.get("width") or 0) if extracted else 0
                     ih = int(extracted.get("height") or 0) if extracted else 0
-                    if raw_img and len(raw_img) >= 2000 and iw >= 120 and ih >= 150 and 0.42 <= (iw / ih) <= 1.20:
+                    if raw_img and len(raw_img) >= 2000 and iw >= 120 and ih >= 180 and 0.48 <= (iw / ih) <= 0.78:
                         rects = p0.get_image_rects(xref)
                         if not rects:
                             return raw_img
                         r0 = rects[0] & p_rect
                         r_area = float(r0.width * r0.height)
-                        if 0.04 <= (r_area / p_area) <= 0.94:
+                        if 0.08 <= (r_area / p_area) <= 0.94 and (r0.height / max(1.0, float(p_rect.height))) >= 0.65:
                             return raw_img
                 except Exception:
                     pass
@@ -237,6 +238,14 @@ class PdfReader(BaseReader):
         backup_path: Optional[Path] = None,
     ) -> None:
         """Surgically write updated metadata into the PDF document."""
+        try:
+            f_size = self.file_path.stat().st_size
+        except Exception:
+            f_size = 0
+        if f_size > 20 * 1024 * 1024:
+            raise RuntimeError(
+                f"Large PDF ({f_size / (1024 * 1024):.1f} MB > 20 MB limit); skipping full-file stream rewrite"
+            )
         doc = pymupdf.open(self.file_path)
         temp_fd, temp_path_str = tempfile.mkstemp(
             prefix=".epubmeta_tmp_",

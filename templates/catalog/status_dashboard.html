@@ -988,12 +988,13 @@
                     </div>
                     <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem;">
                         <span style="font-size:0.7rem; color:#94a3b8;">Highlight text below &amp; click:</span>
-                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('title')">&rarr; Title</button>
-                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('author')">&rarr; Author</button>
-                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('publisher')">&rarr; Publisher</button>
-                        <button type="button" class="btn-mini-action" onclick="convUseSelectedPreviewText('description')">&rarr; Synopsis</button>
+                        <button type="button" class="btn-mini-action" onmousedown="event.preventDefault()" onclick="convUseSelectedPreviewText('title', this)">&rarr; Title</button>
+                        <button type="button" class="btn-mini-action" onmousedown="event.preventDefault()" onclick="convUseSelectedPreviewText('author', this)">&rarr; Author</button>
+                        <button type="button" class="btn-mini-action" onmousedown="event.preventDefault()" onclick="convUseSelectedPreviewText('publisher', this)">&rarr; Publisher</button>
+                        <button type="button" class="btn-mini-action" onmousedown="event.preventDefault()" onclick="convUseSelectedPreviewText('description', this)">&rarr; Synopsis</button>
                     </div>
                 </div>
+                <div id="conv-prev-copy-status" style="display:none; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.55rem; padding:0.4rem 0.65rem; border-radius:7px; background:rgba(34,197,94,0.16); border:1px solid rgba(74,222,128,0.5); font-size:0.76rem; color:#bbf7d0;"></div>
                 <div id="conv-prev-isbns" style="display:none; flex-wrap:wrap; align-items:center; gap:0.4rem; margin-bottom:0.55rem; font-size:0.74rem;"></div>
                 <div id="conv-prev-images" style="display:none; gap:0.6rem; overflow-x:auto; padding-bottom:0.5rem; margin-bottom:0.6rem; border-bottom:1px solid rgba(255,255,255,0.08);"></div>
                 <div id="conv-prev-tabs" style="display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.45rem;"></div>
@@ -1033,8 +1034,17 @@
                         <input type="text" id="merge-input-isbn" class="merged-input td-mono">
                     </div>
                     <div style="grid-column: 1 / -1;">
-                        <small style="color:#94a3b8; font-size:0.7rem;">Description / Synopsis</small>
-                        <textarea id="merge-input-description" class="merged-input" rows="2" style="resize:vertical;"></textarea>
+                        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.45rem; margin-bottom:0.2rem;">
+                            <div style="display:flex; align-items:center; gap:0.45rem; flex-wrap:wrap;">
+                                <small style="color:#94a3b8; font-size:0.7rem;">Description / Synopsis</small>
+                                <span id="conv-no-match-desc-hint" style="display:none; background:rgba(245,158,11,0.18); border:1px solid rgba(245,158,11,0.48); color:#fcd34d; border-radius:999px; padding:0.06rem 0.48rem; font-size:0.64rem; font-weight:700;">No Match &amp; No Description</span>
+                                <span id="conv-ai-desc-status" style="font-size:0.7rem; color:#4ade80; display:none;"></span>
+                            </div>
+                            <button type="button" class="btn-mini-action" id="conv-btn-ai-desc" onclick="generateConvAiDescription(this)" style="display:inline-flex; background:rgba(168,85,247,0.22); border-color:rgba(168,85,247,0.58); color:#e9d5ff;" title="Read the book's actual content (front matter, table of contents &amp; opening pages) and generate a 2-4 sentence description with Gemini AI">
+                                <i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content
+                            </button>
+                        </div>
+                        <textarea id="merge-input-description" class="merged-input" rows="3" style="resize:vertical;"></textarea>
                     </div>
                 </div>
             </div>
@@ -1828,6 +1838,24 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             approveBtn.innerHTML = '<i class="fa-solid fa-check"></i> Approve Selected Fields';
             approveBtn.style.display = 'inline-flex';
         }
+        const stConvUpper = String(item.status || '').toUpperCase();
+        const isConvNoMatch = (stConvUpper === 'NO_ISBN' || stConvUpper === 'NOT_FOUND');
+        const hasConvDesc = Boolean((item.description || item.orig_description || '').trim());
+        const convAiDescBtn = document.getElementById('conv-btn-ai-desc');
+        const convNoMatchHint = document.getElementById('conv-no-match-desc-hint');
+        const convAiDescSt = document.getElementById('conv-ai-desc-status');
+        if (convAiDescSt) {
+            convAiDescSt.style.display = 'none';
+            convAiDescSt.textContent = '';
+        }
+        if (convNoMatchHint) {
+            convNoMatchHint.style.display = (isConvNoMatch && !hasConvDesc) ? 'inline-block' : 'none';
+        }
+        if (convAiDescBtn) {
+            convAiDescBtn.disabled = false;
+            convAiDescBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content';
+            convAiDescBtn.style.display = 'inline-flex';
+        }
         const ignoreBtn = document.getElementById('modal-ignore-btn');
         if (ignoreBtn) {
             ignoreBtn.disabled = false;
@@ -1848,6 +1876,11 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         if (prevDrawer) {
             prevDrawer.style.display = 'none';
             prevDrawer.dataset.loadedFor = '';
+        }
+        const convCopySt = document.getElementById('conv-prev-copy-status');
+        if (convCopySt) {
+            convCopySt.style.display = 'none';
+            convCopySt.innerHTML = '';
         }
         const covDrawer = document.getElementById('conv-cover-finder-drawer');
         if (covDrawer) covDrawer.style.display = 'none';
@@ -1966,7 +1999,99 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         }
     }
 
+    async function generateConvAiDescription(btn) {
+        if (!currentModalItem) return;
+        const statusEl = document.getElementById('conv-ai-desc-status');
+        const hintEl = document.getElementById('conv-no-match-desc-hint');
+        const origHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reading Book &amp; Generating...';
+        }
+        if (statusEl) {
+            statusEl.style.display = 'inline';
+            statusEl.style.color = '#d8b4fe';
+            statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analyzing book content with Gemini AI...';
+        }
+        try {
+            const curTitle = (document.getElementById('merge-input-title')?.value || currentModalItem.title || currentModalItem.orig_title || '').trim();
+            const curAuth = (document.getElementById('merge-input-author')?.value || currentModalItem.author || currentModalItem.orig_author || '').trim();
+            const curPub = (document.getElementById('merge-input-publisher')?.value || currentModalItem.publisher || currentModalItem.orig_publisher || '').trim();
+            const curIsbn = (document.getElementById('merge-input-isbn')?.value || currentModalItem.isbn || currentModalItem.orig_isbn || '').trim();
+            const resp = await fetch('/mylibrary/api/ai-description/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_path: currentModalItem.file_path || '',
+                    title: curTitle,
+                    authors: curAuth,
+                    publisher: curPub,
+                    isbn: curIsbn,
+                    apply_immediately: true,
+                })
+            });
+            const res = await resp.json();
+            if (!res || !res.ok || !res.description) {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+                if (statusEl) {
+                    statusEl.style.display = 'inline';
+                    statusEl.style.color = '#fca5a5';
+                    statusEl.textContent = (res && res.error) || 'Could not generate AI description.';
+                }
+                return;
+            }
+            const newDesc = res.description;
+            currentModalItem.description = newDesc;
+            const descInput = document.getElementById('merge-input-description');
+            if (descInput) descInput.value = newDesc;
+            const pickNewDescEl = document.getElementById('pick-new-description');
+            if (pickNewDescEl) {
+                pickNewDescEl.style.color = '';
+                pickNewDescEl.style.fontStyle = '';
+                pickNewDescEl.title = 'Click to use this description';
+                pickNewDescEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(newDesc)}`;
+            }
+            if (typeof pickField === 'function') pickField('description', 'new', true);
+            if (hintEl) hintEl.style.display = 'none';
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Regenerate AI Description';
+            }
+            if (statusEl) {
+                statusEl.style.display = 'inline';
+                statusEl.style.color = '#4ade80';
+                statusEl.innerHTML = '<i class="fa-solid fa-check"></i> Generated from content &amp; saved to BookDB (click <b>Approve Selected Fields</b> to finalize)';
+            }
+        } catch (err) {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+            if (statusEl) {
+                statusEl.style.display = 'inline';
+                statusEl.style.color = '#fca5a5';
+                statusEl.textContent = 'Network error: ' + err.message;
+            }
+        }
+    }
+
     let convPreviewPages = [];
+    let _lastConvPreviewSelection = '';
+    document.addEventListener('selectionchange', () => {
+        try {
+            const selObj = window.getSelection ? window.getSelection() : null;
+            if (!selObj || selObj.isCollapsed) return;
+            const txt = (selObj.toString() || '').trim();
+            if (!txt) return;
+            const anchor = selObj.anchorNode ? (selObj.anchorNode.nodeType === 1 ? selObj.anchorNode : selObj.anchorNode.parentElement) : null;
+            if (anchor && anchor.closest && anchor.closest('#conv-book-preview-drawer')) {
+                _lastConvPreviewSelection = txt;
+            }
+        } catch (_) { }
+    });
 
     async function toggleConvBookPreview() {
         const drawer = document.getElementById('conv-book-preview-drawer');
@@ -2041,17 +2166,97 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         });
     }
 
-    function convUseSelectedPreviewText(field) {
-        const sel = (window.getSelection ? window.getSelection().toString() : '').trim();
+    function convUseSelectedPreviewText(field, btnEl) {
+        const liveSel = (window.getSelection ? window.getSelection().toString() : '').trim();
+        const sel = liveSel || _lastConvPreviewSelection || '';
         if (!sel) {
-            alert('First highlight any text inside the book preview box below, then click this button to copy it into the field.');
+            const statusBar = document.getElementById('conv-prev-copy-status');
+            if (statusBar) {
+                statusBar.style.display = 'flex';
+                statusBar.style.background = 'rgba(245,158,11,0.18)';
+                statusBar.style.borderColor = 'rgba(251,191,36,0.55)';
+                statusBar.style.color = '#fde68a';
+                statusBar.innerHTML = '<span><i class="fa-solid fa-highlighter"></i> First drag your mouse across any text in the preview box below to highlight it, then click <strong>&rarr; Title / Author / Publisher / Synopsis</strong>.</span>';
+            } else {
+                alert('First highlight any text inside the book preview box below, then click this button to copy it into the field.');
+            }
             return;
         }
+        const cleaned = field === 'description' ? sel.trim() : sel.replace(/\s+/g, ' ').trim();
         const el = document.getElementById(`merge-input-${field}`);
         if (el) {
-            el.value = field === 'description' ? sel.trim() : sel.replace(/\s+/g, ' ').trim();
+            el.value = cleaned;
             el.style.borderColor = '#4ade80';
-            setTimeout(() => { el.style.borderColor = ''; }, 900);
+            el.style.boxShadow = '0 0 0 2px rgba(74,222,128,0.35)';
+            setTimeout(() => { el.style.borderColor = ''; el.style.boxShadow = ''; }, 1400);
+        }
+        if (currentModalItem) {
+            if (currentModalItem._initialTitle === undefined) currentModalItem._initialTitle = currentModalItem.title || '';
+            if (currentModalItem._initialAuthor === undefined) currentModalItem._initialAuthor = currentModalItem.author || '';
+            currentModalItem[field] = cleaned;
+            currentModalItem[`_custom_${field}`] = cleaned;
+        }
+        const newPickEl = document.getElementById(`pick-new-${field}`);
+        if (newPickEl) {
+            if (field === 'title') {
+                newPickEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i></span><div style="font-weight:700; font-size:0.88rem; color:#f8fafc; word-break:break-word;">${escHtml(cleaned)}</div>`;
+            } else if (field === 'author') {
+                newPickEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i></span><div style="font-size:0.78rem; color:#94a3b8;">Author: <strong style="color:#cbd5e1;">${escHtml(cleaned)}</strong></div>`;
+            } else if (field === 'publisher') {
+                newPickEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i></span><div style="font-size:0.76rem; color:#94a3b8;">Publisher: <span style="color:#cbd5e1;">${escHtml(cleaned)}</span></div>`;
+            } else if (field === 'description') {
+                newPickEl.style.color = '';
+                newPickEl.style.fontStyle = '';
+                newPickEl.innerHTML = `<span class="pick-badge"><i class="fa-solid fa-check"></i> Selected</span>${escHtml(cleaned)}`;
+            }
+        }
+        pickField(field, 'new', true);
+        if (field === 'title' || field === 'author') {
+            const covInput = document.getElementById('conv-cover-search-input');
+            if (covInput) {
+                const curT = (document.getElementById('merge-input-title')?.value || '').trim();
+                const curA = (document.getElementById('merge-input-author')?.value || '').trim();
+                const cleanA = (curA && !['unknown', 'unknown author', '..'].includes(curA.toLowerCase())) ? curA : '';
+                if (curT) covInput.value = [curT, cleanA].filter(Boolean).join(' ').trim();
+            }
+        }
+        const fieldLabelMap = { title: 'Title', author: 'Author', publisher: 'Publisher', description: 'Synopsis' };
+        const fieldLabel = fieldLabelMap[field] || field;
+        if (btnEl) {
+            const origHtml = btnEl.dataset.origHtml || btnEl.innerHTML;
+            btnEl.dataset.origHtml = origHtml;
+            btnEl.innerHTML = `<i class="fa-solid fa-check"></i> ${fieldLabel} Set!`;
+            btnEl.style.background = 'rgba(34,197,94,0.32)';
+            btnEl.style.borderColor = '#4ade80';
+            btnEl.style.color = '#bbf7d0';
+            setTimeout(() => {
+                btnEl.innerHTML = origHtml;
+                btnEl.style.background = '';
+                btnEl.style.borderColor = '';
+                btnEl.style.color = '';
+            }, 1800);
+        }
+        const statusBar = document.getElementById('conv-prev-copy-status');
+        if (statusBar) {
+            const shortVal = cleaned.length > 75 ? (cleaned.slice(0, 75) + '…') : cleaned;
+            statusBar.style.display = 'flex';
+            statusBar.style.background = 'rgba(34,197,94,0.16)';
+            statusBar.style.borderColor = 'rgba(74,222,128,0.5)';
+            statusBar.style.color = '#bbf7d0';
+            statusBar.innerHTML = `
+                <span style="min-width:0; word-break:break-word;"><i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> <strong>${escHtml(fieldLabel)}</strong> set to: <strong style="color:#fff;">"${escHtml(shortVal)}"</strong></span>
+                <span style="display:flex; gap:0.4rem; flex-wrap:wrap; align-items:center;">
+                    <button type="button" onclick="approveModalItem()" style="background:#22c55e; border:1px solid #4ade80; color:#052e16; border-radius:5px; font-size:0.72rem; font-weight:700; padding:0.22rem 0.65rem; cursor:pointer;">
+                        <i class="fa-solid fa-check"></i> Approve &amp; Save Now
+                    </button>
+                    <button type="button" onclick="reEnrichModalItem()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#bae6fd; border-radius:5px; font-size:0.72rem; font-weight:700; padding:0.22rem 0.6rem; cursor:pointer;" title="Search epubmeta / Google Books / Open Library using this ${escHtml(fieldLabel)} hint">
+                        <i class="fa-solid fa-arrows-rotate"></i> Re-Enrich with Hint
+                    </button>
+                    <button type="button" onclick="const inp=document.getElementById('merge-input-${field}'); if(inp){inp.scrollIntoView({behavior:'smooth',block:'center'}); inp.focus();}" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#e2e8f0; border-radius:5px; font-size:0.71rem; padding:0.2rem 0.5rem; cursor:pointer;">
+                        <i class="fa-solid fa-arrow-down"></i> Edit Below
+                    </button>
+                </span>
+            `;
         }
     }
 
@@ -2267,12 +2472,12 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         const rawTitle = (document.getElementById('merge-input-title')?.value || '').trim();
         const rawAuthors = (document.getElementById('merge-input-author')?.value || '').trim();
         const rawIsbn = (document.getElementById('merge-input-isbn')?.value || '').trim();
-        const candTitle = (currentModalItem.title ? String(currentModalItem.title) : '').trim();
-        const candAuthors = (currentModalItem.author ? String(currentModalItem.author) : '').trim();
+        const candTitle = (currentModalItem._initialTitle !== undefined ? String(currentModalItem._initialTitle) : (currentModalItem.title ? String(currentModalItem.title) : '')).trim();
+        const candAuthors = (currentModalItem._initialAuthor !== undefined ? String(currentModalItem._initialAuthor) : (currentModalItem.author ? String(currentModalItem.author) : '')).trim();
         const candIsbn = (currentModalItem.isbn ? String(currentModalItem.isbn) : '').trim();
         const isInternalCode = /^\d{3}_[A-Za-z0-9_]+$/.test(rawTitle);
-        const hintTitle = (rawTitle && rawTitle !== candTitle && !isInternalCode) ? rawTitle : '';
-        const hintAuthors = (rawAuthors && rawAuthors !== candAuthors && rawAuthors.toLowerCase() !== 'asura01') ? rawAuthors : '';
+        const hintTitle = (rawTitle && (rawTitle !== candTitle || currentModalItem._custom_title) && !isInternalCode) ? rawTitle : '';
+        const hintAuthors = (rawAuthors && (rawAuthors !== candAuthors || currentModalItem._custom_author) && rawAuthors.toLowerCase() !== 'asura01') ? rawAuthors : '';
         const hintIsbn = (rawIsbn && rawIsbn !== candIsbn) ? rawIsbn : '';
         try {
             const resp = await fetch('/mylibrary/api/enrich/', {

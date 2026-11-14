@@ -388,6 +388,84 @@ def adjust_cached_books_count(delta: int) -> None:
         pass
 
 
+_FAST_EXCLUDE_WINDOW_CACHE: dict[str, dict] = {}
+_FAST_EXCLUDE_DISK_FILE = Path('/tmp/mylibrary_needs_enriching_window.json')
+
+
+def _load_fast_exclude_window(cache_key: str) -> dict:
+    import time as _time
+    import uuid as _uuid
+
+    now_m = _time.monotonic()
+    now_w = _time.time()
+    win = _FAST_EXCLUDE_WINDOW_CACHE.get(cache_key)
+    if win and (now_m - win.get('updated_at', 0.0) > 1800.0):
+        win = None
+
+    try:
+        if _FAST_EXCLUDE_DISK_FILE.exists():
+            st_mtime = _FAST_EXCLUDE_DISK_FILE.stat().st_mtime
+            if (now_w - st_mtime < 1800.0) and (win is None or st_mtime > win.get('disk_mtime', 0.0)):
+                raw = json.loads(_FAST_EXCLUDE_DISK_FILE.read_text(encoding='utf-8')) or {}
+                entry = raw.get(cache_key)
+                if isinstance(entry, dict):
+                    cands = [_uuid.UUID(str(x)) for x in (entry.get('candidate_ids') or ()) if x]
+                    win = {
+                        'candidate_ids': cands,
+                        'next_cursor': int(entry.get('next_cursor') or 0),
+                        'last_title': str(entry.get('last_title') or ''),
+                        'updated_at': now_m,
+                        'disk_mtime': st_mtime,
+                    }
+                    _FAST_EXCLUDE_WINDOW_CACHE[cache_key] = win
+    except Exception:
+        pass
+
+    if win is None:
+        win = {
+            'candidate_ids': [],
+            'next_cursor': 0,
+            'last_title': '',
+            'updated_at': now_m,
+            'disk_mtime': now_w,
+        }
+        _FAST_EXCLUDE_WINDOW_CACHE[cache_key] = win
+    return win
+
+
+def _save_fast_exclude_window(cache_key: str, win: dict) -> None:
+    import time as _time
+
+    now_m = _time.monotonic()
+    now_w = _time.time()
+    win['updated_at'] = now_m
+    win['disk_mtime'] = now_w
+    _FAST_EXCLUDE_WINDOW_CACHE[cache_key] = win
+    try:
+        existing: dict = {}
+        if _FAST_EXCLUDE_DISK_FILE.exists():
+            try:
+                existing = json.loads(_FAST_EXCLUDE_DISK_FILE.read_text(encoding='utf-8')) or {}
+            except Exception:
+                existing = {}
+        if len(existing) > 16:
+            existing.clear()
+        existing[cache_key] = {
+            'next_cursor': int(win.get('next_cursor') or 0),
+            'last_title': str(win.get('last_title') or ''),
+            'candidate_ids': [str(x) for x in (win.get('candidate_ids') or ())[:2500]],
+        }
+        tmp_p = _FAST_EXCLUDE_DISK_FILE.with_suffix(f'.tmp.{os.getpid()}')
+        tmp_p.write_text(json.dumps(existing), encoding='utf-8')
+        tmp_p.replace(_FAST_EXCLUDE_DISK_FILE)
+        try:
+            win['disk_mtime'] = _FAST_EXCLUDE_DISK_FILE.stat().st_mtime
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 class _PrecomputedCountPaginator(Paginator):
     """Paginator that uses a precomputed total count when available to skip full-table COUNT(*)."""
 
@@ -395,6 +473,7 @@ class _PrecomputedCountPaginator(Paginator):
         super().__init__(object_list, per_page, **kwargs)
         self._precomputed_count = precomputed_count
         self._fast_exclude_ids_set = getattr(object_list, '_fast_exclude_ids_set', None)
+        self._fast_exclude_cache_key = getattr(object_list, '_fast_exclude_cache_key', None)
 
     @cached_property
     def count(self):
@@ -403,8 +482,22 @@ class _PrecomputedCountPaginator(Paginator):
         try:
             excl_set = self._fast_exclude_ids_set
             if excl_set:
-                cands = list(self.object_list.values_list('id', flat=True)[:2500])
-                return len([cid for cid in cands if cid not in excl_set and str(cid) not in excl_set][:1200])
+                cache_key = self._fast_exclude_cache_key or 'default'
+                win = _load_fast_exclude_window(cache_key)
+                cands = [
+                    cid for cid in win.get('candidate_ids', [])
+                    if cid not in excl_set and str(cid) not in excl_set
+                ]
+                if len(cands) >= 24:
+                    return max(len(cands), 1200)
+                start_cur = int(win.get('next_cursor') or 0)
+                raw_cands = list(self.object_list.values_list('id', flat=True)[start_cur:start_cur + 2500])
+                filtered = [cid for cid in raw_cands if cid not in excl_set and str(cid) not in excl_set]
+                if filtered:
+                    win['candidate_ids'] = (cands + filtered)[:2500]
+                    win['next_cursor'] = start_cur + len(raw_cands)
+                    _save_fast_exclude_window(cache_key, win)
+                return len((cands + filtered)[:1200])
             return len(list(self.object_list.values_list('id', flat=True)[:1200]))
         except Exception:
             return super().count
@@ -418,31 +511,108 @@ class _PrecomputedCountPaginator(Paginator):
         top = bottom + self.per_page
         if top + self.orphans >= self.count:
             top = self.count
-        matched_ids = []
-        cursor = 0
-        batch_sz = max(top + 80, 200)
+
+        from .opds import get_file_enrich_diagnostic, is_file_enriched
+
+        cache_key = self._fast_exclude_cache_key or 'default'
+        win = _load_fast_exclude_window(cache_key)
+        matched_ids = [
+            cid for cid in (win.get('candidate_ids') or ())
+            if cid not in excl_set and str(cid) not in excl_set
+        ]
+        seen_matched = set(matched_ids)
+        cursor = int(win.get('next_cursor') or 0)
+        last_title = str(win.get('last_title') or '')
+        initial_cursor = cursor
+        initial_last_title = last_title
+        key_parts = cache_key.split('|')
+        sort_part = key_parts[3] if len(key_parts) > 3 else ''
+        use_title_keyset = sort_part in ('', 'title_asc')
+        target_fill = max(top + 48, 600)
+        batch_sz = max(top + 400, 2500)
+        window_dirty = len(matched_ids) != len(win.get('candidate_ids') or ())
+
         try:
-            while len(matched_ids) < top:
-                cand_batch = list(self.object_list.values_list('id', flat=True)[cursor:cursor + batch_sz])
-                if not cand_batch:
-                    break
-                for cid in cand_batch:
-                    if cid not in excl_set and str(cid) not in excl_set:
-                        matched_ids.append(cid)
-                        if len(matched_ids) >= top:
+            for pass_idx in range(2):
+                while len(matched_ids) < target_fill:
+                    if use_title_keyset:
+                        scan_qs = self.object_list.filter(title__gt=last_title) if last_title else self.object_list
+                        cand_rows = list(scan_qs.values_list('id', 'title')[:batch_sz])
+                        if not cand_rows:
                             break
-                if len(cand_batch) < batch_sz:
+                        last_title = str(cand_rows[-1][1] or last_title)
+                        cursor += len(cand_rows)
+                        window_dirty = True
+                        for cid, _ctitle in cand_rows:
+                            if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
+                                matched_ids.append(cid)
+                                seen_matched.add(cid)
+                        if len(cand_rows) < batch_sz:
+                            break
+                    else:
+                        cand_batch = list(self.object_list.values_list('id', flat=True)[cursor:cursor + batch_sz])
+                        if not cand_batch:
+                            break
+                        cursor += len(cand_batch)
+                        window_dirty = True
+                        for cid in cand_batch:
+                            if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
+                                matched_ids.append(cid)
+                                seen_matched.add(cid)
+                        if len(cand_batch) < batch_sz:
+                            break
+                        batch_sz = min(batch_sz * 2, 3000)
+                if len(matched_ids) >= top or (initial_cursor == 0 and not initial_last_title) or pass_idx == 1:
                     break
-                cursor += batch_sz
-                batch_sz = min(batch_sz * 2, 2000)
-            page_ids = matched_ids[bottom:top]
-            if not page_ids:
+                cursor = 0
+                last_title = ''
+                initial_cursor = 0
+                initial_last_title = ''
+
+            cand_slice = matched_ids[bottom:top + 24]
+            if not cand_slice:
+                if window_dirty:
+                    win['candidate_ids'] = matched_ids[:2500]
+                    win['next_cursor'] = cursor
+                    win['last_title'] = last_title
+                    _save_fast_exclude_window(cache_key, win)
                 return self._get_page([], number, self)
+
             items_by_id = {
                 it.id: it
-                for it in CatalogItem.objects.filter(id__in=page_ids).order_by().prefetch_related('files')
+                for it in CatalogItem.objects.filter(id__in=cand_slice).order_by().prefetch_related('files')
             }
-            page_items = [items_by_id[pid] for pid in page_ids if pid in items_by_id]
+            need_cnt = max(0, top - bottom)
+            page_items = []
+            stale_ids = set()
+            for pid in cand_slice:
+                it = items_by_id.get(pid)
+                if not it:
+                    stale_ids.add(pid)
+                    continue
+                f_list = list(it.files.all())
+                already_done = any(
+                    f.file_path and (is_file_enriched(f.file_path) or get_file_enrich_diagnostic(f.file_path) is not None)
+                    for f in f_list
+                )
+                if already_done:
+                    stale_ids.add(pid)
+                    excl_set.add(pid)
+                    continue
+                page_items.append(it)
+                if len(page_items) >= need_cnt:
+                    break
+
+            if stale_ids:
+                matched_ids = [cid for cid in matched_ids if cid not in stale_ids]
+                window_dirty = True
+
+            if window_dirty:
+                win['candidate_ids'] = matched_ids[:2500]
+                win['next_cursor'] = cursor
+                win['last_title'] = last_title
+                _save_fast_exclude_window(cache_key, win)
+
             return self._get_page(page_items, number, self)
         except Exception:
             return super().page(number)
@@ -650,9 +820,13 @@ class DashboardView(ListView):
             if not item_types:
                 qs = qs.filter(item_type='BOOK')
             complete_q = (
-                Q(isbn__isnull=False) & ~Q(isbn='')
+                (
+                    (Q(isbn__isnull=False) & ~Q(isbn=''))
+                    | (Q(asin__isnull=False) & ~Q(asin=''))
+                    | Q(pub_date__isnull=False)
+                )
                 & Q(description__isnull=False) & ~Q(description='')
-                & ~Q(authors='Unknown Author') & ~Q(authors='')
+                & Q(authors__isnull=False) & ~Q(authors='Unknown Author') & ~Q(authors='')
             )
             qs = qs.exclude(complete_q)
             excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
@@ -761,9 +935,13 @@ class DashboardView(ListView):
                 if not item_types and shelf not in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_all'):
                     qs = qs.filter(item_type='BOOK')
                 complete_q = (
-                    Q(isbn__isnull=False) & ~Q(isbn='')
+                    (
+                        (Q(isbn__isnull=False) & ~Q(isbn=''))
+                        | (Q(asin__isnull=False) & ~Q(asin=''))
+                        | Q(pub_date__isnull=False)
+                    )
                     & Q(description__isnull=False) & ~Q(description='')
-                    & ~Q(authors='Unknown Author') & ~Q(authors='')
+                    & Q(authors__isnull=False) & ~Q(authors='Unknown Author') & ~Q(authors='')
                 )
                 qs = qs.exclude(complete_q)
                 excl_ids = enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx['enriched_ids']
@@ -869,6 +1047,11 @@ class DashboardView(ListView):
         final_qs = qs.prefetch_related('files')
         if fast_exclude_ids_set is not None:
             final_qs._fast_exclude_ids_set = fast_exclude_ids_set
+            final_qs._fast_exclude_cache_key = (
+                f"{query}|{shelf}|{enrich_status}|{sort_by}|"
+                f"{','.join(sorted(item_types))}|{','.join(sorted(file_formats))}|"
+                f"{selected_tag}|{selected_folder}|{selected_author}|{read_status}"
+            )
         return final_qs
 
     def get_paginator(self, queryset, per_page, orphans=0, allow_empty_first_page=True, **kwargs):
@@ -3352,8 +3535,8 @@ class OnDemandEnrichAPIView(APIView):
         from .opds import enrich_catalog_item_on_demand, enrich_file_location_on_demand
 
         body = request.data or {}
-        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
-        file_id = (body.get('file_id') or request.GET.get('file_id') or '').strip()
+        item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
         force = str(body.get('force', request.GET.get('force', 'false'))).lower() in ('1', 'true', 'yes', 'force')
         re_enrich = str(body.get('re_enrich', request.GET.get('re_enrich', 'false'))).lower() in ('1', 'true', 'yes')
@@ -3362,6 +3545,7 @@ class OnDemandEnrichAPIView(APIView):
         hint_isbn = (body.get('hint_isbn') or request.GET.get('hint_isbn') or '').strip()
         force_ai_vision = str(body.get('force_ai_vision', request.GET.get('force_ai_vision', 'false'))).lower() in ('1', 'true', 'yes')
         review_only = str(body.get('review_only', request.GET.get('review_only', 'false'))).lower() in ('1', 'true', 'yes')
+        ai_describe_no_match = str(body.get('ai_describe_no_match', request.GET.get('ai_describe_no_match', 'false'))).lower() in ('1', 'true', 'yes')
         raw_ai_imgs = body.get('ai_image_data_uris') or body.get('ai_image_data_uri') or []
         if isinstance(raw_ai_imgs, str):
             ai_image_data_uris = [raw_ai_imgs.strip()] if raw_ai_imgs.strip() else []
@@ -3384,6 +3568,7 @@ class OnDemandEnrichAPIView(APIView):
                 ai_image_data_uris=ai_image_data_uris,
                 force_ai_vision=force_ai_vision,
                 review_only=review_only,
+                ai_describe_no_match=ai_describe_no_match,
             )
             return Response(res, status=200 if res.get('ok') else 422)
 
@@ -3405,6 +3590,7 @@ class OnDemandEnrichAPIView(APIView):
                     ai_image_data_uris=ai_image_data_uris,
                     force_ai_vision=force_ai_vision,
                     review_only=review_only,
+                    ai_describe_no_match=ai_describe_no_match,
                 )
                 return Response(res, status=200 if res.get('ok') else 422)
 
@@ -3430,6 +3616,7 @@ class OnDemandEnrichAPIView(APIView):
                 ai_image_data_uris=ai_image_data_uris,
                 force_ai_vision=force_ai_vision,
                 review_only=review_only,
+                ai_describe_no_match=ai_describe_no_match,
             )
             res['requested_item_id'] = item_id
             return Response(res, status=200 if res.get('ok') else 422)
@@ -3449,8 +3636,8 @@ class RevertEnrichAPIView(APIView):
         from .opds import resolve_catalog_item_by_id_or_fallback, revert_catalog_item_enrichment
 
         body = request.data or {}
-        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
-        file_id = (body.get('file_id') or request.GET.get('file_id') or '').strip()
+        item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
 
         loc = None
@@ -3485,8 +3672,8 @@ class MoveToMagAPIView(APIView):
         )
 
         body = request.data or {}
-        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
-        file_id = (body.get('file_id') or request.GET.get('file_id') or '').strip()
+        item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
 
         if file_id:
             loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
@@ -3517,8 +3704,8 @@ class UndoMoveToMagAPIView(APIView):
         from .opds import undo_move_from_tomags
 
         body = request.data or {}
-        item_id = (body.get('item_id') or request.GET.get('item_id') or '').strip()
-        file_id = (body.get('file_id') or request.GET.get('file_id') or '').strip()
+        item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         moved_files = body.get('moved_files')
         if isinstance(moved_files, str):
             moved_files = [x.strip() for x in moved_files.split(',') if x.strip()]
@@ -3610,11 +3797,14 @@ class CoverSearchAPIView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    def get(self, request):
+        return self.post(request)
+
     def post(self, request):
         from .opds import search_book_covers_web
 
-        body = request.data or {}
-        query = (body.get('query') or request.GET.get('query') or '').strip()
+        body = request.data if hasattr(request, 'data') and isinstance(request.data, dict) else {}
+        query = (body.get('query') or request.GET.get('query') or request.GET.get('q') or '').strip()
         title = (body.get('title') or request.GET.get('title') or '').strip()
         authors = (body.get('authors') or request.GET.get('authors') or '').strip()
         isbn = (body.get('isbn') or request.GET.get('isbn') or '').strip()
@@ -3657,6 +3847,105 @@ class CoverApplyAPIView(APIView):
             title=title,
             authors=authors,
             query=query,
+        )
+        return Response(res, status=200 if res.get('ok') else 422)
+
+
+class CoverGenerateAPIView(APIView):
+    """
+    On-demand Book Cover Generator & Original Cover Revert API (`POST /mylibrary/api/cover-generate/`):
+      - `action="generate"` (default): Generates a new custom cover based on the book's description,
+        content, tags, and title, saves it to `catalog_generated_covers` in BookDB, and applies it.
+      - `action="revert_original"`: Reverts the book's active cover back to its original cover
+        while keeping generated covers saved in BookDB.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import generate_book_cover_for_item, revert_book_cover_to_original
+
+        body = request.data or {}
+        action = (body.get('action') or 'generate').strip().lower()
+        item_id = (body.get('item_id') or '').strip()
+        file_id = (body.get('file_id') or '').strip()
+        file_path = (body.get('file_path') or '').strip()
+        isbn = (body.get('isbn') or '').strip()
+        title = (body.get('title') or '').strip()
+        authors = (body.get('authors') or '').strip()
+        publisher = (body.get('publisher') or '').strip()
+        description = (body.get('description') or '').strip()
+        style_hint = (body.get('style_hint') or '').strip()
+        query = (body.get('query') or '').strip()
+        apply_immediately = str(body.get('apply_immediately', 'true')).lower() not in ('0', 'false', 'no')
+
+        if action in ('revert', 'revert_original', 'original'):
+            res = revert_book_cover_to_original(
+                item_id,
+                file_id=file_id,
+                file_path=file_path,
+                isbn=isbn,
+                title=title,
+                authors=authors,
+                query=query,
+            )
+            return Response(res, status=200 if res.get('ok') else 422)
+
+        res = generate_book_cover_for_item(
+            item_id,
+            file_id=file_id,
+            file_path=file_path,
+            isbn=isbn,
+            title=title,
+            authors=authors,
+            publisher=publisher,
+            description=description,
+            style_hint=style_hint,
+            query=query,
+            apply_immediately=apply_immediately,
+        )
+        return Response(res, status=200 if res.get('ok') else 422)
+
+
+class AiDescriptionGenerateAPIView(APIView):
+    """
+    On-demand AI Content-Based Description Generator API (`POST /mylibrary/api/ai-description/`):
+    Generates a 2-4 sentence synopsis grounded in the book's actual content (front matter,
+    table of contents, preface, opening chapters, and/or rendered page images) when a book
+    has no description and resulted in a No Match (`NOT_FOUND` / `NO_ISBN`), and saves it to BookDB.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        from .opds import generate_ai_description_from_content
+
+        body = request.data or {}
+        item_id = str(body.get('item_id') or '').strip()
+        file_id = str(body.get('file_id') or '').strip()
+        file_path = str(body.get('file_path') or '').strip()
+        isbn = str(body.get('isbn') or '').strip()
+        title = str(body.get('title') or '').strip()
+        raw_authors = body.get('authors')
+        if isinstance(raw_authors, list):
+            authors = ', '.join(str(a).strip() for a in raw_authors if str(a or '').strip())
+        else:
+            authors = str(raw_authors or '').strip()
+        publisher = str(body.get('publisher') or '').strip()
+        apply_immediately = str(body.get('apply_immediately', 'true')).lower() not in ('0', 'false', 'no')
+
+        if not (item_id or file_id or file_path or isbn or title):
+            return Response({'ok': False, 'error': 'Please provide item_id, file_id, file_path, isbn, or title.'}, status=400)
+
+        res = generate_ai_description_from_content(
+            item_or_id=item_id,
+            file_id=file_id,
+            file_path=file_path,
+            isbn=isbn,
+            title=title,
+            authors=authors,
+            publisher=publisher,
+            apply_immediately=apply_immediately,
         )
         return Response(res, status=200 if res.get('ok') else 422)
 

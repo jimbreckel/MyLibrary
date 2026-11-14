@@ -255,6 +255,20 @@ const initCatalogSearch = () => {
         const fileDiag = filesData.find(f => f && (f.enrich_error || f.enrich_status));
         const errStatus = btn.getAttribute('data-enrich-status') || (fileDiag ? fileDiag.enrich_status : '') || (cardEnrBtn && cardEnrBtn._reviewData ? cardEnrBtn._reviewData.status : '') || '';
         const errMsg = btn.getAttribute('data-enrich-error') || (fileDiag ? fileDiag.enrich_error : '') || (cardEnrBtn && cardEnrBtn._reviewData ? cardEnrBtn._reviewData.message : '') || '';
+        const errUpper = (errStatus || '').toUpperCase();
+        const isNoMatchItem = !isEnriched && (errUpper === 'NOT_FOUND' || errUpper === 'NO_ISBN');
+        const hasNoDescItem = !window._activeModalItem.desc || !window._activeModalItem.desc.trim();
+        const modalAiDescBtn = document.getElementById('modal-btn-ai-desc');
+        const modalAiDescSt = document.getElementById('modal-ai-desc-status');
+        if (modalAiDescSt) {
+            modalAiDescSt.style.display = 'none';
+            modalAiDescSt.textContent = '';
+        }
+        if (modalAiDescBtn) {
+            modalAiDescBtn.disabled = false;
+            modalAiDescBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content`;
+            modalAiDescBtn.style.display = 'inline-flex';
+        }
         const errBanner = document.getElementById('modal-enrich-error-banner');
         if (errBanner) {
             if (!isEnriched && (errMsg || errStatus)) {
@@ -263,6 +277,9 @@ const initCatalogSearch = () => {
                 errBanner.style.background = isRev ? 'rgba(251,191,36,0.14)' : 'rgba(239,68,68,0.14)';
                 errBanner.style.borderColor = isRev ? 'rgba(251,191,36,0.48)' : 'rgba(239,68,68,0.48)';
                 errBanner.style.color = isRev ? '#fde68a' : '#fecaca';
+                const aiDescBannerBtnHtml = (isNoMatchItem && hasNoDescItem)
+                    ? `<button type="button" id="modal-err-ai-desc-btn" style="background:rgba(168,85,247,0.26); border:1px solid rgba(168,85,247,0.62); color:#f3e8ff; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.75rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="No Match &amp; No Description — Generate a synopsis from this book's actual content with Gemini AI"><i class="fa-solid fa-wand-magic-sparkles"></i> AI Describe from Content</button>`
+                    : '';
                 errBanner.innerHTML = `
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem; flex-wrap:wrap;">
                         <div style="flex:1; min-width:220px;">
@@ -273,6 +290,7 @@ const initCatalogSearch = () => {
                             <div style="font-family:monospace; font-size:0.78rem; color:#f8fafc; word-break:break-word; line-height:1.4;">${escapeHtml(errMsg || ('Enrichment status: ' + errStatus))}</div>
                         </div>
                         <div style="display:flex; gap:0.45rem; flex-wrap:wrap; align-items:center;">
+                            ${aiDescBannerBtnHtml}
                             <button type="button" id="modal-err-keep-btn" style="background:rgba(16,185,129,0.22); border:1px solid rgba(16,185,129,0.55); color:#6ee7b7; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.75rem; font-weight:700; cursor:pointer; white-space:nowrap;" title="Current metadata already looks right — mark as Enriched/Approved as-is">
                                 <i class="fa-solid fa-check"></i> Keep As-Is
                             </button>
@@ -285,6 +303,12 @@ const initCatalogSearch = () => {
                         </div>
                     </div>
                 `;
+                const errAiDescBtn = document.getElementById('modal-err-ai-desc-btn');
+                if (errAiDescBtn) {
+                    errAiDescBtn.onclick = () => {
+                        window.generateAiDescriptionForItem({ itemId, mode: 'modal', btn: errAiDescBtn });
+                    };
+                }
                 const errKeepBtn = document.getElementById('modal-err-keep-btn');
                 if (errKeepBtn) {
                     errKeepBtn.onclick = () => {
@@ -1032,6 +1056,20 @@ const initCatalogSearch = () => {
         };
 
         let modalPeekPages = [];
+        let _lastPreviewSelectedText = '';
+
+        document.addEventListener('selectionchange', () => {
+            try {
+                const selObj = window.getSelection ? window.getSelection() : null;
+                if (!selObj || selObj.isCollapsed) return;
+                const txt = (selObj.toString() || '').trim();
+                if (!txt) return;
+                const anchor = selObj.anchorNode ? (selObj.anchorNode.nodeType === 1 ? selObj.anchorNode : selObj.anchorNode.parentElement) : null;
+                if (anchor && anchor.closest && (anchor.closest('#er-book-preview-drawer') || anchor.closest('#modal-book-peek-drawer'))) {
+                    _lastPreviewSelectedText = txt;
+                }
+            } catch (_) { }
+        });
 
         window.toggleModalBookPeek = function ({ itemId = '', fileId = '', filePath = '', forceShow = false } = {}) {
             const drawer = document.getElementById('modal-book-peek-drawer');
@@ -1063,6 +1101,8 @@ const initCatalogSearch = () => {
             if (isbnsBar) { isbnsBar.style.display = 'none'; isbnsBar.innerHTML = ''; }
             if (metaInfo) metaInfo.textContent = '';
             if (rawLink) rawLink.style.display = 'none';
+            const copySt = document.getElementById('modal-peek-copy-status');
+            if (copySt) { copySt.style.display = 'none'; copySt.innerHTML = ''; }
 
             const params = new URLSearchParams();
             if (targetFilePath) params.set('file_path', targetFilePath);
@@ -1151,6 +1191,126 @@ const initCatalogSearch = () => {
                 btn.style.borderColor = active ? 'rgba(56,189,248,0.6)' : 'rgba(255,255,255,0.12)';
                 btn.style.color = active ? '#f8fafc' : '#cbd5e1';
             });
+        };
+
+        window.modalPeekUseSelectedText = function (targetField, btnEl = null) {
+            const liveSel = (window.getSelection ? window.getSelection().toString() : '').trim();
+            const sel = liveSel || (_lastPreviewSelectedText || '').trim();
+            if (!sel) {
+                alert('First highlight any text inside the book preview box below, then click this button to copy it into the field.');
+                return;
+            }
+            const clean = sel.replace(/\s+/g, ' ').trim();
+            const finalVal = targetField === 'desc' ? sel.trim() : clean;
+            const active = window._activeModalItem || {};
+            if (!active._peekStagedMeta) active._peekStagedMeta = {};
+            active._peekStagedMeta[targetField] = finalVal;
+
+            const labels = { title: 'Title', author: 'Author', publisher: 'Publisher', desc: 'Synopsis' };
+            const fieldLabel = labels[targetField] || targetField;
+
+            if (btnEl) {
+                const origHtml = btnEl.dataset.origHtml || btnEl.innerHTML;
+                btnEl.dataset.origHtml = origHtml;
+                btnEl.innerHTML = `<i class="fa-solid fa-check"></i> ${fieldLabel} Set!`;
+                btnEl.style.background = 'rgba(16,185,129,0.28)';
+                btnEl.style.borderColor = '#4ade80';
+                btnEl.style.color = '#4ade80';
+                setTimeout(() => {
+                    btnEl.innerHTML = origHtml;
+                    btnEl.style.background = 'rgba(56,189,248,0.16)';
+                    btnEl.style.borderColor = 'rgba(56,189,248,0.4)';
+                    btnEl.style.color = '#38bdf8';
+                }, 1500);
+            }
+
+            const statusBar = document.getElementById('modal-peek-copy-status');
+            if (statusBar) {
+                const shortPreview = finalVal.length > 90 ? finalVal.slice(0, 90) + '…' : finalVal;
+                statusBar.style.display = 'flex';
+                statusBar.innerHTML = `
+                    <div style="min-width:0; flex:1;">
+                        <strong style="color:#4ade80;"><i class="fa-solid fa-check"></i> ${escapeHtml(fieldLabel)} staged:</strong>
+                        <span style="color:#f8fafc; font-weight:600; margin-left:0.25rem;">"${escapeHtml(shortPreview)}"</span>
+                    </div>
+                    <div style="display:flex; gap:0.4rem; align-items:center; flex-shrink:0;">
+                        <button type="button" onclick="window.saveModalPeekStagedMetadata(this)" style="background:rgba(74,222,128,0.24); border:1px solid rgba(74,222,128,0.6); color:#4ade80; border-radius:6px; padding:0.24rem 0.65rem; font-size:0.74rem; font-weight:700; cursor:pointer;">
+                            <i class="fa-solid fa-floppy-disk"></i> Save Metadata Now
+                        </button>
+                    </div>
+                `;
+            }
+        };
+
+        window.saveModalPeekStagedMetadata = function (btnEl = null) {
+            const active = window._activeModalItem || {};
+            const staged = active._peekStagedMeta || {};
+            const drawer = document.getElementById('modal-book-peek-drawer');
+            const ctx = (drawer && drawer._peekCtx) || {};
+            const targetItemId = ctx.itemId || active.itemId || '';
+            const targetFilePath = ctx.filePath || active.firstFilePath || '';
+            const selectedMetadata = {
+                title: staged.title !== undefined ? staged.title : (active.title || ''),
+                author: staged.author !== undefined ? staged.author : (active.authors || ''),
+                publisher: staged.publisher !== undefined ? staged.publisher : (active.publisher || ''),
+                pub_date: active.pubDate || '',
+                isbn: active.isbn || '',
+                description: staged.desc !== undefined ? staged.desc : (active.desc || ''),
+                cover: active.cover || '',
+            };
+            const origHtml = btnEl ? btnEl.innerHTML : '';
+            if (btnEl) {
+                btnEl.disabled = true;
+                btnEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
+            }
+            fetch(`${BASE_PREFIX}/api/status/items/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: JSON.stringify({
+                    action: 'approve',
+                    item_id: targetItemId,
+                    file_path: targetFilePath,
+                    selected_metadata: selectedMetadata,
+                })
+            })
+                .then(r => r.json())
+                .then(res => {
+                    if (btnEl) {
+                        btnEl.disabled = false;
+                        btnEl.innerHTML = res && res.ok ? `<i class="fa-solid fa-check"></i> Saved!` : origHtml;
+                    }
+                    if (res && res.ok) {
+                        active.title = selectedMetadata.title;
+                        active.authors = selectedMetadata.author;
+                        active.publisher = selectedMetadata.publisher;
+                        active.desc = selectedMetadata.description;
+                        active._peekStagedMeta = {};
+                        transitionCardEnrichBucket(targetItemId, 'enriched');
+                        applyCardMetadataUpdate(targetItemId, {
+                            item_id: res.item_id || targetItemId,
+                            title: selectedMetadata.title,
+                            authors: selectedMetadata.author,
+                            publisher: selectedMetadata.publisher,
+                            pub_date: selectedMetadata.pub_date,
+                            isbn: selectedMetadata.isbn,
+                            description: selectedMetadata.description,
+                            cover_url: res.cover_url || selectedMetadata.cover,
+                            merged_item_ids: res.merged_item_ids || [],
+                        }, true);
+                    } else {
+                        alert((res && res.error) || 'Could not save metadata.');
+                    }
+                })
+                .catch(err => {
+                    if (btnEl) {
+                        btnEl.disabled = false;
+                        btnEl.innerHTML = origHtml;
+                    }
+                    alert('Network error saving metadata: ' + err.message);
+                });
         };
 
         window.useModalPeekCover = function (imgIdx, btnEl) {
@@ -2102,6 +2262,7 @@ const initCatalogSearch = () => {
                 resultsEl.innerHTML = '';
                 covers.forEach(c => {
                     const isOrig = c.source === 'Original Cover';
+                    const isGen = Boolean(c.is_generated || (c.source && c.source.startsWith('🎨')));
                     const isColorMatch = Boolean(c.same_cover_in_color);
                     const card = document.createElement('div');
                     card.className = 'cover-cand-card';
@@ -2111,10 +2272,14 @@ const initCatalogSearch = () => {
                     } else if (isOrig) {
                         card.style.borderColor = '#4ade80';
                         card.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.45)';
+                    } else if (isGen) {
+                        card.style.borderColor = '#c084fc';
+                        card.style.boxShadow = '0 0 0 1px rgba(192, 132, 252, 0.45)';
                     }
-                    const badgeColor = isColorMatch ? '#fbbf24' : (isOrig ? '#4ade80' : '#38bdf8');
-                    card.title = `${c.title} (${c.source}) — Click to apply this cover`;
+                    const badgeColor = isColorMatch ? '#fbbf24' : (isOrig ? '#4ade80' : (isGen ? '#e9d5ff' : '#38bdf8'));
+                    card.title = `${c.title} (${c.source}) — Click to apply this cover (or click 🔍 to zoom)`;
                     card.innerHTML = `
+                    <button type="button" class="cover-cand-zoom-btn" title="Zoom in &amp; inspect this cover full-screen"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
                     <img src="${escapeHtml(c.cover_url)}" data-fallback="${escapeHtml(c.fallback_url || '')}" alt="Cover candidate" loading="lazy" onerror="if(this.dataset.fallback && this.src !== this.dataset.fallback){this.src=this.dataset.fallback;}else{this.closest('.cover-cand-card').style.display='none';}">
                     <div class="cover-cand-meta">
                         <div style="font-weight:700; color:${badgeColor}; font-size:0.64rem; text-transform:uppercase;">${isOrig && !isColorMatch ? '★ ' : ''}${escapeHtml(c.source)}</div>
@@ -2122,6 +2287,17 @@ const initCatalogSearch = () => {
                         <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#94a3b8;">${escapeHtml(c.authors)}</div>
                     </div>
                 `;
+                    const zBtn = card.querySelector('.cover-cand-zoom-btn');
+                    if (zBtn) {
+                        zBtn.addEventListener('click', ev => {
+                            ev.stopPropagation();
+                            const imgEl = card.querySelector('img');
+                            const activeUrl = (imgEl && imgEl.src) ? imgEl.src : c.cover_url;
+                            window.openCoverZoomLightbox(activeUrl, `${c.title || 'Book Cover'} (${c.source})`, () => {
+                                window.applyWebCover(activeUrl, card, c.fallback_url || '');
+                            });
+                        });
+                    }
                     card.addEventListener('click', () => window.applyWebCover(c.cover_url, card, c.fallback_url || ''));
                     resultsEl.appendChild(card);
                 });
@@ -2176,7 +2352,14 @@ const initCatalogSearch = () => {
                 fallback_url: fallbackUrl || '',
             })
         })
-            .then(r => r.json())
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
             .then(res => {
                 if (res.ok) {
                     const finalCover = res.cover_url || coverUrl;
@@ -2209,6 +2392,667 @@ const initCatalogSearch = () => {
                 if (statusEl) statusEl.textContent = 'Network error saving cover: ' + err.message;
             });
     };
+
+    window.generateBookCover = function (mode = 'modal') {
+        const isReview = mode === 'review';
+        const statusEl = document.getElementById(isReview ? 'er-cover-finder-status' : 'cover-finder-status');
+        const resultsEl = document.getElementById(isReview ? 'er-cover-finder-results' : 'cover-finder-results');
+        const genBtn = document.getElementById(isReview ? 'er-btn-generate-cover' : 'btn-generate-cover');
+        const inputEl = document.getElementById(isReview ? 'er-cover-search-input' : 'cover-search-input');
+
+        let payload = { action: 'generate' };
+        if (isReview) {
+            if (!activeReviewCtx || !activeReviewCtx.data) return;
+            const d = activeReviewCtx.data;
+            payload.item_id = activeReviewCtx.itemId || d.item_id || '';
+            payload.file_id = activeReviewCtx.fileId || d.file_id || '';
+            payload.file_path = d.file_path || '';
+            payload.isbn = d.candidate_isbn || d.orig_isbn || '';
+            payload.title = d.candidate_title || d.orig_title || '';
+            payload.authors = d.candidate_authors || d.orig_authors || '';
+            payload.publisher = d.candidate_publisher || d.orig_publisher || '';
+            payload.description = d.candidate_description || d.orig_description || '';
+            payload.query = inputEl ? inputEl.value.trim() : '';
+        } else {
+            const ctx = window._activeModalItem || {};
+            const fallbackTitle = (document.getElementById('modal-title')?.textContent || '').trim();
+            const fallbackAuthors = (document.getElementById('modal-authors')?.textContent || '').trim();
+            payload.item_id = ctx.itemId || '';
+            payload.file_id = ctx.firstFileId || '';
+            payload.file_path = ctx.firstFilePath || '';
+            payload.isbn = ctx.isbn || '';
+            payload.title = ctx.title || fallbackTitle || '';
+            payload.authors = ctx.authors || fallbackAuthors || '';
+            payload.publisher = ctx.publisher || '';
+            payload.description = ctx.description || '';
+            payload.query = inputEl ? inputEl.value.trim() : '';
+        }
+
+        if (genBtn) genBtn.disabled = true;
+        if (statusEl) {
+            statusEl.innerHTML = `<span style="color:#e9d5ff;"><i class="fa-solid fa-wand-magic-sparkles fa-spin"></i> Designing &amp; rendering new custom book cover from description, opening pages &amp; tags...</span>`;
+        }
+
+        fetch(`${BASE_PREFIX}/api/cover-generate/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify(payload)
+        })
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
+            .then(res => {
+                if (genBtn) genBtn.disabled = false;
+                if (!res.ok) {
+                    if (statusEl) {
+                        statusEl.innerHTML = `<span style="color:#f87171;">Could not generate cover: ${escapeHtml(res.error || 'Unknown error')}</span>`;
+                    }
+                    return;
+                }
+                const genCoverUrl = res.cover_url;
+                const resolvedId = res.item_id || payload.item_id;
+                const styleLabel = res.style_label || `🎨 Generated #${res.gen_count || 1}`;
+                const cardTitle = res.title || payload.title || 'Generated Cover';
+                const cardAuthors = res.authors || payload.authors || '';
+
+                if (resultsEl && genCoverUrl) {
+                    resultsEl.querySelectorAll('.cover-cand-card').forEach(el => {
+                        if (el.dataset.isOrig === '1') {
+                            el.style.borderColor = '#4ade80';
+                            el.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.45)';
+                        } else if (el.dataset.isGen === '1') {
+                            el.style.borderColor = '#c084fc';
+                            el.style.boxShadow = '0 0 0 1px rgba(192, 132, 252, 0.35)';
+                        } else {
+                            el.style.borderColor = 'rgba(255,255,255,0.12)';
+                            el.style.boxShadow = 'none';
+                        }
+                    });
+
+                    const card = document.createElement('div');
+                    card.className = 'cover-cand-card';
+                    card.dataset.isGen = '1';
+                    card.style.borderColor = '#4ade80';
+                    card.style.boxShadow = '0 0 0 2px rgba(74, 222, 128, 0.55)';
+                    card.title = `${cardTitle} (${styleLabel}) — Saved in BookDB. Click to apply this cover (or click 🔍 to zoom)`;
+                    card.innerHTML = `
+                        <button type="button" class="cover-cand-zoom-btn" title="Zoom in &amp; inspect this cover full-screen"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+                        <img src="${escapeHtml(genCoverUrl)}" alt="Generated cover" loading="lazy">
+                        <div class="cover-cand-meta">
+                            <div style="font-weight:700; color:#e9d5ff; font-size:0.64rem; text-transform:uppercase;">${escapeHtml(styleLabel)}</div>
+                            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600;" title="${escapeHtml(cardTitle)}">${escapeHtml(cardTitle)}</div>
+                            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#94a3b8;">${escapeHtml(cardAuthors)}</div>
+                        </div>
+                    `;
+                    const zBtn = card.querySelector('.cover-cand-zoom-btn');
+                    if (zBtn) {
+                        zBtn.addEventListener('click', ev => {
+                            ev.stopPropagation();
+                            window.openCoverZoomLightbox(genCoverUrl, `${cardTitle} (${styleLabel})`, () => {
+                                if (isReview) {
+                                    window.erSelectWebCover(genCoverUrl, '', styleLabel, card);
+                                } else {
+                                    window.applyWebCover(genCoverUrl, card, '');
+                                }
+                            });
+                        });
+                    }
+                    if (isReview) {
+                        card.addEventListener('click', () => {
+                            window.erSelectWebCover(genCoverUrl, '', styleLabel, card);
+                        });
+                    } else {
+                        card.addEventListener('click', () => {
+                            window.applyWebCover(genCoverUrl, card, '');
+                        });
+                    }
+
+                    // Insert right after Original Cover if present, or at the very beginning
+                    const firstCard = resultsEl.firstElementChild;
+                    const firstMeta = firstCard ? firstCard.querySelector('.cover-cand-meta div') : null;
+                    if (firstCard && firstMeta && firstMeta.textContent.includes('Original Cover')) {
+                        resultsEl.insertBefore(card, firstCard.nextSibling);
+                    } else {
+                        resultsEl.insertBefore(card, firstCard);
+                    }
+                }
+
+                if (isReview) {
+                    if (activeReviewCtx && activeReviewCtx.data) {
+                        const d = activeReviewCtx.data;
+                        if (res.item_id) {
+                            activeReviewCtx.itemId = res.item_id;
+                            d.item_id = res.item_id;
+                        }
+                        d.candidate_cover = genCoverUrl;
+                        d.UseDataUriCover = genCoverUrl;
+                        const candCoverRow = document.getElementById('er-field-cover-cand');
+                        if (candCoverRow) {
+                            const leftWrap = candCoverRow.querySelector('div');
+                            if (leftWrap) {
+                                leftWrap.innerHTML = `
+                                    <img src="${escapeHtml(genCoverUrl)}" alt="Cover" style="width:42px; height:60px; object-fit:cover; border-radius:4px; background:#020617; flex-shrink:0;">
+                                    <div>
+                                        <span style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; display:block;">Select Cover (Candidate)</span>
+                                        <span id="er-cover-lbl-cand" style="font-size:0.76rem; color:#e9d5ff; font-weight:600;">${escapeHtml(styleLabel)}</span>
+                                    </div>
+                                `;
+                            }
+                        }
+                        window.erPickField('cover', 'cand', true);
+                    }
+                    if (resolvedId) {
+                        applyCardMetadataUpdate(resolvedId, { cover_url: genCoverUrl }, true);
+                    }
+                } else {
+                    const ctx = window._activeModalItem || {};
+                    const updPayload = { item_id: resolvedId, cover_url: genCoverUrl };
+                    if (res.metadata_updated) {
+                        if (res.title) updPayload.title = res.title;
+                        if (res.authors) updPayload.authors = res.authors;
+                        if (res.description) updPayload.description = res.description;
+                    }
+                    if (window._activeModalItem) {
+                        window._activeModalItem.cover = genCoverUrl;
+                        if (res.item_id) window._activeModalItem.itemId = res.item_id;
+                        if (res.metadata_updated && res.title) window._activeModalItem.title = res.title;
+                        if (res.metadata_updated && res.authors) window._activeModalItem.authors = res.authors;
+                    }
+                    applyCardMetadataUpdate(ctx.itemId || resolvedId, updPayload, true);
+                    if (resolvedId && ctx.itemId && resolvedId !== ctx.itemId) {
+                        applyCardMetadataUpdate(resolvedId, updPayload, false);
+                    }
+                    const cardDom = document.getElementById(`card-${resolvedId}`) || document.getElementById(`card-${ctx.itemId}`);
+                    if (cardDom) {
+                        const issBadge = cardDom.querySelector('.card-cover-issue-badge');
+                        if (issBadge) issBadge.remove();
+                        const covActRow = cardDom.querySelector('.card-cover-actions-row');
+                        if (covActRow) covActRow.remove();
+                    }
+                }
+
+                if (res.missing_cover_count !== undefined) {
+                    const cntEl = document.getElementById('sidebar-missing-cover-count');
+                    if (cntEl) cntEl.textContent = Number(res.missing_cover_count).toLocaleString();
+                }
+
+                if (statusEl) {
+                    statusEl.innerHTML = `<span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-check"></i> Generated &amp; saved <strong style="color:#e9d5ff;">${escapeHtml(styleLabel)}</strong> to BookDB!</span> <span style="color:#94a3b8;">(Click <b>🎨 Generate Cover</b> again to add another variation, or <b>↩ Original Cover</b> to revert)</span>`;
+                }
+            })
+            .catch(err => {
+                if (genBtn) genBtn.disabled = false;
+                if (statusEl) statusEl.textContent = 'Network error generating cover: ' + err.message;
+            });
+    };
+
+    function updateItemDescriptionInDom(targetId, newDesc) {
+        if (!newDesc) return;
+        const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        if (card) {
+            const descEl = card.querySelector('.card-description');
+            if (descEl) descEl.textContent = newDesc;
+            const detBtn = card.querySelector('.btn-details');
+            if (detBtn) {
+                detBtn.setAttribute('data-desc', newDesc);
+                if (detBtn._enrichResultData) {
+                    detBtn._enrichResultData.candidate_description = newDesc;
+                }
+            }
+            const enrBtn = card.querySelector('.btn-enrich-card');
+            if (enrBtn && enrBtn._reviewData) {
+                enrBtn._reviewData.candidate_description = newDesc;
+            }
+            const aiRow = card.querySelector('.card-ai-desc-row');
+            if (aiRow) {
+                const aiCardBtn = aiRow.querySelector('.btn-ai-desc-card');
+                if (aiCardBtn) {
+                    aiCardBtn.disabled = false;
+                    aiCardBtn.innerHTML = `<i class="fa-solid fa-check"></i> AI Description Saved`;
+                    aiCardBtn.style.background = 'rgba(74,222,128,0.18)';
+                    aiCardBtn.style.borderColor = 'rgba(74,222,128,0.5)';
+                    aiCardBtn.style.color = '#4ade80';
+                }
+            }
+        }
+        if (window._activeModalItem && (!targetId || String(window._activeModalItem.itemId) === String(targetId))) {
+            window._activeModalItem.desc = newDesc;
+            const modalDescEl = document.getElementById('modal-desc');
+            if (modalDescEl) {
+                modalDescEl.innerHTML = escapeHtml(newDesc).replace(/\n/g, '<br>');
+            }
+            const errAiBtn = document.getElementById('modal-err-ai-desc-btn');
+            if (errAiBtn) errAiBtn.style.display = 'none';
+            const modalAiBtn = document.getElementById('modal-btn-ai-desc');
+            if (modalAiBtn) {
+                modalAiBtn.disabled = false;
+                modalAiBtn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> Regenerate AI Description`;
+            }
+            const modalAiSt = document.getElementById('modal-ai-desc-status');
+            if (modalAiSt) {
+                modalAiSt.style.display = 'inline';
+                modalAiSt.innerHTML = `<i class="fa-solid fa-check"></i> Generated from content &amp; saved`;
+            }
+        }
+    }
+
+    window.generateAiDescriptionForItem = function ({ itemId = '', fileId = '', filePath = '', mode = 'modal', btn = null } = {}) {
+        const isReview = mode === 'review';
+        const isCard = mode === 'card';
+        const revData = (isReview && activeReviewCtx && activeReviewCtx.data) ? activeReviewCtx.data : null;
+        const activeModal = (!isReview && !isCard && window._activeModalItem) ? window._activeModalItem : {};
+
+        let targetItemId = itemId || (revData ? (revData.item_id || activeReviewCtx.itemId || '') : (activeModal.itemId || ''));
+        let targetFileId = fileId || (revData ? (revData.file_id || activeReviewCtx.fileId || '') : (activeModal.firstFileId || ''));
+        let targetFilePath = filePath || (revData ? (revData.file_path || '') : (activeModal.firstFilePath || '')) || (isReview ? (document.getElementById('er-file-path')?.textContent || '').trim() : '');
+        let titleHint = '';
+        let authorsHint = '';
+        let pubHint = '';
+        let isbnHint = '';
+
+        if (isReview) {
+            titleHint = (document.getElementById('er-input-title')?.value || (revData && (revData.orig_title || revData.candidate_title)) || '').trim();
+            authorsHint = (document.getElementById('er-input-author')?.value || (revData && (revData.orig_authors || revData.candidate_authors)) || '').trim();
+            pubHint = (document.getElementById('er-input-publisher')?.value || (revData && (revData.orig_publisher || revData.candidate_publisher)) || '').trim();
+            isbnHint = (document.getElementById('er-input-isbn')?.value || (revData && (revData.orig_isbn || revData.candidate_isbn)) || '').trim();
+        } else if (mode === 'card' && targetItemId) {
+            const cardEl = document.getElementById(`card-${targetItemId}`);
+            const detBtn = cardEl ? cardEl.querySelector('.btn-details') : null;
+            if (detBtn) {
+                titleHint = detBtn.getAttribute('data-title') || '';
+                authorsHint = detBtn.getAttribute('data-authors') || '';
+                pubHint = detBtn.getAttribute('data-publisher') || '';
+                isbnHint = detBtn.getAttribute('data-isbn') || '';
+                try {
+                    const fArr = JSON.parse(detBtn.getAttribute('data-files') || '[]');
+                    if (fArr.length > 0) {
+                        if (!targetFileId && fArr[0].id) targetFileId = fArr[0].id;
+                        if (!targetFilePath && fArr[0].file_path) targetFilePath = fArr[0].file_path;
+                    }
+                } catch (e) { }
+            }
+        } else {
+            titleHint = activeModal.title || '';
+            authorsHint = activeModal.authors || '';
+            pubHint = activeModal.publisher || '';
+            isbnHint = activeModal.isbn || '';
+        }
+
+        const origBtnHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Reading Book &amp; Generating...`;
+        }
+        const statusSpan = document.getElementById(isReview ? 'er-ai-desc-status' : 'modal-ai-desc-status');
+        if (statusSpan && mode !== 'card') {
+            statusSpan.style.display = 'inline';
+            statusSpan.style.color = '#d8b4fe';
+            statusSpan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Analyzing book content with Gemini AI...`;
+        }
+
+        fetch(`${BASE_PREFIX}/api/ai-description/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify({
+                item_id: targetItemId,
+                file_id: targetFileId,
+                file_path: targetFilePath,
+                title: titleHint,
+                authors: authorsHint,
+                publisher: pubHint,
+                isbn: isbnHint,
+                apply_immediately: true,
+            })
+        })
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
+            .then(res => {
+                if (!res || !res.ok || !res.description) {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = origBtnHtml;
+                    }
+                    const errMsg = (res && res.error) || 'Could not generate AI description from book content.';
+                    if (statusSpan && mode !== 'card') {
+                        statusSpan.style.display = 'inline';
+                        statusSpan.style.color = '#fca5a5';
+                        statusSpan.textContent = errMsg;
+                    } else {
+                        alert(errMsg);
+                    }
+                    return;
+                }
+
+                const newDesc = res.description;
+                const resolvedId = res.item_id || targetItemId;
+                updateItemDescriptionInDom(resolvedId, newDesc);
+
+                if (isReview) {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> Regenerate AI Description`;
+                    }
+                    const noMatchHint = document.getElementById('er-no-match-desc-hint');
+                    if (noMatchHint) noMatchHint.style.display = 'none';
+                    if (revData) {
+                        revData.candidate_description = newDesc;
+                        const candDescBox = document.querySelector('#er-field-desc-cand > span');
+                        if (candDescBox) {
+                            candDescBox.style.color = '#f8fafc';
+                            candDescBox.textContent = newDesc.length > 160 ? (newDesc.slice(0, 160) + '…') : newDesc;
+                        }
+                        window.erPickField('desc', 'cand', true);
+                    }
+                    const descInput = document.getElementById('er-input-desc');
+                    if (descInput) descInput.value = newDesc;
+                    if (statusSpan) {
+                        statusSpan.style.display = 'inline';
+                        statusSpan.style.color = '#4ade80';
+                        statusSpan.innerHTML = `<i class="fa-solid fa-check"></i> Generated from content &amp; saved to BookDB (click <b>Approve Selected Fields</b> to mark Enriched)`;
+                    }
+                } else if (mode === 'modal' && btn && btn.id !== 'modal-btn-ai-desc') {
+                    btn.style.display = 'none';
+                }
+            })
+            .catch(err => {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origBtnHtml;
+                }
+                if (statusSpan && mode !== 'card') {
+                    statusSpan.style.display = 'inline';
+                    statusSpan.style.color = '#fca5a5';
+                    statusSpan.textContent = 'Network error: ' + err.message;
+                } else {
+                    alert('Network error generating AI description: ' + err.message);
+                }
+            });
+    };
+
+    window.revertBookCoverToOriginal = function (mode = 'modal') {
+        const isReview = mode === 'review';
+        const statusEl = document.getElementById(isReview ? 'er-cover-finder-status' : 'cover-finder-status');
+        const resultsEl = document.getElementById(isReview ? 'er-cover-finder-results' : 'cover-finder-results');
+        const revBtn = document.getElementById(isReview ? 'er-btn-revert-original-cover' : 'btn-revert-original-cover');
+
+        let payload = { action: 'revert_original' };
+        if (isReview) {
+            if (!activeReviewCtx || !activeReviewCtx.data) return;
+            const d = activeReviewCtx.data;
+            payload.item_id = activeReviewCtx.itemId || d.item_id || '';
+            payload.file_id = activeReviewCtx.fileId || d.file_id || '';
+            payload.file_path = d.file_path || '';
+            payload.isbn = d.candidate_isbn || d.orig_isbn || '';
+            payload.title = d.candidate_title || d.orig_title || '';
+            payload.authors = d.candidate_authors || d.orig_authors || '';
+        } else {
+            const ctx = window._activeModalItem || {};
+            const fallbackTitle = (document.getElementById('modal-title')?.textContent || '').trim();
+            const fallbackAuthors = (document.getElementById('modal-authors')?.textContent || '').trim();
+            payload.item_id = ctx.itemId || '';
+            payload.file_id = ctx.firstFileId || '';
+            payload.file_path = ctx.firstFilePath || '';
+            payload.isbn = ctx.isbn || '';
+            payload.title = ctx.title || fallbackTitle || '';
+            payload.authors = ctx.authors || fallbackAuthors || '';
+        }
+
+        if (revBtn) revBtn.disabled = true;
+        if (statusEl) {
+            statusEl.innerHTML = `<i class="fa-solid fa-rotate-left fa-spin"></i> Reverting active cover back to the book's original cover...`;
+        }
+
+        fetch(`${BASE_PREFIX}/api/cover-generate/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken')
+            },
+            body: JSON.stringify(payload)
+        })
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
+            .then(res => {
+                if (revBtn) revBtn.disabled = false;
+                if (!res.ok) {
+                    if (statusEl) {
+                        statusEl.innerHTML = `<span style="color:#f87171;">Could not revert cover: ${escapeHtml(res.error || 'Unknown error')}</span>`;
+                    }
+                    return;
+                }
+                const origCoverUrl = res.cover_url || '';
+                const resolvedId = res.item_id || payload.item_id;
+
+                if (resultsEl) {
+                    resultsEl.querySelectorAll('.cover-cand-card').forEach(el => {
+                        const metaDiv = el.querySelector('.cover-cand-meta div');
+                        const isOrigCard = metaDiv && metaDiv.textContent.includes('Original Cover');
+                        if (isOrigCard) {
+                            el.style.borderColor = '#4ade80';
+                            el.style.boxShadow = '0 0 0 2px rgba(74, 222, 128, 0.55)';
+                        } else if (el.dataset.isGen === '1' || (metaDiv && metaDiv.textContent.includes('🎨'))) {
+                            el.style.borderColor = '#c084fc';
+                            el.style.boxShadow = '0 0 0 1px rgba(192, 132, 252, 0.35)';
+                        } else {
+                            el.style.borderColor = 'rgba(255,255,255,0.12)';
+                            el.style.boxShadow = 'none';
+                        }
+                    });
+                }
+
+                if (isReview) {
+                    if (activeReviewCtx && activeReviewCtx.data) {
+                        const d = activeReviewCtx.data;
+                        d.orig_cover = origCoverUrl || d.orig_cover || '';
+                        d.UseDataUriCover = '';
+                        window.erPickField('cover', 'orig', true);
+                    }
+                    if (resolvedId && origCoverUrl) {
+                        applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl }, true);
+                    }
+                } else {
+                    const ctx = window._activeModalItem || {};
+                    if (window._activeModalItem) {
+                        window._activeModalItem.cover = origCoverUrl;
+                        if (res.item_id) window._activeModalItem.itemId = res.item_id;
+                    }
+                    applyCardMetadataUpdate(ctx.itemId || resolvedId, { item_id: resolvedId, cover_url: origCoverUrl }, true);
+                    if (resolvedId && ctx.itemId && resolvedId !== ctx.itemId) {
+                        applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl }, false);
+                    }
+                }
+
+                if (res.missing_cover_count !== undefined) {
+                    const cntEl = document.getElementById('sidebar-missing-cover-count');
+                    if (cntEl) cntEl.textContent = Number(res.missing_cover_count).toLocaleString();
+                }
+
+                if (statusEl) {
+                    statusEl.innerHTML = `<span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-rotate-left"></i> Reverted to the original cover!</span> <span style="color:#94a3b8;">(Your generated covers remain saved in BookDB below and can be re-selected anytime)</span>`;
+                }
+            })
+            .catch(err => {
+                if (revBtn) revBtn.disabled = false;
+                if (statusEl) statusEl.textContent = 'Network error reverting cover: ' + err.message;
+            });
+    };
+
+    // Interactive Cover Zoom Lightbox state & handlers
+    let _coverZoomScale = 1;
+    let _coverZoomX = 0;
+    let _coverZoomY = 0;
+    let _coverZoomDragging = false;
+    let _coverZoomStartX = 0;
+    let _coverZoomStartY = 0;
+    let _coverZoomListenersBound = false;
+
+    function _applyCoverZoomTransform() {
+        const img = document.getElementById('cover-zoom-img');
+        const lbl = document.getElementById('cover-zoom-level');
+        const stage = document.getElementById('cover-zoom-stage');
+        if (img) {
+            img.style.transform = `translate(${_coverZoomX}px, ${_coverZoomY}px) scale(${_coverZoomScale})`;
+        }
+        if (lbl) {
+            lbl.textContent = `${Math.round(_coverZoomScale * 100)}%`;
+        }
+        if (stage) {
+            stage.style.cursor = _coverZoomDragging ? 'grabbing' : (_coverZoomScale > 1.02 ? 'grab' : 'zoom-in');
+        }
+    }
+
+    function _bindCoverZoomListenersOnce() {
+        if (_coverZoomListenersBound) return;
+        const lb = document.getElementById('cover-zoom-lightbox');
+        const stage = document.getElementById('cover-zoom-stage');
+        const img = document.getElementById('cover-zoom-img');
+        if (!lb || !stage || !img) return;
+        _coverZoomListenersBound = true;
+
+        stage.addEventListener('wheel', ev => {
+            ev.preventDefault();
+            const delta = ev.deltaY < 0 ? 0.25 : -0.25;
+            window.adjustCoverZoom(delta);
+        }, { passive: false });
+
+        stage.addEventListener('mousedown', ev => {
+            if (ev.button !== 0) return;
+            if (ev.target === stage && _coverZoomScale <= 1.02) {
+                window.closeCoverZoomLightbox();
+                return;
+            }
+            _coverZoomDragging = true;
+            _coverZoomStartX = ev.clientX - _coverZoomX;
+            _coverZoomStartY = ev.clientY - _coverZoomY;
+            img.style.transition = 'none';
+            _applyCoverZoomTransform();
+        });
+
+        window.addEventListener('mousemove', ev => {
+            if (!_coverZoomDragging) return;
+            _coverZoomX = ev.clientX - _coverZoomStartX;
+            _coverZoomY = ev.clientY - _coverZoomStartY;
+            _applyCoverZoomTransform();
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!_coverZoomDragging) return;
+            _coverZoomDragging = false;
+            if (img) img.style.transition = 'transform 0.08s ease-out';
+            _applyCoverZoomTransform();
+        });
+
+        img.addEventListener('dblclick', ev => {
+            ev.stopPropagation();
+            if (_coverZoomScale > 1.3) {
+                window.resetCoverZoom(1);
+            } else {
+                window.resetCoverZoom(2.25);
+            }
+        });
+
+        document.addEventListener('keydown', ev => {
+            if (ev.key === 'Escape' && lb.style.display !== 'none' && lb.style.display !== '') {
+                ev.stopPropagation();
+                window.closeCoverZoomLightbox();
+            }
+        });
+    }
+
+    window.openCoverZoomLightbox = function (src, titleText = '', onApplyCallback = null) {
+        if (!src || src === window.location.href) return;
+        const lb = document.getElementById('cover-zoom-lightbox');
+        const img = document.getElementById('cover-zoom-img');
+        const titleEl = document.getElementById('cover-zoom-title');
+        const applyBtn = document.getElementById('cover-zoom-apply-btn');
+        if (!lb || !img) return;
+
+        _bindCoverZoomListenersOnce();
+        img.src = src;
+        if (titleEl) {
+            titleEl.textContent = titleText || 'Book Cover Preview';
+        }
+        if (applyBtn) {
+            if (typeof onApplyCallback === 'function') {
+                applyBtn.style.display = 'inline-flex';
+                applyBtn.onclick = () => {
+                    onApplyCallback();
+                    window.closeCoverZoomLightbox();
+                };
+            } else {
+                applyBtn.style.display = 'none';
+                applyBtn.onclick = null;
+            }
+        }
+        _coverZoomScale = 1;
+        _coverZoomX = 0;
+        _coverZoomY = 0;
+        _applyCoverZoomTransform();
+        lb.style.display = 'flex';
+    };
+
+    window.closeCoverZoomLightbox = function () {
+        const lb = document.getElementById('cover-zoom-lightbox');
+        if (lb) lb.style.display = 'none';
+        _coverZoomDragging = false;
+    };
+
+    window.adjustCoverZoom = function (delta) {
+        _coverZoomScale = Math.max(0.5, Math.min(5.0, Number((_coverZoomScale + delta).toFixed(2))));
+        if (_coverZoomScale <= 1.0) {
+            _coverZoomX = 0;
+            _coverZoomY = 0;
+        }
+        _applyCoverZoomTransform();
+    };
+
+    window.resetCoverZoom = function (targetScale = 1) {
+        _coverZoomScale = targetScale;
+        _coverZoomX = 0;
+        _coverZoomY = 0;
+        _applyCoverZoomTransform();
+    };
+
+    // Delegated click listener so clicking ANY book cover (on a shelf card, in Book Details, or in Review Modal) pops up the zoomed cover
+    document.addEventListener('click', ev => {
+        const cardImg = ev.target.closest('.card-header-image img.cover-image');
+        if (cardImg && cardImg.src) {
+            ev.stopPropagation();
+            const card = cardImg.closest('.media-card');
+            const titleTxt = (card?.querySelector('.card-title')?.textContent || cardImg.alt || 'Book Cover').trim();
+            window.openCoverZoomLightbox(cardImg.src, titleTxt);
+            return;
+        }
+        const erImg = ev.target.closest('#er-field-cover-orig img, #er-field-cover-cand img');
+        if (erImg && erImg.src) {
+            ev.stopPropagation();
+            const curT = (document.getElementById('er-input-title')?.value || 'Book Cover').trim();
+            window.openCoverZoomLightbox(erImg.src, curT);
+        }
+    });
 
     window.openCardFindCover = function (itemId) {
         const card = document.getElementById(`card-${itemId}`);
@@ -2246,7 +3090,14 @@ const initCatalogSearch = () => {
                 reason: 'Kept current cover by user'
             })
         })
-            .then(r => r.json())
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
             .then(res => {
                 if (res.ok) {
                     if (res.missing_cover_count !== undefined) {
@@ -2422,6 +3273,24 @@ const initCatalogSearch = () => {
         if (forceBtn) {
             forceBtn.style.display = data.candidate_title ? 'inline-block' : 'none';
         }
+        const stUpperRev = String(data.status || '').toUpperCase();
+        const isRevNoMatch = (stUpperRev === 'NOT_FOUND' || stUpperRev === 'NO_ISBN');
+        const hasAnyRevDesc = Boolean((data.orig_description || data.candidate_description || '').trim());
+        const erAiDescBtn = document.getElementById('er-btn-ai-desc');
+        const erNoMatchDescHint = document.getElementById('er-no-match-desc-hint');
+        const erAiDescSt = document.getElementById('er-ai-desc-status');
+        if (erAiDescSt) {
+            erAiDescSt.style.display = 'none';
+            erAiDescSt.textContent = '';
+        }
+        if (erNoMatchDescHint) {
+            erNoMatchDescHint.style.display = (isRevNoMatch && !hasAnyRevDesc) ? 'inline-block' : 'none';
+        }
+        if (erAiDescBtn) {
+            erAiDescBtn.disabled = false;
+            erAiDescBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description from Content`;
+            erAiDescBtn.style.display = 'inline-flex';
+        }
         const erTagsBox = document.getElementById('er-readonly-tags-box');
         if (erTagsBox) {
             const combinedTags = Array.from(new Set([
@@ -2440,6 +3309,11 @@ const initCatalogSearch = () => {
         if (prevDrawer) {
             prevDrawer.style.display = 'none';
             prevDrawer.dataset.loadedFor = '';
+        }
+        const erCopySt = document.getElementById('er-preview-copy-status');
+        if (erCopySt) {
+            erCopySt.style.display = 'none';
+            erCopySt.innerHTML = '';
         }
         const erCovDrawer = document.getElementById('er-cover-finder-drawer');
         if (erCovDrawer) {
@@ -2552,21 +3426,38 @@ const initCatalogSearch = () => {
                 resultsEl.innerHTML = '';
                 covers.forEach(c => {
                     const isOrig = c.source === 'Original Cover';
+                    const isGen = Boolean(c.is_generated || (c.source && c.source.startsWith('🎨')));
                     const card = document.createElement('div');
                     card.className = 'cover-cand-card';
                     if (isOrig) {
                         card.style.borderColor = '#4ade80';
                         card.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.45)';
+                    } else if (isGen) {
+                        card.style.borderColor = '#c084fc';
+                        card.style.boxShadow = '0 0 0 1px rgba(192, 132, 252, 0.45)';
                     }
-                    card.title = `${c.title} (${c.source}) — Click to use this cover`;
+                    const badgeColor = isOrig ? '#4ade80' : (isGen ? '#e9d5ff' : '#38bdf8');
+                    card.title = `${c.title} (${c.source}) — Click to use this cover (or click 🔍 to zoom)`;
                     card.innerHTML = `
+                    <button type="button" class="cover-cand-zoom-btn" title="Zoom in &amp; inspect this cover full-screen"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
                     <img src="${escapeHtml(c.cover_url)}" data-fallback="${escapeHtml(c.fallback_url || '')}" alt="Cover candidate" loading="lazy" onerror="if(this.dataset.fallback && this.src !== this.dataset.fallback){this.src=this.dataset.fallback;}else{this.closest('.cover-cand-card').style.display='none';}">
                     <div class="cover-cand-meta">
-                        <div style="font-weight:700; color:${isOrig ? '#4ade80' : '#38bdf8'}; font-size:0.64rem; text-transform:uppercase;">${isOrig ? '★ ' : ''}${escapeHtml(c.source)}</div>
+                        <div style="font-weight:700; color:${badgeColor}; font-size:0.64rem; text-transform:uppercase;">${isOrig ? '★ ' : ''}${escapeHtml(c.source)}</div>
                         <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600;" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</div>
                         <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#94a3b8;">${escapeHtml(c.authors)}</div>
                     </div>
                 `;
+                    const zBtn = card.querySelector('.cover-cand-zoom-btn');
+                    if (zBtn) {
+                        zBtn.addEventListener('click', ev => {
+                            ev.stopPropagation();
+                            const imgEl = card.querySelector('img');
+                            const activeUrl = (imgEl && imgEl.src) ? imgEl.src : c.cover_url;
+                            window.openCoverZoomLightbox(activeUrl, `${c.title || 'Book Cover'} (${c.source})`, () => {
+                                window.erSelectWebCover(activeUrl, c.fallback_url || '', c.source, card);
+                            });
+                        });
+                    }
                     card.addEventListener('click', () => {
                         const imgEl = card.querySelector('img');
                         const activeUrl = (imgEl && imgEl.src) ? imgEl.src : c.cover_url;
@@ -2789,18 +3680,107 @@ const initCatalogSearch = () => {
         });
     };
 
-    window.erUseSelectedPreviewText = function (targetField) {
-        const sel = (window.getSelection ? window.getSelection().toString() : '').trim();
+    window.erUseSelectedPreviewText = function (targetField, btnEl = null) {
+        const liveSel = (window.getSelection ? window.getSelection().toString() : '').trim();
+        const sel = liveSel || (_lastPreviewSelectedText || '').trim();
         if (!sel) {
             alert('First highlight any text inside the book preview box below, then click this button to copy it into the field.');
             return;
         }
         const clean = sel.replace(/\s+/g, ' ').trim();
+        const finalVal = targetField === 'desc' ? sel.trim() : clean;
+
+        // 1. Update the Selected Metadata to Save input box (#er-input-...)
         const el = document.getElementById(`er-input-${targetField}`);
         if (el) {
-            el.value = targetField === 'desc' ? sel.trim() : clean;
+            el.value = finalVal;
             el.style.borderColor = '#4ade80';
-            setTimeout(() => { el.style.borderColor = 'rgba(255,255,255,0.16)'; }, 900);
+            el.style.boxShadow = '0 0 0 2px rgba(74, 222, 128, 0.45)';
+            setTimeout(() => {
+                el.style.borderColor = 'rgba(255,255,255,0.16)';
+                el.style.boxShadow = '';
+            }, 1400);
+        }
+
+        // 2. Also update activeReviewCtx.data AND the Candidate Match card (#er-field-<key>-cand) right below the preview box
+        if (activeReviewCtx && activeReviewCtx.data) {
+            const d = activeReviewCtx.data;
+            if (d._initialCandidateTitle === undefined) d._initialCandidateTitle = d.candidate_title || '';
+            if (d._initialCandidateAuthors === undefined) d._initialCandidateAuthors = d.candidate_authors || '';
+            if (targetField === 'title') {
+                d.candidate_title = finalVal;
+                d._userCustomTitle = true;
+            } else if (targetField === 'author') {
+                d.candidate_authors = finalVal;
+                d._userCustomAuthor = true;
+            } else if (targetField === 'publisher') {
+                d.candidate_publisher = finalVal;
+            } else if (targetField === 'desc') {
+                d.candidate_description = finalVal;
+            }
+        }
+        const candBox = document.getElementById(`er-field-${targetField}-cand`);
+        if (candBox) {
+            const valSpans = candBox.querySelectorAll('span');
+            const textSpan = valSpans.length > 0 ? valSpans[valSpans.length - 1] : null;
+            if (textSpan) {
+                textSpan.textContent = finalVal.length > 160 ? finalVal.slice(0, 160) + '…' : finalVal;
+                textSpan.style.color = '#4ade80';
+                textSpan.style.fontWeight = '600';
+            }
+        }
+        window.erHighlightFieldSide(targetField, 'cand');
+
+        // 3. Keep Cover Finder query in sync when Title or Author is updated from preview
+        if (targetField === 'title' || targetField === 'author') {
+            const erCovInput = document.getElementById('er-cover-search-input');
+            if (erCovInput) {
+                const curT = (document.getElementById('er-input-title')?.value || '').trim();
+                const curA = (document.getElementById('er-input-author')?.value || '').trim();
+                const cleanA = (curA && !['unknown', 'unknown author', '..'].includes(curA.toLowerCase())) ? curA : '';
+                if (curT) erCovInput.value = [curT, cleanA].filter(Boolean).join(' ').trim();
+            }
+        }
+
+        // 4. Visual button feedback + inline confirmation banner right inside Inside Book Preview
+        const labels = { title: 'Title', author: 'Author', publisher: 'Publisher', desc: 'Synopsis' };
+        const fieldLabel = labels[targetField] || targetField;
+        if (btnEl) {
+            const origHtml = btnEl.dataset.origHtml || btnEl.innerHTML;
+            btnEl.dataset.origHtml = origHtml;
+            btnEl.innerHTML = `<i class="fa-solid fa-check"></i> ${fieldLabel} Set!`;
+            btnEl.style.background = 'rgba(16,185,129,0.28)';
+            btnEl.style.borderColor = '#4ade80';
+            btnEl.style.color = '#4ade80';
+            setTimeout(() => {
+                btnEl.innerHTML = origHtml;
+                btnEl.style.background = 'rgba(56,189,248,0.16)';
+                btnEl.style.borderColor = 'rgba(56,189,248,0.4)';
+                btnEl.style.color = '#38bdf8';
+            }, 1500);
+        }
+
+        const statusBar = document.getElementById('er-preview-copy-status');
+        if (statusBar) {
+            const shortVal = finalVal.length > 85 ? finalVal.slice(0, 85) + '…' : finalVal;
+            statusBar.style.display = 'flex';
+            statusBar.innerHTML = `
+                <div style="min-width:0; flex:1;">
+                    <strong style="color:#4ade80;"><i class="fa-solid fa-check"></i> ${escapeHtml(fieldLabel)} set to:</strong>
+                    <span style="color:#f8fafc; font-weight:600; margin-left:0.25rem;">"${escapeHtml(shortVal)}"</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:0.4rem; align-items:center; flex-shrink:0;">
+                    <button type="button" onclick="window.erApproveSelected()" style="background:rgba(74,222,128,0.24); border:1px solid rgba(74,222,128,0.6); color:#4ade80; border-radius:6px; padding:0.22rem 0.6rem; font-size:0.73rem; font-weight:700; cursor:pointer;" title="Save the selected fields immediately">
+                        <i class="fa-solid fa-check"></i> Approve &amp; Save Now
+                    </button>
+                    <button type="button" onclick="window.erReEnrichFromModal()" style="background:rgba(56,189,248,0.22); border:1px solid rgba(56,189,248,0.55); color:#38bdf8; border-radius:6px; padding:0.22rem 0.6rem; font-size:0.73rem; font-weight:700; cursor:pointer;" title="Re-run epubmeta lookup using this Title/Author hint">
+                        <i class="fa-solid fa-arrows-rotate"></i> Re-Enrich with Hint
+                    </button>
+                    <button type="button" onclick="window.erFocusManualEdit()" style="background:rgba(148,163,184,0.2); border:1px solid rgba(148,163,184,0.45); color:#e2e8f0; border-radius:6px; padding:0.22rem 0.55rem; font-size:0.72rem; font-weight:600; cursor:pointer;" title="Scroll down to Selected Metadata to Save">
+                        <i class="fa-solid fa-arrow-down"></i> Edit Below
+                    </button>
+                </div>
+            `;
         }
     };
 
@@ -2808,9 +3788,38 @@ const initCatalogSearch = () => {
         const drawer = document.getElementById('er-book-preview-drawer');
         const imgs = drawer && drawer._previewImages ? drawer._previewImages : [];
         if (!imgs[imgIdx] || !activeReviewCtx || !activeReviewCtx.data) return;
-        activeReviewCtx.data.candidate_cover = imgs[imgIdx].data_uri;
-        activeReviewCtx.data.UseDataUriCover = imgs[imgIdx].data_uri;
-        alert(`Selected "${imgs[imgIdx].label}" as the cover image! It will be saved when you click Approve Selected Fields.`);
+        const chosenUri = imgs[imgIdx].data_uri;
+        activeReviewCtx.data.candidate_cover = chosenUri;
+        activeReviewCtx.data.UseDataUriCover = chosenUri;
+        const candCoverRow = document.getElementById('er-field-cover-cand');
+        if (candCoverRow) {
+            const leftWrap = candCoverRow.querySelector('div');
+            if (leftWrap) {
+                leftWrap.innerHTML = `
+                    <img src="${escapeHtml(chosenUri)}" alt="Cover" style="width:42px; height:60px; object-fit:cover; border-radius:4px; background:#020617; flex-shrink:0;">
+                    <div>
+                        <span style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; display:block;">Select Cover (Candidate)</span>
+                        <span id="er-cover-lbl-cand" style="font-size:0.76rem; color:#4ade80; font-weight:600;">${escapeHtml(imgs[imgIdx].label || 'Preview Page Cover')}</span>
+                    </div>
+                `;
+            }
+        }
+        window.erPickField('cover', 'cand', true);
+        const statusBar = document.getElementById('er-preview-copy-status');
+        if (statusBar) {
+            statusBar.style.display = 'flex';
+            statusBar.innerHTML = `
+                <div style="min-width:0; flex:1;">
+                    <strong style="color:#4ade80;"><i class="fa-solid fa-check"></i> Cover set to:</strong>
+                    <span style="color:#f8fafc; font-weight:600; margin-left:0.25rem;">${escapeHtml(imgs[imgIdx].label || 'Preview Page')}</span>
+                </div>
+                <div style="display:flex; gap:0.4rem; align-items:center; flex-shrink:0;">
+                    <button type="button" onclick="window.erApproveSelected()" style="background:rgba(74,222,128,0.24); border:1px solid rgba(74,222,128,0.6); color:#4ade80; border-radius:6px; padding:0.22rem 0.6rem; font-size:0.73rem; font-weight:700; cursor:pointer;">
+                        <i class="fa-solid fa-check"></i> Approve &amp; Save Now
+                    </button>
+                </div>
+            `;
+        }
     };
 
     window.erAiReevaluateFromPreview = function (imgIdx = null, triggerBtn = null) {
@@ -2859,7 +3868,14 @@ const initCatalogSearch = () => {
             },
             body: JSON.stringify(payload)
         })
-            .then(r => r.json())
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
             .then(res => {
                 if (triggerBtn) {
                     triggerBtn.disabled = false;
@@ -3197,13 +4213,13 @@ const initCatalogSearch = () => {
 
         // Only send hint_title / hint_authors / hint_isbn if the user customized them away from the rejected candidate
         // (and away from internal 000_... PDF codes), so Re-Enrich doesn't just re-query the rejected candidate!
-        const candTitle = (data && data.candidate_title ? String(data.candidate_title) : '').trim();
-        const candAuthors = (data && data.candidate_authors ? String(data.candidate_authors) : '').trim();
+        const candTitle = (data && (data._initialCandidateTitle !== undefined ? data._initialCandidateTitle : data.candidate_title) ? String(data._initialCandidateTitle !== undefined ? data._initialCandidateTitle : data.candidate_title) : '').trim();
+        const candAuthors = (data && (data._initialCandidateAuthors !== undefined ? data._initialCandidateAuthors : data.candidate_authors) ? String(data._initialCandidateAuthors !== undefined ? data._initialCandidateAuthors : data.candidate_authors) : '').trim();
         const candIsbn = (data && data.candidate_isbn ? String(data.candidate_isbn) : '').trim();
         const isInternalCode = /^\d{3}_[A-Za-z0-9_]+$/.test(rawTitle);
 
-        const hintTitle = (rawTitle && rawTitle !== candTitle && !isInternalCode) ? rawTitle : '';
-        const hintAuthors = (rawAuthors && rawAuthors !== candAuthors && rawAuthors.toLowerCase() !== 'asura01') ? rawAuthors : '';
+        const hintTitle = (rawTitle && (Boolean(data && data._userCustomTitle) || rawTitle !== candTitle) && !isInternalCode) ? rawTitle : '';
+        const hintAuthors = (rawAuthors && (Boolean(data && data._userCustomAuthor) || rawAuthors !== candAuthors) && rawAuthors.toLowerCase() !== 'asura01') ? rawAuthors : '';
         const hintIsbn = (rawIsbn && rawIsbn !== candIsbn) ? rawIsbn : '';
 
         const payload = {
@@ -3225,7 +4241,14 @@ const initCatalogSearch = () => {
             },
             body: JSON.stringify(payload)
         })
-            .then(r => r.json())
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
             .then(res => {
                 if (reBtn) {
                     reBtn.disabled = false;
@@ -3297,7 +4320,14 @@ const initCatalogSearch = () => {
                 file_path: data.file_path,
             })
         })
-            .then(r => r.json())
+            .then(async r => {
+                const txt = await r.text();
+                try {
+                    return JSON.parse(txt);
+                } catch (_) {
+                    throw new Error(`Server returned HTTP ${r.status}`);
+                }
+            })
             .then(res => {
                 if (res.ok && btn) {
                     btn._reviewData = null;
@@ -3657,7 +4687,12 @@ const initCatalogSearch = () => {
             reBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i>`;
         }
 
-        const payload = { force: Boolean(force), re_enrich: Boolean(reEnrich) };
+        const optAiDescNoMatch = document.getElementById('opt-ai-desc-no-match');
+        const payload = {
+            force: Boolean(force),
+            re_enrich: Boolean(reEnrich),
+            ai_describe_no_match: Boolean(optAiDescNoMatch && optAiDescNoMatch.checked),
+        };
         if (fileId) payload.file_id = fileId;
         else if (itemId) {
             payload.item_id = itemId;
@@ -3782,17 +4817,48 @@ const initCatalogSearch = () => {
                         detBtn.setAttribute('data-enrich-error', errMsg);
                         detBtn._enrichResultData = data;
                     }
+                    if (data.ai_generated_description) {
+                        updateItemDescriptionInDom(targetId, data.ai_generated_description);
+                    } else if ((st === 'NOT_FOUND' || st === 'NO_ISBN') && cardEl) {
+                        const curDescAttr = (detBtn ? (detBtn.getAttribute('data-desc') || '') : '').trim();
+                        const lacksDesc = !curDescAttr || curDescAttr === 'No description available for this item.';
+                        if (lacksDesc) {
+                            let aiRow = cardEl.querySelector('.card-ai-desc-row');
+                            if (!aiRow) {
+                                const row2 = cardEl.querySelector('.card-row2-actions');
+                                if (row2 && row2.parentElement) {
+                                    aiRow = document.createElement('div');
+                                    aiRow.className = 'card-ai-desc-row';
+                                    aiRow.setAttribute('data-item-id', targetId);
+                                    aiRow.style.cssText = 'display:flex; gap:0.38rem; align-items:center; width:100%;';
+                                    aiRow.innerHTML = `<button type="button" class="btn-ai-desc-card" data-item-id="${escapeHtml(targetId)}" onclick="event.stopPropagation(); if(window.generateAiDescriptionForItem) window.generateAiDescriptionForItem({ itemId: '${escapeJsString(targetId)}', mode: 'card', btn: this });" title="No Match &amp; No Description — Use Gemini AI to generate a synopsis based on this book's actual content" style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.32rem; padding:0.4rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.52); color:#e9d5ff; transition:all 0.2s;"><i class="fa-solid fa-wand-magic-sparkles"></i> AI Generate Description</button>`;
+                                    row2.insertAdjacentElement('afterend', aiRow);
+                                }
+                            } else {
+                                aiRow.style.display = 'flex';
+                            }
+                        }
+                    }
                     const errBanner = document.getElementById('modal-enrich-error-banner');
                     if (errBanner && window._activeModalItem && window._activeModalItem.itemId === targetId) {
+                        const curModalDesc = (window._activeModalItem.desc || '').trim();
+                        const showModalAiBtn = (st === 'NOT_FOUND' || st === 'NO_ISBN') && !curModalDesc;
+                        const modalAiBtn = document.getElementById('modal-btn-ai-desc');
+                        if (modalAiBtn) modalAiBtn.style.display = showModalAiBtn ? 'inline-flex' : 'none';
                         errBanner.style.display = 'block';
                         errBanner.style.background = 'rgba(239,68,68,0.14)';
                         errBanner.style.borderColor = 'rgba(239,68,68,0.48)';
                         errBanner.style.color = '#fecaca';
                         errBanner.innerHTML = `
-                            <div style="font-weight:700; font-size:0.78rem; text-transform:uppercase; margin-bottom:0.25rem;">
-                                <i class="fa-solid fa-triangle-exclamation"></i> Enrichment ${escapeHtml(st)} Details
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:220px;">
+                                    <div style="font-weight:700; font-size:0.78rem; text-transform:uppercase; margin-bottom:0.25rem;">
+                                        <i class="fa-solid fa-triangle-exclamation"></i> Enrichment ${escapeHtml(st)} Details
+                                    </div>
+                                    <div style="font-family:monospace; font-size:0.78rem; color:#f8fafc; word-break:break-word;">${escapeHtml(errMsg)}</div>
+                                </div>
+                                ${showModalAiBtn ? `<button type="button" id="modal-err-ai-desc-btn" onclick="window.generateAiDescriptionForItem({ itemId: '${escapeJsString(targetId)}', mode: 'modal', btn: this })" style="background:rgba(168,85,247,0.26); border:1px solid rgba(168,85,247,0.62); color:#f3e8ff; border-radius:6px; padding:0.32rem 0.65rem; font-size:0.75rem; font-weight:700; cursor:pointer; white-space:nowrap;"><i class="fa-solid fa-wand-magic-sparkles"></i> AI Describe from Content</button>` : ''}
                             </div>
-                            <div style="font-family:monospace; font-size:0.78rem; color:#f8fafc; word-break:break-word;">${escapeHtml(errMsg)}</div>
                         `;
                     }
                 }
@@ -3915,6 +4981,14 @@ const initCatalogSearch = () => {
         if (topSortSelect) {
             topSortSelect.addEventListener('change', () => {
                 updateQueryParamAndNavigate('sort', topSortSelect.value);
+            });
+        }
+
+        const aiDescNoMatchToggle = document.getElementById('opt-ai-desc-no-match');
+        if (aiDescNoMatchToggle) {
+            aiDescNoMatchToggle.checked = localStorage.getItem('mylibrary_ai_desc_no_match') === '1';
+            aiDescNoMatchToggle.addEventListener('change', () => {
+                localStorage.setItem('mylibrary_ai_desc_no_match', aiDescNoMatchToggle.checked ? '1' : '0');
             });
         }
 

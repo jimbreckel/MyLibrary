@@ -25,6 +25,12 @@ RAW_ISBN10_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 4. Contiguous 10-char ISBN-10 in filenames / Amazon cover image slugs (e.g. 3135239039.01._SS500_SCLZZZZZZZ_.jpg)
+SLUG_ISBN10_RE = re.compile(
+    r"(?<![0-9A-Za-z])(?P<candidate>[0-8]\d{8}[\dX])(?=(?:\.\d{2}\._[A-Z]{2}|[_\-\s\)]|$))",
+    re.IGNORECASE,
+)
+
 
 def extract_isbns_from_text(text: str) -> List[Tuple[str, str]]:
     """
@@ -67,6 +73,15 @@ def extract_isbns_from_text(text: str) -> List[Tuple[str, str]]:
             isbn13, _ = normalize_isbn(cand)
             if isbn13 and isbn13 not in seen_isbns:
                 found.append((isbn13, "raw-isbn10", 30))
+                seen_isbns.add(isbn13)
+
+    # Pass 4: Contiguous 10-character ISBN-10 in Amazon image slugs / filenames (validated with Mod-11 checksum)
+    for match in SLUG_ISBN10_RE.finditer(text):
+        cand = match.group("candidate")
+        if not cand.startswith(("19", "20")):
+            isbn13, _ = normalize_isbn(cand)
+            if isbn13 and isbn13 not in seen_isbns:
+                found.append((isbn13, "slug-isbn10", 25))
                 seen_isbns.add(isbn13)
 
     # Sort by priority score descending

@@ -189,6 +189,7 @@ def format_diff_table(
 @click.option("--ignore-pdfs", is_flag=True, default=False, help="Ignore .pdf files and only process .epub files.")
 @click.option("--pdf-only", is_flag=True, default=False, help="Only process .pdf files (skip .epub files).")
 @click.option("--pdf-require-isbn", is_flag=True, default=False, help="For PDF files, require a verifiable ISBN (or local cache hit) and skip title-only web search fallback.")
+@click.option("--ai-describe-no-match", is_flag=True, default=False, help="When no external catalog match is found and the book has no description, use Gemini AI to generate a description from book content.")
 @click.option("--min-confidence", default=0.50, type=float, help="Minimum match score (0.0 - 1.0) before deferring for manual review (default: 0.50).")
 @click.option("--recursive", "-r", is_flag=True, help="Scan directories recursively.")
 @click.option("--dry-run", is_flag=True, help="Preview metadata without modifying files.")
@@ -225,6 +226,7 @@ def process(
     ignore_pdfs: bool,
     pdf_only: bool,
     pdf_require_isbn: bool,
+    ai_describe_no_match: bool,
     min_confidence: float,
     recursive: bool,
     dry_run: bool,
@@ -384,6 +386,7 @@ def process(
         update_cover=update_cover,
         min_confidence=min_confidence,
         pdf_require_isbn=pdf_require_isbn,
+        ai_describe_no_match=ai_describe_no_match,
         scanner_bridge=scanner_bridge,
         mylibrary_client=mylibrary_client,
     )
@@ -652,6 +655,7 @@ def process(
 @click.option("--ignore-pdfs", is_flag=True, default=False, help="Ignore .pdf files and only process .epub files.")
 @click.option("--pdf-only", is_flag=True, default=False, help="Only process .pdf files (skip .epub files).")
 @click.option("--pdf-require-isbn", is_flag=True, default=False, help="For PDF files, require a verifiable ISBN and skip title-only web search fallback.")
+@click.option("--ai-describe-no-match", is_flag=True, default=False, help="When no external catalog match is found and the book has no description, use Gemini AI to generate a description from book content.")
 @click.option("--min-confidence", default=0.50, type=float, help="Minimum match score (0.0 - 1.0) before skipping/deferring (default: 0.50).")
 @click.option("--delay", default=0.5, type=float, help="Seconds to pause after catalog lookups (default: 0.5s).")
 @click.option("--ai-delay", default=4.0, type=float, help="Seconds to pause after AI vision/LLM requests (default: 4.0s).")
@@ -679,6 +683,7 @@ def run_ondemand(
     ignore_pdfs: bool,
     pdf_only: bool,
     pdf_require_isbn: bool,
+    ai_describe_no_match: bool,
     min_confidence: float,
     delay: float,
     ai_delay: float,
@@ -706,6 +711,7 @@ def run_ondemand(
         ignore_pdfs=ignore_pdfs,
         pdf_only=pdf_only,
         pdf_require_isbn=pdf_require_isbn,
+        ai_describe_no_match=ai_describe_no_match,
         min_confidence=min_confidence,
         recursive=recursive,
         dry_run=dry_run,

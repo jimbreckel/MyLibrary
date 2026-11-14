@@ -1150,7 +1150,7 @@ def _sync_incremental_enriched_changes() -> None:
     cur_mtime = 0.0
     if pg_enabled:
         now_m = time.monotonic()
-        if now_m - _ENRICHED_PATHS_CACHE.get('last_sync_check_at', 0.0) < 10.0:
+        if now_m - _ENRICHED_PATHS_CACHE.get('last_sync_check_at', 0.0) < 1.0:
             return
         _ENRICHED_PATHS_CACHE['last_sync_check_at'] = now_m
     else:
@@ -2032,19 +2032,31 @@ def is_file_enriched(file_path: str) -> bool:
 
 def _load_scanner_epubmeta_config() -> Dict[str, Any]:
     """
-    Load the `epubmeta` section from `nas_scanner/config.json` or `scanner/config.json`.
+    Load the `epubmeta` section from `nas_scanner/config.json` and `scanner/config.json`,
+    merging keys and preferring the active `gemini_api_key` from `scanner/config.json`.
     """
     base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+    merged: Dict[str, Any] = {}
+    keys_seen: List[str] = []
     for sub in ('nas_scanner', 'scanner'):
         cfg_file = base_dir / sub / 'config.json'
         if cfg_file.exists():
             try:
                 data = json.loads(cfg_file.read_text(encoding='utf-8'))
-                if isinstance(data.get('epubmeta'), dict):
-                    return data['epubmeta']
+                ep = data.get('epubmeta')
+                if isinstance(ep, dict):
+                    k = str(ep.get('gemini_api_key') or '').strip()
+                    if k and k not in keys_seen:
+                        keys_seen.append(k)
+                    if not merged:
+                        merged = dict(ep)
+                    elif k:
+                        merged['gemini_api_key'] = k
             except Exception:
                 continue
-    return {}
+    if keys_seen:
+        merged['gemini_api_keys'] = list(reversed(keys_seen))
+    return merged
 
 
 _GENERIC_TITLE_STOPWORDS = {
@@ -3878,6 +3890,7 @@ def enrich_file_location_on_demand(
     ai_image_data_uris: Optional[List[str]] = None,
     force_ai_vision: bool = False,
     review_only: bool = False,
+    ai_describe_no_match: bool = False,
 ) -> Dict[str, Any]:
     """
     Perform on-demand `epubmeta` enrichment for a single `FileLocation` (`.epub` or `.pdf`):
@@ -3927,6 +3940,17 @@ def enrich_file_location_on_demand(
             return mv_res
 
     if not force and not re_enrich and is_file_enriched(file_loc.file_path):
+        if item and item.id:
+            if isinstance(_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set'), set):
+                if item.id not in _ENRICHED_PATHS_CACHE['enriched_item_ids_set']:
+                    _ENRICHED_PATHS_CACHE['enriched_item_ids_set'].add(item.id)
+                    if isinstance(_ENRICHED_PATHS_CACHE.get('enriched_item_ids'), list):
+                        _ENRICHED_PATHS_CACHE['enriched_item_ids'].append(item.id)
+            if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set'), set):
+                if item.id not in _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set']:
+                    _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'].add(item.id)
+                    if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids'), list):
+                        _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'].append(item.id)
         mag_pub = detect_magazine_publication(
             title=item.title,
             authors=item.authors,
@@ -3944,10 +3968,8 @@ def enrich_file_location_on_demand(
             and not re.match(r'^untitled\b', (item.title or '').strip(), re.IGNORECASE)
             and item.authors
             and item.authors.strip().lower() not in ('', 'unknown', 'unknown author', '..', '.')
-            and (item.isbn or item.asin)
+            and (item.isbn or item.asin or item.pub_date or item.publisher)
             and item.description
-            and item.publisher
-            and item.pub_date
             and (item.cover_thumbnail or item.cover_image_url)
             and cov_issue is None
         )
@@ -4272,13 +4294,23 @@ def enrich_file_location_on_demand(
         }
 
     orig_cover_thumb = ''
-    try:
-        from epubmeta.external_dbs import generate_cover_thumbnail
-        emb_cov_bytes = reader.extract_cover_bytes() if reader else None
-        if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
-            orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
-    except Exception:
-        pass
+    if (
+        item.cover_thumbnail
+        and str(item.cover_thumbnail).startswith('data:image')
+        and len(str(item.cover_thumbnail)) > 500
+        and not is_partial_banner_cover(item.cover_thumbnail)
+        and not has_excessive_white_border_cover(item.cover_thumbnail)
+        and not (ext == '.pdf' and is_legacy_scanner_pdf_cover(item.cover_thumbnail))
+    ):
+        orig_cover_thumb = item.cover_thumbnail
+    if not orig_cover_thumb:
+        try:
+            from epubmeta.external_dbs import generate_cover_thumbnail
+            emb_cov_bytes = reader.extract_cover_bytes() if reader else None
+            if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
+                orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
+        except Exception:
+            pass
     if not orig_cover_thumb:
         try:
             extracted_orig = extract_original_cover_for_item(item)
@@ -4286,9 +4318,7 @@ def enrich_file_location_on_demand(
                 orig_cover_thumb = extracted_orig
         except Exception:
             pass
-    if not orig_cover_thumb and item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image'):
-        orig_cover_thumb = item.cover_thumbnail
-    elif orig_cover_thumb and orig_cover_thumb != item.cover_thumbnail:
+    if orig_cover_thumb and orig_cover_thumb != item.cover_thumbnail:
         try:
             item.cover_thumbnail = orig_cover_thumb
             item.save(update_fields=['cover_thumbnail'])
@@ -4325,13 +4355,43 @@ def enrich_file_location_on_demand(
             except Exception:
                 pass
         _record_in_memory_diag(file_loc, phys_path, fail_status, msg)
-        return {
+
+        ai_gen_desc = ''
+        use_auto_ai_desc = bool(ai_describe_no_match or epubmeta_cfg.get('ai_describe_no_match', False))
+        if (
+            use_auto_ai_desc
+            and fail_status == 'NOT_FOUND'
+            and not (orig_meta_payload.get('orig_description') or '').strip()
+        ):
+            try:
+                ai_desc_res = generate_ai_description_from_content(
+                    item,
+                    file_id=str(file_loc.id),
+                    file_path=str(file_loc.file_path or phys_path.resolve()),
+                    title=orig_meta_payload.get('orig_title') or '',
+                    authors=orig_meta_payload.get('orig_authors') or '',
+                    publisher=orig_meta_payload.get('orig_publisher') or '',
+                    isbn=orig_meta_payload.get('orig_isbn') or '',
+                    apply_immediately=True,
+                )
+                if ai_desc_res.get('ok') and ai_desc_res.get('description'):
+                    ai_gen_desc = str(ai_desc_res['description']).strip()
+                    orig_meta_payload['candidate_description'] = ai_gen_desc
+                    msg = f'{msg} (✨ AI description generated from book content)'
+            except Exception:
+                pass
+
+        out_no_match = {
             'ok': False,
             'status': fail_status,
             'already_enriched': False,
             'message': msg,
             **orig_meta_payload,
         }
+        if ai_gen_desc:
+            out_no_match['ai_generated_description'] = ai_gen_desc
+            out_no_match['description'] = ai_gen_desc
+        return out_no_match
 
     orig_title_has_alnum = bool(re.search(r'[A-Za-z0-9]{3,}', (item.title or '')))
     if (review_only and force_ai_vision) or (match_result and not match_result.is_confident and not force and orig_title_has_alnum):
@@ -4673,6 +4733,7 @@ def enrich_catalog_item_on_demand(
     ai_image_data_uris: Optional[List[str]] = None,
     force_ai_vision: bool = False,
     review_only: bool = False,
+    ai_describe_no_match: bool = False,
 ) -> Dict[str, Any]:
     """
     Perform on-demand `epubmeta` enrichment for a `CatalogItem` by enriching its
@@ -4755,6 +4816,7 @@ def enrich_catalog_item_on_demand(
             ai_image_data_uris=ai_image_data_uris if idx == 0 else None,
             force_ai_vision=force_ai_vision,
             review_only=review_only,
+            ai_describe_no_match=ai_describe_no_match,
         )
         last_res = res
 
@@ -5126,13 +5188,40 @@ def revert_catalog_item_enrichment(
     }
 
 
-def extract_original_cover_for_item(item: Optional[CatalogItem]) -> Optional[str]:
+def _item_has_pdf_file(item: Optional[CatalogItem]) -> bool:
+    if not item:
+        return False
+    try:
+        return any(
+            (f.file_format or '').upper().lstrip('.') == 'PDF'
+            or str(f.file_path or '').lower().endswith('.pdf')
+            for f in item.files.all()
+        )
+    except Exception:
+        return False
+
+
+def extract_original_cover_for_item(item: Optional[CatalogItem], ignore_backup: bool = False) -> Optional[str]:
     """
     Extract the original embedded book cover (as a `data:image/jpeg;base64,...` URI)
-    from `item.files` (or `item.cover_thumbnail` / `item.cover_image_url`), unless missing.
+    from `item.files` (or `catalog_original_covers` backup / `item.cover_thumbnail` / `item.cover_image_url`), unless missing.
     """
     if not item:
         return None
+    is_pdf_item = _item_has_pdf_file(item)
+    if not ignore_backup:
+        try:
+            saved_orig = get_original_cover_backup_for_item(item.id)
+            orig_bkp = (saved_orig or {}).get('original_cover')
+            if (
+                orig_bkp
+                and not is_partial_banner_cover(orig_bkp)
+                and not has_excessive_white_border_cover(orig_bkp)
+                and not (is_pdf_item and is_legacy_scanner_pdf_cover(orig_bkp))
+            ):
+                return orig_bkp
+        except Exception:
+            pass
     try:
         import sys
         base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
@@ -5171,7 +5260,7 @@ def extract_original_cover_for_item(item: Optional[CatalogItem]) -> Optional[str
                 cov_bytes = rdr.extract_cover_bytes() if rdr else None
                 if cov_bytes and len(cov_bytes) >= 1000:
                     thumb = generate_cover_thumbnail(cov_bytes, max_size=(360, 540))
-                    if thumb and thumb.startswith('data:image'):
+                    if thumb and thumb.startswith('data:image') and not is_partial_banner_cover(thumb):
                         return thumb
             except Exception:
                 pass
@@ -5544,6 +5633,21 @@ def search_book_covers_web(
                     orig_cov = None
             if not orig_cov and ci.cover_thumbnail and str(ci.cover_thumbnail).startswith('data:image'):
                 orig_cov = ci.cover_thumbnail
+            elif (
+                orig_cov
+                and orig_cov.startswith('data:image')
+                and ci.cover_thumbnail
+                and (
+                    is_partial_banner_cover(ci.cover_thumbnail)
+                    or (_item_has_pdf_file(ci) and is_legacy_scanner_pdf_cover(ci.cover_thumbnail))
+                )
+                and not is_partial_banner_cover(orig_cov)
+            ):
+                try:
+                    ci.cover_thumbnail = orig_cov
+                    ci.save(update_fields=['cover_thumbnail'])
+                except Exception:
+                    pass
             if orig_cov:
                 results.insert(0, {
                     'cover_url': orig_cov,
@@ -5553,6 +5657,25 @@ def search_book_covers_web(
                     'source': 'Original Cover',
                 })
                 seen_urls.add(orig_cov)
+            try:
+                saved_gens = get_saved_generated_covers_for_item(ci.id)
+                insert_pos = 1 if orig_cov else 0
+                for g_entry in saved_gens:
+                    g_uri = (g_entry.get('cover_url') or '').strip()
+                    if g_uri and g_uri not in seen_urls:
+                        results.insert(insert_pos, {
+                            'cover_url': g_uri,
+                            'fallback_url': '',
+                            'title': (ci.title or clean_title or 'Generated Cover').strip(),
+                            'authors': (ci.authors or clean_authors or '').strip(),
+                            'source': g_entry.get('style_label') or '🎨 Generated Cover',
+                            'is_generated': True,
+                            'generated_id': g_entry.get('id'),
+                        })
+                        seen_urls.add(g_uri)
+                        insert_pos += 1
+            except Exception:
+                pass
         for fut in (f_gr, f_apple, f_google, f_ol, f_web):
             if fut.done():
                 try:
@@ -5609,6 +5732,9 @@ def search_book_covers_web(
                     # If the original cover is B&W/low-color or text-only, let a "Same Cover in Color" candidate rank ahead of it (tier 1 vs tier 0)
                     orig_tier = 1 if (orig_col < 0.065 or orig_issue in ('missing', 'text_only')) else 0
                     ranked.append(((orig_tier, 0.0, -orig_col, idx), ent))
+                    continue
+                if ent.get('is_generated') or src.startswith('🎨'):
+                    ranked.append(((1, 0.0, -1.0, idx), ent))
                     continue
 
                 raw_b = bytes_by_idx.get(idx)
@@ -5704,9 +5830,9 @@ def apply_book_cover_to_item(
                     img = Image.open(io.BytesIO(resp.content))
                     if img.mode not in ('RGB', 'L'):
                         img = img.convert('RGB')
-                    img.thumbnail((360, 540), Image.Resampling.LANCZOS)
+                    img.thumbnail((720, 1080), Image.Resampling.LANCZOS)
                     buf = io.BytesIO()
-                    img.save(buf, format='JPEG', quality=86, optimize=True)
+                    img.save(buf, format='JPEG', quality=88, optimize=True)
                     b64 = base64.b64encode(buf.getvalue()).decode('ascii')
                     thumb_data_uri = f'data:image/jpeg;base64,{b64}'
                     chosen_ext_url = cand_url
@@ -5727,6 +5853,10 @@ def apply_book_cover_to_item(
         item.cover_image_url = chosen_ext_url[:999]
     elif not cover_url.startswith('data:'):
         item.cover_image_url = cover_url[:999]
+    try:
+        _snapshot_original_cover_if_needed(item)
+    except Exception:
+        pass
     item.cover_thumbnail = thumb_data_uri
     item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
 
@@ -5768,6 +5898,1848 @@ def apply_book_cover_to_item(
         'external_cover_url': item.cover_image_url or '',
         'cover_issue': '',
         'missing_cover_count': needs_cover_cnt,
+    }
+
+
+_GENERATED_COVERS_TABLE_READY = False
+
+
+def _ensure_generated_covers_table() -> None:
+    """
+    Ensure PostgreSQL tables `catalog_generated_covers` and `catalog_original_covers` exist in BookDB.
+    """
+    global _GENERATED_COVERS_TABLE_READY
+    if _GENERATED_COVERS_TABLE_READY:
+        return
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_generated_covers (
+                    id SERIAL PRIMARY KEY,
+                    item_id VARCHAR(64) NOT NULL,
+                    cover_data_uri TEXT NOT NULL,
+                    style_label VARCHAR(128) DEFAULT '🎨 Generated Cover',
+                    prompt_summary TEXT DEFAULT '',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_generated_covers_item_id
+                ON catalog_generated_covers (item_id, id DESC)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_original_covers (
+                    item_id VARCHAR(64) PRIMARY KEY,
+                    original_cover_thumbnail TEXT DEFAULT '',
+                    original_cover_image_url TEXT DEFAULT '',
+                    saved_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        _GENERATED_COVERS_TABLE_READY = True
+    except Exception:
+        pass
+
+
+def get_original_cover_backup_for_item(item_id: Any) -> Optional[Dict[str, str]]:
+    """
+    Return the backed-up original cover for `item_id` from `catalog_original_covers` (if stored).
+    """
+    item_id_str = str(item_id or '').strip()
+    if not item_id_str:
+        return None
+    _ensure_generated_covers_table()
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT original_cover_thumbnail, original_cover_image_url
+                FROM catalog_original_covers
+                WHERE item_id = %s
+                """,
+                [item_id_str],
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            thumb = (row[0] or '').strip()
+            ext_url = (row[1] or '').strip()
+            return {
+                'original_cover': thumb or ext_url,
+                'original_cover_thumbnail': thumb,
+                'original_cover_image_url': ext_url,
+            }
+    except Exception:
+        return None
+
+
+def _snapshot_original_cover_if_needed(item: Optional[CatalogItem]) -> Optional[str]:
+    """
+    Before replacing a book's cover with a generated or web cover, snapshot its true original cover
+    in `catalog_original_covers` (if not already recorded) so the user can always revert back to it.
+    """
+    if not item or not item.id:
+        return None
+    item_id_str = str(item.id).strip()
+    existing = get_original_cover_backup_for_item(item_id_str)
+    if existing is not None:
+        return existing.get('original_cover') or ''
+
+    _ensure_generated_covers_table()
+    # Snapshot the item's existing cover_thumbnail in BookDB first so reverting restores the exact byte-for-byte original cover
+    orig_thumb = ''
+    if item.cover_thumbnail and str(item.cover_thumbnail).startswith('data:image'):
+        orig_thumb = str(item.cover_thumbnail)
+
+    if not orig_thumb:
+        try:
+            import sys
+            base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+            for sub in ('scanner', 'nas_scanner'):
+                cand_dir = str((base_dir / sub).resolve())
+                if os.path.isdir(cand_dir) and cand_dir not in sys.path:
+                    sys.path.insert(0, cand_dir)
+            from epubmeta.external_dbs import generate_cover_thumbnail
+            from epubmeta.readers import get_reader
+
+            for f_loc in item.files.all():
+                phys = _resolve_physical_file_path(f_loc.file_path)
+                if not phys or not phys.exists():
+                    continue
+                try:
+                    rdr = get_reader(phys)
+                    cov_b = rdr.extract_cover_bytes() if rdr else None
+                    if cov_b and len(cov_b) >= 1000:
+                        t = generate_cover_thumbnail(cov_b, max_size=(360, 540))
+                        if t and t.startswith('data:image'):
+                            orig_thumb = t
+                            break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    orig_url = str(item.cover_image_url or '').strip()
+
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO catalog_original_covers (item_id, original_cover_thumbnail, original_cover_image_url, saved_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (item_id) DO NOTHING
+                """,
+                [item_id_str, orig_thumb, orig_url],
+            )
+    except Exception:
+        pass
+    return orig_thumb or orig_url
+
+
+def get_saved_generated_covers_for_item(item_id: Any) -> List[Dict[str, Any]]:
+    """
+    Return all saved generated covers for `item_id` from `catalog_generated_covers` in BookDB,
+    ordered newest first.
+    """
+    item_id_str = str(item_id or '').strip()
+    if not item_id_str:
+        return []
+    _ensure_generated_covers_table()
+    out: List[Dict[str, Any]] = []
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, cover_data_uri, style_label, prompt_summary, created_at
+                FROM catalog_generated_covers
+                WHERE item_id = %s
+                ORDER BY id DESC
+                LIMIT 24
+                """,
+                [item_id_str],
+            )
+            for r in cur.fetchall():
+                out.append({
+                    'id': int(r[0]),
+                    'cover_url': r[1] or '',
+                    'style_label': r[2] or '🎨 Generated Cover',
+                    'prompt_summary': r[3] or '',
+                    'created_at': r[4].isoformat() if r[4] else '',
+                })
+    except Exception:
+        pass
+    return out
+
+
+def revert_book_cover_to_original(
+    item_or_id: Any,
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    query: str = '',
+) -> Dict[str, Any]:
+    """
+    Revert a `CatalogItem`'s active cover back to its original cover (from `catalog_original_covers`
+    or extracted from the physical EPUB/PDF file on the NAS), while keeping any generated covers
+    stored in `catalog_generated_covers` in BookDB.
+    """
+    item = resolve_catalog_item_by_id_or_fallback(
+        item_or_id,
+        file_id=file_id,
+        file_path=file_path,
+        isbn=isbn,
+        title=title,
+        authors=authors,
+        query=query,
+    )
+    if not item:
+        return {'ok': False, 'error': f'CatalogItem not found: {item_or_id}'}
+
+    backup = get_original_cover_backup_for_item(item.id)
+    orig_thumb = (backup.get('original_cover_thumbnail') if backup else '') or ''
+    orig_url = (backup.get('original_cover_image_url') if backup else '') or ''
+
+    if not orig_thumb and not orig_url:
+        # Try extracting directly from physical file on disk
+        try:
+            import sys
+            base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+            for sub in ('scanner', 'nas_scanner'):
+                cand_dir = str((base_dir / sub).resolve())
+                if os.path.isdir(cand_dir) and cand_dir not in sys.path:
+                    sys.path.insert(0, cand_dir)
+            from epubmeta.external_dbs import generate_cover_thumbnail
+            from epubmeta.readers import get_reader
+
+            for f_loc in item.files.all():
+                phys = _resolve_physical_file_path(f_loc.file_path)
+                if not phys or not phys.exists():
+                    continue
+                rdr = get_reader(phys)
+                cov_b = rdr.extract_cover_bytes() if rdr else None
+                if cov_b and len(cov_b) >= 1000:
+                    t = generate_cover_thumbnail(cov_b, max_size=(360, 540))
+                    if t and t.startswith('data:image'):
+                        orig_thumb = t
+                        break
+        except Exception:
+            pass
+
+    item.cover_thumbnail = orig_thumb or None
+    item.cover_image_url = orig_url[:999] if orig_url else None
+    item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
+
+    try:
+        db_path = _get_scanner_db_path()
+        if db_path and db_path.exists():
+            f_paths = [str(f.file_path) for f in item.files.all() if f.file_path]
+            if f_paths:
+                conn = sqlite3.connect(str(db_path), timeout=5.0)
+                try:
+                    placeholders = ','.join(['?'] * len(f_paths))
+                    conn.execute(
+                        f"UPDATE processed_files SET cover_thumbnail = ? WHERE file_path IN ({placeholders})",
+                        [orig_thumb or None, *f_paths],
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+    except Exception:
+        pass
+
+    try:
+        evaluate_and_record_item_cover_status(item)
+        needs_cover_cnt = int(get_needs_cover_enriched_shelf().get('count', 0))
+    except Exception:
+        needs_cover_cnt = 0
+
+    return {
+        'ok': True,
+        'reverted': True,
+        'item_id': str(item.id),
+        'cover_url': orig_thumb or orig_url or '',
+        'has_original_cover': bool(orig_thumb or orig_url),
+        'saved_generated_covers': get_saved_generated_covers_for_item(item.id),
+        'missing_cover_count': needs_cover_cnt,
+    }
+
+
+def _hex_to_rgb_tuple(hex_str: str, fallback: Tuple[int, int, int] = (24, 36, 64)) -> Tuple[int, int, int]:
+    s = re.sub(r'[^0-9a-fA-F]', '', str(hex_str or ''))
+    if len(s) == 3:
+        s = ''.join(ch * 2 for ch in s)
+    if len(s) == 6:
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+        except Exception:
+            return fallback
+    return fallback
+
+
+def _load_cover_font(size: int, bold: bool = False, serif: bool = False):
+    from PIL import ImageFont
+    candidates = []
+    if serif and bold:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
+            'C:/Windows/Fonts/georgiab.ttf',
+            'C:/Windows/Fonts/timesbd.ttf',
+        ]
+    elif serif:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf',
+            'C:/Windows/Fonts/georgia.ttf',
+            'C:/Windows/Fonts/times.ttf',
+        ]
+    elif bold:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+            'C:/Windows/Fonts/segoeuib.ttf',
+            'C:/Windows/Fonts/arialbd.ttf',
+        ]
+    else:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            'C:/Windows/Fonts/segoeui.ttf',
+            'C:/Windows/Fonts/arial.ttf',
+        ]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size=size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _wrap_cover_text(draw, text: str, font, max_width: int, max_lines: int = 4) -> List[str]:
+    words = [w for w in re.split(r'\s+', (text or '').strip()) if w]
+    if not words:
+        return []
+    lines: List[str] = []
+    cur = words[0]
+    for w in words[1:]:
+        test = f'{cur} {w}'
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            cur = test
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    if len(lines) > max_lines:
+        kept = lines[:max_lines]
+        last = kept[-1]
+        while len(last) > 4:
+            bbox = draw.textbbox((0, 0), last + '…', font=font)
+            if (bbox[2] - bbox[0]) <= max_width:
+                break
+            last = last[:-1].rstrip()
+        kept[-1] = last + '…'
+        return kept
+    return lines
+
+
+def _clean_content_excerpt_for_cover(raw_excerpt: str) -> str:
+    """
+    Strip repetitive copyright footers, slide IDs (e.g. `0945_05f9_c2x.scr`), bare numbers,
+    and URLs from extracted PDF/EPUB opening pages so cover generation focuses on real headings and content.
+    """
+    if not raw_excerpt:
+        return ''
+    cleaned_lines: List[str] = []
+    seen_low: set = set()
+    for raw_ln in str(raw_excerpt).splitlines():
+        ln = raw_ln.strip()
+        if not ln:
+            continue
+        low = ln.lower()
+        if any(
+            pat in low
+            for pat in (
+                'copyright',
+                'all rights reserved',
+                'printed in usa',
+                'www.',
+                'http://',
+                'https://',
+                '.scr',
+                'isbn ',
+            )
+        ):
+            continue
+        if re.match(r'^[\d\s\-_./©]+$', ln):
+            continue
+        if re.match(r'^[0-9a-f_]{6,}$', low):
+            continue
+        if low in seen_low:
+            continue
+        seen_low.add(low)
+        cleaned_lines.append(ln)
+    return '\n'.join(cleaned_lines)[:1800]
+
+
+def _is_raw_filename_or_junk_title(t: str) -> bool:
+    s = (t or '').strip()
+    if not s or len(s) < 3:
+        return True
+    if re.search(r'\.(?:pdf|epub|mobi|azw3?|djvu|cbz|cbr|txt|doc|docx|ppt|pptx)$', s, flags=re.I):
+        return True
+    if '_' in s or re.match(r'^\d+[\-_][a-z0-9]+', s, flags=re.I):
+        return True
+    if re.match(r'^(?:97[89]\d{10}|\d{9}[\dXx])\b', s):
+        return True
+    return False
+
+
+def _design_cover_spec_with_ai_or_heuristics(
+    title: str,
+    subtitle: str,
+    authors: str,
+    publisher: str,
+    tags: List[str],
+    folder: str,
+    description: str,
+    content_excerpt: str,
+    physical_file_name: str,
+    style_hint: str,
+    version_num: int,
+    item_seed_str: str = '',
+) -> Dict[str, Any]:
+    """
+    Use Gemini AI (`gemini-3.5-flash-lite`) + contextual heuristics to create a bespoke visual design spec
+    (including clean content-derived title, subtitle, key concepts, palette, motif, and custom vector artwork)
+    based on the book's actual file contents, description, filename, and tags.
+    """
+    import hashlib
+
+    LAYOUT_STYLES = [
+        'modern_publisher',
+        'cinematic_fullbleed',
+        'classic_hardcover',
+        'swiss_editorial',
+        'vintage_pulp',
+        'minimalist_emblem',
+    ]
+    MOTIFS = [
+        'network_nodes',
+        'cosmic_nebula',
+        'arcane_astrolabe',
+        'circuit_prism',
+        'horizon_sunset',
+        'topographic_waves',
+        'noir_skyline',
+        'botanical_crest',
+        'code_matrix',
+        'architectural_arch',
+    ]
+    PALETTES = [
+        # Deep Cyber / Navy & Cyan Gold
+        {'bg_top': '#071126', 'bg_mid': '#0f2547', 'bg_bottom': '#050b16', 'accent_primary': '#38bdf8', 'accent_secondary': '#f59e0b', 'text_light': '#f8fafc'},
+        # Crimson Velvet & Warm Gold
+        {'bg_top': '#2a0815', 'bg_mid': '#4c1127', 'bg_bottom': '#14040a', 'accent_primary': '#fbbf24', 'accent_secondary': '#fb7185', 'text_light': '#fff1f2'},
+        # Emerald Forest & Copper
+        {'bg_top': '#062019', 'bg_mid': '#0d3b2e', 'bg_bottom': '#03110d', 'accent_primary': '#34d399', 'accent_secondary': '#fbbf24', 'text_light': '#ecfdf5'},
+        # Royal Amethyst & Electric Violet
+        {'bg_top': '#170b2e', 'bg_mid': '#2e1659', 'bg_bottom': '#0b0518', 'accent_primary': '#c084fc', 'accent_secondary': '#38bdf8', 'text_light': '#faf5ff'},
+        # Sunset Amber & Deep Indigo
+        {'bg_top': '#1e1b4b', 'bg_mid': '#431407', 'bg_bottom': '#090d16', 'accent_primary': '#fb923c', 'accent_secondary': '#fde047', 'text_light': '#fff7ed'},
+        # Teak / Archival Bronze & Cream
+        {'bg_top': '#1c1917', 'bg_mid': '#292524', 'bg_bottom': '#0c0a09', 'accent_primary': '#eab308', 'accent_secondary': '#a8a29e', 'text_light': '#fafaf9'},
+        # Teal Ocean & Coral
+        {'bg_top': '#042f2e', 'bg_mid': '#115e59', 'bg_bottom': '#021717', 'accent_primary': '#2dd4bf', 'accent_secondary': '#fb7185', 'text_light': '#f0fdfa'},
+        # Cobalt Blueprint & Ice Silver
+        {'bg_top': '#0c1938', 'bg_mid': '#1d3557', 'bg_bottom': '#060c1c', 'accent_primary': '#60a5fa', 'accent_secondary': '#a8dadc', 'text_light': '#f1faee'},
+    ]
+
+    clean_excerpt = _clean_content_excerpt_for_cover(content_excerpt)
+    clean_phys_name = _clean_book_stem_for_grouping(physical_file_name) if physical_file_name else ''
+
+    # Determine a clean fallback title if the DB title is still a raw filename like `309_c2x.PDF`
+    resolved_title = title
+    resolved_subtitle = subtitle
+    if _is_raw_filename_or_junk_title(resolved_title):
+        # Check if the opening content has a clear title heading on the first few lines
+        excerpt_lines = [ln.strip(' •-*') for ln in clean_excerpt.splitlines() if 4 <= len(ln.strip(' •-*')) <= 65]
+        non_generic_lines = [
+            ln for ln in excerpt_lines
+            if ln.lower() not in ('overview', 'table of contents', 'contents', 'introduction', 'agenda', 'summary', 'networkers')
+            and not re.match(r'^session\s+\d+$', ln, flags=re.I)
+        ]
+        if non_generic_lines and clean_phys_name:
+            first_heading = non_generic_lines[0]
+            if first_heading.lower() not in clean_phys_name.lower():
+                resolved_title = first_heading
+                resolved_subtitle = clean_phys_name
+            else:
+                resolved_title = clean_phys_name
+        elif clean_phys_name:
+            resolved_title = clean_phys_name
+        elif non_generic_lines:
+            resolved_title = non_generic_lines[0]
+            if len(non_generic_lines) > 1:
+                resolved_subtitle = non_generic_lines[1]
+
+    combined_text = f"{resolved_title} {resolved_subtitle} {clean_phys_name} {publisher} {' '.join(tags)} {folder} {description} {clean_excerpt[:900]} {style_hint}".lower()
+    book_hash = int(
+        hashlib.md5(f"{item_seed_str}:{resolved_title}:{clean_phys_name}:{clean_excerpt[:240]}".encode('utf-8', errors='ignore')).hexdigest()[:8],
+        16,
+    )
+
+    # Pick smart default motif & genre badge from book subject/content, seeded by book_hash so books in the same folder vary!
+    if any(k in combined_text for k in ('cisco', 'bgp', 'ibgp', 'ebgp', 'ospf', 'qos', 'network', 'routing', 'tcp', 'ipx', 'appletalk', 'cloud', 'distributed', 'microservices')):
+        tech_motifs = ['network_nodes', 'circuit_prism', 'topographic_waves', 'code_matrix']
+        default_motif = tech_motifs[(book_hash + version_num - 1) % len(tech_motifs)]
+        default_genre = 'NETWORKING & ARCHITECTURE'
+    elif any(k in combined_text for k in ('python', 'javascript', 'vue', 'bootstrap', 'linux', 'hack', 'security', 'cyber', 'devops', 'code', 'programming', 'software', 'sql', 'database', 'vmware', 'docker')):
+        code_motifs = ['circuit_prism', 'code_matrix', 'network_nodes', 'minimalist_emblem' if 'minimalist_emblem' in MOTIFS else 'architectural_arch']
+        default_motif = code_motifs[(book_hash + version_num - 1) % len(code_motifs)]
+        default_genre = 'COMPUTER SCIENCE & TECH'
+    elif any(k in combined_text for k in ('space', 'starship', 'galaxy', 'planet', 'alien', 'sci-fi', 'science fiction', 'orbit', 'quantum', 'universe', 'mars', 'future')):
+        default_motif = 'cosmic_nebula'
+        default_genre = 'SCIENCE FICTION'
+    elif any(k in combined_text for k in ('dragon', 'magic', 'wizard', 'sword', 'fantasy', 'kingdom', 'rpg', 'dungeon', 'vampire', 'sacred', 'chronicles', 'realm', 'myth')):
+        default_motif = 'arcane_astrolabe'
+        default_genre = 'FANTASY & SPECULATIVE'
+    elif any(k in combined_text for k in ('murder', 'detective', 'crime', 'thriller', 'mystery', 'secret', 'shadow', 'death', 'blood', 'noir', 'spy', 'investigation')):
+        default_motif = 'noir_skyline'
+        default_genre = 'MYSTERY & THRILLER'
+    elif any(k in combined_text for k in ('play', 'drama', 'theatre', 'love', 'romance', 'poem', 'poetry', 'novel', 'memoir', 'life', 'family', 'heart', 'sweet')):
+        default_motif = 'botanical_crest'
+        default_genre = 'LITERATURE & DRAMA'
+    elif any(k in combined_text for k in ('history', 'empire', 'war', 'ancient', 'century', 'king', 'queen', 'rome', 'law', 'philosophy', 'religion', 'politics')):
+        default_motif = 'architectural_arch'
+        default_genre = 'HISTORY & PHILOSOPHY'
+    else:
+        default_motif = MOTIFS[(book_hash + version_num - 1) % len(MOTIFS)]
+        default_genre = (tags[0].upper() if tags else (folder.upper() if folder else 'FEATURED EDITION'))[:28]
+
+    # Seed layout and palette by `book_hash + version_num` so every book in a folder gets a distinct look, and clicking Generate Cover rotates styles!
+    layout_style = LAYOUT_STYLES[(book_hash + version_num - 1) % len(LAYOUT_STYLES)]
+    pal = dict(PALETTES[(book_hash + version_num - 1) % len(PALETTES)])
+    if version_num > 1:
+        motif_idx = (MOTIFS.index(default_motif) + version_num - 1) % len(MOTIFS)
+        chosen_motif = MOTIFS[motif_idx]
+    else:
+        chosen_motif = default_motif
+
+    # Extract fallback key concepts & tagline from cleaned content excerpt (never copyright lines!)
+    bullet_concepts: List[str] = []
+    for ln in clean_excerpt.splitlines():
+        s_ln = ln.strip()
+        if s_ln.startswith(('•', '-', '*')) and 4 <= len(s_ln.lstrip('•-* ')) <= 34:
+            cand_c = s_ln.lstrip('•-* ').strip()
+            if cand_c not in bullet_concepts:
+                bullet_concepts.append(cand_c)
+            if len(bullet_concepts) >= 3:
+                break
+
+    fallback_tagline = resolved_subtitle
+    if not fallback_tagline:
+        src_text = (description or clean_excerpt or '').strip()
+        if src_text:
+            for cand_line in re.split(r'[\n.!?]+', src_text):
+                c_str = cand_line.strip(' "\'•-*')
+                if not c_str or c_str.lower() == resolved_title.lower():
+                    continue
+                words = c_str.split()
+                if 3 <= len(words) <= 13:
+                    fallback_tagline = c_str
+                    break
+                elif len(words) > 13:
+                    fallback_tagline = ' '.join(words[:10]).rstrip(',;:') + '…'
+                    break
+
+    spec: Dict[str, Any] = {
+        'cover_title': resolved_title,
+        'subtitle_or_hook': fallback_tagline,
+        'cover_author': authors,
+        'genre_badge': default_genre,
+        'key_concepts': bullet_concepts[:3],
+        'illustration_prompt': '',
+        'layout_style': layout_style,
+        'motif': chosen_motif,
+        'palette': pal,
+        'custom_shapes': [],
+    }
+
+    # Call Gemini AI (`gemini-3.5-flash-lite`) for bespoke content-driven title, concepts, illustration prompt, palette & vector illustration
+    try:
+        epubmeta_cfg = _load_scanner_epubmeta_config()
+        gemini_key = epubmeta_cfg.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY') or ''
+        if gemini_key:
+            import requests
+            gemini_model = epubmeta_cfg.get('gemini_model') or os.environ.get('GEMINI_MODEL') or 'gemini-3.5-flash-lite'
+            prompt = (
+                "You are a master book cover designer and cataloger. Design a bespoke, visually distinctive book cover specification "
+                f"(Variation #{version_num}) based on the book's actual file contents, synopsis, and filename below.\n\n"
+                f"Current DB Title: {title}\n"
+                f"Physical Filename: {physical_file_name}\n"
+                f"Subtitle: {subtitle}\n"
+                f"Current Author(s): {authors}\n"
+                f"Publisher: {publisher}\n"
+                f"Tags/Category: {', '.join(tags[:8])} | Folder: {folder}\n"
+                f"User Style/Prompt Hint: {style_hint}\n"
+                f"Synopsis: {(description or '')[:900]}\n"
+                f"Opening File Content Excerpt:\n{clean_excerpt[:1400]}\n\n"
+                "IMPORTANT RULES:\n"
+                "1. If Current DB Title looks like a raw filename or code (e.g. '309_c2x.PDF', '0192804936.pdf', or contains underscores/file extensions), "
+                "set `cover_title` to the TRUE human-readable title of the book/presentation from the Opening File Content Excerpt and Physical Filename "
+                "(for example: 'Deploying BGP' instead of '309_c2x.PDF'). Never include '.pdf' or '.epub' in `cover_title`.\n"
+                "2. Set `subtitle_or_hook` to a specific 4-11 word subtitle or thematic hook summarizing the actual content (NEVER a copyright line).\n"
+                "3. If Current Author(s) is a generic login/username (like 'mstory', 'admin', 'unknown') and the content/filename shows an organization or real author (e.g. 'Cisco Systems'), set `cover_author` accordingly.\n"
+                "4. Extract 2 to 3 short `key_concepts` (2-4 words each, e.g. ['BGP Attributes', 'IBGP & EBGP', 'Scalable Routing']) from the content.\n"
+                "5. Write a rich 2-3 sentence `illustration_prompt` describing a specific visual scene, technical architecture diagram, or thematic artwork that directly depicts the book's actual content, concepts, or story.\n\n"
+                "Return ONLY a valid JSON object with these keys:\n"
+                "{\n"
+                '  "cover_title": "clean human-readable title for the front cover",\n'
+                '  "subtitle_or_hook": "compelling 4-11 word subtitle based on the book content",\n'
+                '  "cover_author": "clean author or organization name",\n'
+                '  "genre_badge": "UPPERCASE 1-4 word specific topic or genre header",\n'
+                '  "key_concepts": ["Concept 1", "Concept 2", "Concept 3"],\n'
+                '  "illustration_prompt": "vivid 2-3 sentence visual description of the cover illustration/diagram/scene based on the book content",\n'
+                f'  "layout_style": "one of {LAYOUT_STYLES} (use {layout_style} for Variation #{version_num})",\n'
+                f'  "motif": "one of {MOTIFS} that best matches the subject",\n'
+                '  "palette": {\n'
+                '    "bg_top": "#RRGGBB (rich dark or saturated background top)",\n'
+                '    "bg_mid": "#RRGGBB (midtone atmosphere color)",\n'
+                '    "bg_bottom": "#RRGGBB (deep bottom color)",\n'
+                '    "accent_primary": "#RRGGBB (vibrant focal illustration color)",\n'
+                '    "accent_secondary": "#RRGGBB (complementary highlight color)",\n'
+                '    "text_light": "#RRGGBB (high-contrast light title color)"\n'
+                '  },\n'
+                '  "custom_shapes": [\n'
+                '    // 4 to 8 symbolic geometric/diagram elements in a 1000x1000 artwork box representing the book content:\n'
+                '    // {"type": "circle"|"ring"|"polygon"|"rect"|"diamond"|"line"|"label", "cx": 500, "cy": 500, "r": 160, "w": 220, "h": 90, "text": "short diagram label if type==label", "points": [[x1,y1],[x2,y2]], "color": "primary"|"secondary"|"light", "alpha": 165, "width": 3}\n'
+                '  ]\n'
+                "}"
+            )
+            for cand_model in (gemini_model, 'gemini-3.5-flash-lite', 'gemini-3.8-flash'):
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{cand_model}:generateContent?key={gemini_key}"
+                resp = requests.post(
+                    url,
+                    json={
+                        'contents': [{'parts': [{'text': prompt}]}],
+                        'generationConfig': {'temperature': 0.85, 'maxOutputTokens': 1500},
+                    },
+                    timeout=8.0,
+                )
+                if resp.status_code == 200:
+                    cand_text = (
+                        ((resp.json().get('candidates') or [{}])[0].get('content') or {}).get('parts') or [{}]
+                    )[0].get('text') or ''
+                    m_json = re.search(r'\{.*\}', cand_text, re.S)
+                    if m_json:
+                        ai_data = json.loads(m_json.group(0))
+                        if isinstance(ai_data, dict):
+                            ai_title = str(ai_data.get('cover_title') or '').strip()
+                            if ai_title and not _is_raw_filename_or_junk_title(ai_title):
+                                spec['cover_title'] = ai_title[:85]
+                            if ai_data.get('subtitle_or_hook'):
+                                sub_cand = str(ai_data['subtitle_or_hook']).strip()
+                                if 'copyright' not in sub_cand.lower():
+                                    spec['subtitle_or_hook'] = sub_cand[:110]
+                            ai_auth = str(ai_data.get('cover_author') or '').strip()
+                            if ai_auth and (not authors or authors.lower() in ('unknown', 'mstory', 'admin', 'user', '..')):
+                                spec['cover_author'] = ai_auth[:70]
+                            if ai_data.get('genre_badge'):
+                                spec['genre_badge'] = str(ai_data['genre_badge']).strip().upper()[:34]
+                            if isinstance(ai_data.get('key_concepts'), list):
+                                spec['key_concepts'] = [
+                                    str(x).strip()[:32]
+                                    for x in ai_data['key_concepts']
+                                    if str(x).strip()
+                                ][:3]
+                            if ai_data.get('illustration_prompt'):
+                                spec['illustration_prompt'] = str(ai_data['illustration_prompt']).strip()[:600]
+                            if ai_data.get('motif') in MOTIFS:
+                                spec['motif'] = ai_data['motif']
+                            if ai_data.get('layout_style') in LAYOUT_STYLES and version_num == 1:
+                                spec['layout_style'] = ai_data['layout_style']
+                            ai_pal = ai_data.get('palette')
+                            if isinstance(ai_pal, dict):
+                                for k in ('bg_top', 'bg_mid', 'bg_bottom', 'accent_primary', 'accent_secondary', 'text_light'):
+                                    if ai_pal.get(k):
+                                        spec['palette'][k] = str(ai_pal[k]).strip()
+                            if isinstance(ai_data.get('custom_shapes'), list):
+                                spec['custom_shapes'] = ai_data['custom_shapes'][:10]
+                    break
+                elif resp.status_code != 404:
+                    break
+    except Exception:
+        pass
+
+    return spec
+
+
+def _generate_ai_cover_image_with_gemini(
+    title: str,
+    subtitle: str,
+    authors: str,
+    publisher: str,
+    spec: Dict[str, Any],
+    content_excerpt: str = '',
+    style_hint: str = '',
+    version_num: int = 1,
+) -> Optional[str]:
+    """
+    Use Gemini's native image generation model (`gemini-3.1-flash-lite-image`) to generate a bespoke,
+    flat full-bleed 2:3 book cover illustration and typography directly from the book's content,
+    synopsis, and resolved title/subtitle/author.
+    Returns a `data:image/jpeg;base64,...` URI (resized to 420x630), or `None` if unavailable.
+    """
+    import base64
+    import io
+    from PIL import Image
+
+    try:
+        epubmeta_cfg = _load_scanner_epubmeta_config()
+        gemini_key = epubmeta_cfg.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY') or ''
+        if not gemini_key:
+            return None
+
+        import requests
+
+        ART_DIRECTIONS = [
+            'Modern High-Detail Technical / Editorial Book Cover with glowing diagrammatic or thematic illustration',
+            'Cinematic Full-Bleed Atmospheric Concept Art Book Cover with dramatic lighting and depth',
+            'Classic Hardcover Architectural / Infographic Edition with richly detailed central illustration',
+            'Bold Contemporary Graphic Novel / Swiss Design Book Cover with iconic subject imagery',
+            'Vintage Retro-Futuristic / Classic Print Illustration Book Cover with rich texture',
+            'Minimalist Symbolic Masterpiece Book Cover with striking focal emblem and fine detail',
+        ]
+        art_dir = ART_DIRECTIONS[(version_num - 1) % len(ART_DIRECTIONS)]
+
+        clean_title = (spec.get('cover_title') or title or 'Untitled Book').strip()
+        clean_sub = (spec.get('subtitle_or_hook') or subtitle or '').strip()
+        clean_auth = (spec.get('cover_author') or authors or publisher or '').strip()
+        if clean_auth.lower() in ('unknown', 'unknown author', 'mstory', '..', '.'):
+            clean_auth = publisher or ''
+        concepts = [str(c).strip() for c in (spec.get('key_concepts') or []) if str(c).strip()][:3]
+        illus_desc = (spec.get('illustration_prompt') or '').strip()
+        clean_excerpt = _clean_content_excerpt_for_cover(content_excerpt)[:700]
+
+        img_prompt_parts = [
+            "Design a flat, full-bleed 2D front book cover filling 100% of the vertical 2:3 canvas edge-to-edge "
+            "(NO 3D book mockup, NO perspective tilt, NO spine or page edges, NO white border or studio background).",
+            f"Artistic Direction (Variation #{version_num}): {art_dir}.",
+            f'Book Title (display prominently in crisp, legible typography at the top): "{clean_title}"',
+        ]
+        if clean_sub and clean_sub.lower() != clean_title.lower():
+            img_prompt_parts.append(f'Subtitle (display cleanly below the title): "{clean_sub}"')
+        if clean_auth:
+            img_prompt_parts.append(f'Author / Organization (display at the bottom): "{clean_auth}"')
+        if concepts:
+            img_prompt_parts.append(f"Key Content Concepts to feature visually or in diagram callouts: {', '.join(concepts)}.")
+        if illus_desc:
+            img_prompt_parts.append(f"Cover Illustration & Subject Matter: {illus_desc}")
+        elif clean_excerpt:
+            img_prompt_parts.append(f"Base the cover illustration directly on this book content:\n{clean_excerpt}")
+        if style_hint:
+            img_prompt_parts.append(f"Additional User Style Request: {style_hint}")
+
+        img_prompt = '\n'.join(img_prompt_parts)
+
+        for img_model in ('gemini-3.1-flash-lite-image', 'gemini-3.1-flash-image', 'gemini-2.5-flash-image'):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{img_model}:generateContent?key={gemini_key}"
+            resp = requests.post(
+                url,
+                json={
+                    'contents': [{'parts': [{'text': img_prompt}]}],
+                    'generationConfig': {
+                        'responseModalities': ['IMAGE', 'TEXT'],
+                        'imageConfig': {'aspectRatio': '2:3'},
+                    },
+                },
+                timeout=26.0,
+            )
+            if resp.status_code != 200:
+                continue
+            parts = ((resp.json().get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+            for p in parts:
+                inline = p.get('inlineData') or p.get('inline_data')
+                if inline and inline.get('data'):
+                    raw_bytes = base64.b64decode(inline['data'])
+                    im = Image.open(io.BytesIO(raw_bytes)).convert('RGB')
+                    im.thumbnail((848, 1272), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    im.save(buf, format='JPEG', quality=90, optimize=True)
+                    b64_str = base64.b64encode(buf.getvalue()).decode('ascii')
+                    return f'data:image/jpeg;base64,{b64_str}'
+    except Exception:
+        pass
+    return None
+
+
+def _render_generated_book_cover_jpeg(
+    title: str,
+    subtitle: str,
+    authors: str,
+    publisher: str,
+    spec: Dict[str, Any],
+    seed_int: int = 1,
+) -> str:
+    """
+    Render a high-resolution `720x1080` book cover from `spec` using Pillow (`PIL`),
+    downsample with LANCZOS to `400x600`, and return a `data:image/jpeg;base64,...` URI.
+    """
+    import base64
+    import io
+    import math
+    import random
+    from PIL import Image, ImageDraw
+
+    W, H = 720, 1080
+    rng = random.Random(seed_int)
+
+    pal = spec.get('palette') or {}
+    c_top = _hex_to_rgb_tuple(pal.get('bg_top', '#071126'), (7, 17, 38))
+    c_mid = _hex_to_rgb_tuple(pal.get('bg_mid', '#0f2547'), (15, 37, 71))
+    c_bot = _hex_to_rgb_tuple(pal.get('bg_bottom', '#050b16'), (5, 11, 22))
+    c_pri = _hex_to_rgb_tuple(pal.get('accent_primary', '#38bdf8'), (56, 189, 248))
+    c_sec = _hex_to_rgb_tuple(pal.get('accent_secondary', '#f59e0b'), (245, 158, 11))
+    c_txt = _hex_to_rgb_tuple(pal.get('text_light', '#f8fafc'), (248, 250, 252))
+
+    # 1. Smooth 3-stop vertical gradient background
+    base = Image.new('RGBA', (W, H), (*c_top, 255))
+    bg_draw = ImageDraw.Draw(base)
+    half_h = H // 2
+    for y in range(H):
+        if y < half_h:
+            t = y / max(1, half_h)
+            r = int(c_top[0] + (c_mid[0] - c_top[0]) * t)
+            g = int(c_top[1] + (c_mid[1] - c_top[1]) * t)
+            b = int(c_top[2] + (c_mid[2] - c_top[2]) * t)
+        else:
+            t = (y - half_h) / max(1, H - half_h)
+            r = int(c_mid[0] + (c_bot[0] - c_mid[0]) * t)
+            g = int(c_mid[1] + (c_bot[1] - c_mid[1]) * t)
+            b = int(c_mid[2] + (c_bot[2] - c_mid[2]) * t)
+        bg_draw.line([(0, y), (W, y)], fill=(r, g, b, 255))
+
+    art_layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    ad = ImageDraw.Draw(art_layer)
+
+    layout_style = spec.get('layout_style') or 'modern_publisher'
+    motif = spec.get('motif') or 'network_nodes'
+
+    # Center of the hero artwork zone
+    cx, cy = W // 2, int(H * 0.56)
+    if layout_style == 'cinematic_fullbleed':
+        cy = int(H * 0.52)
+    elif layout_style == 'classic_hardcover':
+        cy = int(H * 0.57)
+
+    # Soft radial ambient glow behind the central illustration
+    for rad in range(310, 20, -18):
+        alpha = int(max(4, min(42, (320 - rad) * 0.13)))
+        col = c_pri if (rad % 36 == 0) else c_sec
+        ad.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(*col, alpha))
+
+    # 2. Render subject-matched procedural artwork motif
+    if motif == 'network_nodes':
+        nodes = []
+        for i in range(26):
+            ang = (i / 26.0) * math.tau + rng.uniform(-0.18, 0.18)
+            dist = rng.uniform(45, 255)
+            nx = int(cx + math.cos(ang) * dist)
+            ny = int(cy + math.sin(ang) * dist * 0.88)
+            nodes.append((nx, ny, rng.choice([c_pri, c_sec, c_txt]), rng.randint(5, 13)))
+        nodes.append((cx, cy, c_pri, 18))
+        for i in range(len(nodes)):
+            x1, y1, col1, _ = nodes[i]
+            for j in range(i + 1, len(nodes)):
+                x2, y2, _, _ = nodes[j]
+                d = math.hypot(x2 - x1, y2 - y1)
+                if d < 145:
+                    line_a = int(max(25, min(170, (145 - d) * 1.2)))
+                    ad.line([(x1, y1), (x2, y2)], fill=(*col1, line_a), width=2)
+        for ring_r in (95, 175, 245):
+            ad.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=(*c_pri, 75), width=2)
+        for nx, ny, ncol, nr in nodes:
+            ad.ellipse([nx - nr - 5, ny - nr - 5, nx + nr + 5, ny + nr + 5], fill=(*ncol, 55))
+            ad.ellipse([nx - nr, ny - nr, nx + nr, ny + nr], fill=(*ncol, 235), outline=(*c_txt, 200), width=2)
+
+    elif motif in ('circuit_prism', 'code_matrix'):
+        # Isometric tech grid + circuit traces + central glowing hexagon core
+        for step in range(-240, 260, 40):
+            ad.line([(cx + step, cy - 220), (cx + step, cy + 220)], fill=(*c_pri, 32), width=1)
+            ad.line([(cx - 240, cy + step), (cx + 240, cy + step)], fill=(*c_pri, 32), width=1)
+        for _ in range(18):
+            sx = cx + rng.choice(range(-200, 220, 40))
+            sy = cy + rng.choice(range(-200, 220, 40))
+            mx = sx + rng.choice([-80, -40, 40, 80])
+            ey = sy + rng.choice([-80, -40, 40, 80])
+            col = c_pri if rng.random() > 0.35 else c_sec
+            ad.line([(sx, sy), (mx, sy), (mx, ey)], fill=(*col, 165), width=3)
+            ad.ellipse([sx - 5, sy - 5, sx + 5, sy + 5], fill=(*col, 220))
+            ad.ellipse([mx - 5, ey - 5, mx + 5, ey + 5], fill=(*c_txt, 220))
+        for r_hex, col_h, w_h in ((155, c_sec, 3), (115, c_pri, 5), (70, c_txt, 3)):
+            pts = [
+                (cx + int(r_hex * math.cos(math.radians(60 * k - 30))), cy + int(r_hex * math.sin(math.radians(60 * k - 30))))
+                for k in range(6)
+            ]
+            ad.polygon(pts, fill=(*col_h, 38), outline=(*col_h, 225), width=w_h)
+
+    elif motif == 'cosmic_nebula':
+        # Starfield + orbital ellipses + eclipsed planet
+        for _ in range(95):
+            sx = rng.randint(45, W - 45)
+            sy = rng.randint(240, H - 140)
+            sr = rng.choice([1, 1, 2, 3])
+            ad.ellipse([sx - sr, sy - sr, sx + sr, sy + sr], fill=(*c_txt, rng.randint(90, 230)))
+        for rx, ry, tilt_col in ((265, 92, c_pri), (210, 145, c_sec), (150, 150, c_txt)):
+            ad.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], outline=(*tilt_col, 135), width=3)
+        pr = 105
+        ad.ellipse([cx - pr - 12, cy - pr - 12, cx + pr + 12, cy + pr + 12], fill=(*c_pri, 75))
+        ad.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=(*c_bot, 245), outline=(*c_sec, 220), width=4)
+        ad.arc([cx - pr - 28, cy - 38, cx + pr + 28, cy + 48], start=350, end=190, fill=(*c_pri, 230), width=6)
+
+    elif motif == 'arcane_astrolabe':
+        # Sacred geometry astrolabe rings + 8-point star + compass markings
+        for r_ring, a_ring, w_ring in ((235, 150, 3), (205, 95, 2), (160, 190, 3), (105, 160, 2)):
+            ad.ellipse([cx - r_ring, cy - r_ring, cx + r_ring, cy + r_ring], outline=(*c_pri, a_ring), width=w_ring)
+        for deg in range(0, 360, 15):
+            rad_a = math.radians(deg)
+            r_in = 205 if deg % 45 != 0 else 160
+            x1, y1 = cx + int(r_in * math.cos(rad_a)), cy + int(r_in * math.sin(rad_a))
+            x2, y2 = cx + int(235 * math.cos(rad_a)), cy + int(235 * math.sin(rad_a))
+            ad.line([(x1, y1), (x2, y2)], fill=(*c_sec, 175), width=2 if deg % 45 == 0 else 1)
+        for rot in (0, 45):
+            pts = []
+            for k in range(4):
+                a = math.radians(rot + k * 90)
+                pts.append((cx + int(155 * math.cos(a)), cy + int(155 * math.sin(a))))
+            ad.polygon(pts, outline=(*c_sec, 210), fill=(*c_pri, 28), width=3)
+        ad.ellipse([cx - 32, cy - 32, cx + 32, cy + 32], fill=(*c_sec, 210), outline=(*c_txt, 240), width=3)
+
+    elif motif == 'noir_skyline':
+        # Dramatic moon/spotlight + layered city skyline silhouette + reflection lines
+        ad.ellipse([cx - 135, cy - 210, cx + 135, cy + 60], fill=(*c_sec, 185))
+        base_y = cy + 165
+        x_cur = 60
+        while x_cur < W - 60:
+            bw = rng.randint(36, 78)
+            bh = rng.randint(85, 250)
+            bx2 = min(W - 60, x_cur + bw)
+            ad.rectangle([x_cur, base_y - bh, bx2, base_y], fill=(*c_bot, 245), outline=(*c_pri, 120), width=2)
+            for wy in range(base_y - bh + 18, base_y - 18, 22):
+                for wx in range(x_cur + 10, bx2 - 10, 16):
+                    if rng.random() > 0.45:
+                        ad.rectangle([wx, wy, wx + 7, wy + 11], fill=(*c_sec, 190))
+            x_cur += bw - rng.randint(4, 12)
+        for ry in range(base_y + 8, base_y + 75, 9):
+            span = rng.randint(140, 260)
+            ad.line([(cx - span, ry), (cx + span, ry)], fill=(*c_pri, 110), width=2)
+
+    elif motif in ('horizon_sunset', 'topographic_waves'):
+        # Radiant sun/crest + flowing topographic/mountain ridges
+        ad.ellipse([cx - 125, cy - 175, cx + 125, cy + 75], fill=(*c_sec, 210), outline=(*c_txt, 180), width=3)
+        for layer_i in range(7):
+            y_base = cy - 15 + layer_i * 36
+            freq = 0.012 + layer_i * 0.003
+            phase = seed_int + layer_i * 1.3
+            pts = [(55, cy + 240)]
+            for x in range(55, W - 54, 12):
+                y_w = y_base + int(math.sin(x * freq + phase) * 28 + math.cos(x * 0.025 - phase) * 14)
+                pts.append((x, y_w))
+            pts.append((W - 55, cy + 240))
+            col_w = c_pri if layer_i % 2 == 0 else c_mid
+            alpha_w = min(240, 110 + layer_i * 20)
+            ad.polygon(pts, fill=(*col_w, alpha_w), outline=(*c_txt, 130), width=2)
+
+    else:
+        # Botanical / Classical Architectural Medallion Crest
+        for r_arch in (220, 185, 145):
+            ad.ellipse([cx - r_arch, cy - r_arch, cx + r_arch, cy + r_arch], outline=(*c_pri, 165), width=3)
+        for k in range(12):
+            ang = math.radians(k * 30)
+            px = cx + int(165 * math.cos(ang))
+            py = cy + int(165 * math.sin(ang))
+            ad.ellipse([px - 42, py - 42, px + 42, py + 42], outline=(*c_sec, 135), width=2)
+        ad.polygon([(cx, cy - 135), (cx + 115, cy), (cx, cy + 135), (cx - 115, cy)], fill=(*c_sec, 55), outline=(*c_txt, 220), width=4)
+        ad.ellipse([cx - 48, cy - 48, cx + 48, cy + 48], fill=(*c_pri, 210), outline=(*c_txt, 240), width=3)
+
+    # 3. Overlay any custom AI-designed symbolic shapes & diagram elements from `spec['custom_shapes']`
+    lbl_font = _load_cover_font(17, bold=True, serif=False)
+    for sh in (spec.get('custom_shapes') or []):
+        if not isinstance(sh, dict):
+            continue
+        sh_type = str(sh.get('type') or '').lower()
+        c_name = str(sh.get('color') or 'primary').lower()
+        sh_rgb = c_pri if 'pri' in c_name else (c_sec if 'sec' in c_name else c_txt)
+        sh_a = max(45, min(235, int(sh.get('alpha') or 160)))
+        sh_w = max(1, min(8, int(sh.get('width') or 3)))
+        # Map 0..1000 artwork box into the hero zone (cx-220..cx+220, cy-190..cy+190)
+        sx = cx - 220 + int((float(sh.get('cx', 500) or 500) / 1000.0) * 440)
+        sy = cy - 190 + int((float(sh.get('cy', 500) or 500) / 1000.0) * 380)
+        sr = int((float(sh.get('r', 110) or 110) / 1000.0) * 400)
+        if sh_type in ('circle', 'ring') and sr > 8:
+            ad.ellipse(
+                [sx - sr, sy - sr, sx + sr, sy + sr],
+                fill=(*sh_rgb, sh_a // 3) if sh_type == 'circle' else None,
+                outline=(*sh_rgb, sh_a),
+                width=sh_w,
+            )
+        elif sh_type == 'diamond' and sr > 8:
+            ad.polygon(
+                [(sx, sy - sr), (sx + sr, sy), (sx, sy + sr), (sx - sr, sy)],
+                fill=(*sh_rgb, sh_a // 4),
+                outline=(*sh_rgb, sh_a),
+                width=sh_w,
+            )
+        elif sh_type == 'rect':
+            rw = int((float(sh.get('w', 180) or 180) / 1000.0) * 400) // 2
+            rh = int((float(sh.get('h', 90) or 90) / 1000.0) * 360) // 2
+            if rw > 8 and rh > 8:
+                ad.rounded_rectangle(
+                    [sx - rw, sy - rh, sx + rw, sy + rh],
+                    radius=10,
+                    fill=(*c_bot, 185),
+                    outline=(*sh_rgb, sh_a),
+                    width=sh_w,
+                )
+        elif sh_type in ('line', 'polygon') and isinstance(sh.get('points'), list) and len(sh['points']) >= 2:
+            pts = []
+            for pt in sh['points'][:8]:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    px = cx - 220 + int((float(pt[0]) / 1000.0) * 440)
+                    py = cy - 190 + int((float(pt[1]) / 1000.0) * 380)
+                    pts.append((px, py))
+            if len(pts) >= 2:
+                if sh_type == 'polygon' and len(pts) >= 3:
+                    ad.polygon(pts, fill=(*sh_rgb, sh_a // 4), outline=(*sh_rgb, sh_a), width=sh_w)
+                else:
+                    ad.line(pts, fill=(*sh_rgb, sh_a), width=sh_w)
+        elif sh_type == 'label' and sh.get('text'):
+            lbl_txt = str(sh.get('text') or '').strip()[:24]
+            if lbl_txt:
+                tb = ad.textbbox((0, 0), lbl_txt, font=lbl_font)
+                tw = tb[2] - tb[0]
+                th = tb[3] - tb[1]
+                ad.rounded_rectangle(
+                    [sx - tw // 2 - 12, sy - th // 2 - 7, sx + tw // 2 + 12, sy + th // 2 + 7],
+                    radius=10,
+                    fill=(*c_bot, 225),
+                    outline=(*sh_rgb, 215),
+                    width=2,
+                )
+                ad.text((sx - tw // 2, sy - th // 2 - 2), lbl_txt, font=lbl_font, fill=(*c_txt, 250))
+
+    base = Image.alpha_composite(base, art_layer)
+    draw = ImageDraw.Draw(base)
+
+    # 4. Layout-specific framing, borders & header/footer plaques
+    if layout_style == 'classic_hardcover':
+        draw.rectangle([28, 28, W - 28, H - 28], outline=(*c_pri, 210), width=4)
+        draw.rectangle([40, 40, W - 40, H - 40], outline=(*c_sec, 145), width=2)
+    elif layout_style == 'modern_publisher':
+        draw.rectangle([0, 0, W, 18], fill=(*c_pri, 255))
+        draw.rectangle([0, H - 88, W, H], fill=(*c_bot, 235))
+        draw.line([(48, H - 88), (W - 48, H - 88)], fill=(*c_pri, 180), width=3)
+    elif layout_style == 'swiss_editorial':
+        draw.rectangle([0, 0, 22, H], fill=(*c_pri, 255))
+        draw.rectangle([22, 0, 30, H], fill=(*c_sec, 220))
+    else:
+        draw.rectangle([22, 22, W - 22, H - 22], outline=(*c_pri, 110), width=2)
+
+    # Dark translucent gradient scrim behind top title area & bottom author area for 100% crisp text legibility
+    scrim = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scrim)
+    sd.rounded_rectangle([38, 48, W - 38, 372], radius=18, fill=(*c_bot, 185), outline=(*c_pri, 105), width=2)
+    sd.rounded_rectangle([38, H - 210, W - 38, H - 42], radius=16, fill=(*c_bot, 198), outline=(*c_sec, 105), width=2)
+    base = Image.alpha_composite(base, scrim)
+    draw = ImageDraw.Draw(base)
+
+    # 5. Typography: Genre Badge, Content-Resolved Title, Subtitle/Hook, Content Topic Pills, Author(s), Publisher
+    use_serif = layout_style in ('classic_hardcover', 'vintage_pulp', 'minimalist_emblem')
+    badge_font = _load_cover_font(20, bold=True, serif=False)
+    sub_font = _load_cover_font(23, bold=False, serif=use_serif)
+    pill_font = _load_cover_font(17, bold=True, serif=False)
+    auth_font = _load_cover_font(30, bold=True, serif=use_serif)
+    pub_font = _load_cover_font(19, bold=False, serif=False)
+
+    genre_badge = (spec.get('genre_badge') or 'LIBRARY EDITION').strip().upper()
+    if genre_badge:
+        bb = draw.textbbox((0, 0), genre_badge, font=badge_font)
+        bw = bb[2] - bb[0]
+        bx = (W - bw) // 2
+        draw.rounded_rectangle([bx - 18, 64, bx + bw + 18, 100], radius=14, fill=(*c_pri, 52), outline=(*c_pri, 200), width=2)
+        draw.text((bx, 70), genre_badge, font=badge_font, fill=(*c_pri, 255))
+
+    clean_t = (spec.get('cover_title') or title or 'Untitled Book').strip()
+    t_len = len(clean_t)
+    t_size = 52 if t_len <= 24 else (44 if t_len <= 45 else (38 if t_len <= 70 else 32))
+    title_font = _load_cover_font(t_size, bold=True, serif=use_serif)
+    t_lines = _wrap_cover_text(draw, clean_t, title_font, max_width=W - 124, max_lines=3)
+
+    cur_y = 118
+    line_step = int(t_size * 1.21)
+    for ln in t_lines:
+        lb = draw.textbbox((0, 0), ln, font=title_font)
+        lw = lb[2] - lb[0]
+        lx = (W - lw) // 2
+        draw.text((lx + 2, cur_y + 3), ln, font=title_font, fill=(0, 0, 0, 210))
+        draw.text((lx, cur_y), ln, font=title_font, fill=(*c_txt, 255))
+        cur_y += line_step
+
+    hook_text = (spec.get('subtitle_or_hook') or subtitle or '').strip()
+    if hook_text and hook_text.lower() != clean_t.lower():
+        cur_y += 8
+        draw.line([(W // 2 - 90, cur_y), (W // 2 + 90, cur_y)], fill=(*c_sec, 195), width=2)
+        cur_y += 11
+        s_lines = _wrap_cover_text(draw, hook_text, sub_font, max_width=W - 136, max_lines=2)
+        for sln in s_lines:
+            sb = draw.textbbox((0, 0), sln, font=sub_font)
+            sw = sb[2] - sb[0]
+            sx = (W - sw) // 2
+            draw.text((sx + 1, cur_y + 2), sln, font=sub_font, fill=(0, 0, 0, 190))
+            draw.text((sx, cur_y), sln, font=sub_font, fill=(*c_sec, 245))
+            cur_y += 28
+
+    # Render content-derived key concept pills above the author footer
+    concepts = [str(c).strip() for c in (spec.get('key_concepts') or []) if str(c).strip()][:3]
+    if concepts:
+        pill_widths = []
+        for cp in concepts:
+            cb = draw.textbbox((0, 0), cp, font=pill_font)
+            pill_widths.append((cp, (cb[2] - cb[0]) + 28))
+        total_pw = sum(pw for _, pw in pill_widths) + max(0, len(pill_widths) - 1) * 12
+        if total_pw <= W - 76:
+            px_cur = (W - total_pw) // 2
+            py_top = H - 262
+            for cp, pw in pill_widths:
+                draw.rounded_rectangle(
+                    [px_cur, py_top, px_cur + pw, py_top + 34],
+                    radius=17,
+                    fill=(*c_bot, 220),
+                    outline=(*c_pri, 185),
+                    width=2,
+                )
+                draw.text((px_cur + 14, py_top + 7), cp, font=pill_font, fill=(*c_txt, 245))
+                px_cur += pw + 12
+
+    # Bottom Author & Publisher block
+    clean_a = (spec.get('cover_author') or authors or '').strip()
+    if clean_a.lower() in ('', 'unknown', 'unknown author', '..', '.'):
+        clean_a = publisher or 'MyLibrary Collection'
+    a_lines = _wrap_cover_text(draw, clean_a, auth_font, max_width=W - 124, max_lines=2)
+    ay = H - 180 if len(a_lines) > 1 else H - 164
+    for aln in a_lines:
+        ab = draw.textbbox((0, 0), aln, font=auth_font)
+        aw = ab[2] - ab[0]
+        ax = (W - aw) // 2
+        draw.text((ax + 2, ay + 2), aln, font=auth_font, fill=(0, 0, 0, 200))
+        draw.text((ax, ay), aln, font=auth_font, fill=(*c_txt, 255))
+        ay += 38
+
+    clean_pub = (publisher or '').strip()
+    if clean_pub and clean_pub.lower() != clean_a.lower():
+        pub_lbl = clean_pub.upper()[:42]
+        pb = draw.textbbox((0, 0), pub_lbl, font=pub_font)
+        pw = pb[2] - pb[0]
+        px = (W - pw) // 2
+        draw.text((px, H - 78), pub_lbl, font=pub_font, fill=(*c_pri, 225))
+
+    rgb_final = base.convert('RGB')
+    buf = io.BytesIO()
+    rgb_final.save(buf, format='JPEG', quality=90, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+    return f'data:image/jpeg;base64,{b64}'
+
+
+def generate_book_cover_for_item(
+    item_or_id: Any,
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    publisher: str = '',
+    description: str = '',
+    style_hint: str = '',
+    query: str = '',
+    apply_immediately: bool = True,
+) -> Dict[str, Any]:
+    """
+    On-demand Book Cover Generator (`POST /mylibrary/api/cover-generate/`):
+      1. Snapshots the book's original cover in `catalog_original_covers` (if not already backed up)
+         so the user can always revert to the original cover with 1 click.
+      2. Inspects the book's title, subtitle, author, publisher, tags/folder, synopsis/description,
+         and opening content from the physical EPUB/PDF file on the NAS.
+      3. Uses Gemini AI + procedural/vector illustration synthesis to generate a new custom cover.
+      4. Saves the generated cover into `catalog_generated_covers` in PostgreSQL `BookDB`
+         (adding a new row each time a cover is generated).
+      5. Applies the generated cover to `CatalogItem` in BookDB (when `apply_immediately=True`).
+    """
+    import hashlib
+
+    item = resolve_catalog_item_by_id_or_fallback(
+        item_or_id,
+        file_id=file_id,
+        file_path=file_path,
+        isbn=isbn,
+        title=title,
+        authors=authors,
+        query=query,
+    )
+    if not item:
+        return {'ok': False, 'error': f'CatalogItem not found: {item_or_id}'}
+
+    _ensure_generated_covers_table()
+    orig_backup = _snapshot_original_cover_if_needed(item)
+    existing_gens = get_saved_generated_covers_for_item(item.id)
+    version_num = len(existing_gens) + 1
+
+    eff_title = (title or item.title or 'Untitled Book').strip()
+    eff_subtitle = ''
+    if ':' in eff_title:
+        parts = eff_title.split(':', 1)
+        if len(parts[0].strip()) >= 3:
+            eff_title = parts[0].strip()
+            eff_subtitle = parts[1].strip()
+    elif ' - ' in eff_title:
+        parts = eff_title.split(' - ', 1)
+        if len(parts[0].strip()) >= 4:
+            eff_title = parts[0].strip()
+            eff_subtitle = parts[1].strip()
+
+    eff_authors = (authors or item.authors or '').strip()
+    eff_pub = (publisher or item.publisher or '').strip()
+    eff_desc = (description or item.description or '').strip()
+
+    # Gather tags and folder context
+    tags_list: List[str] = []
+    folder_name = ''
+    primary_file_path = file_path
+    try:
+        idx_tags = get_enriched_tags_and_folders_index(need_paths=True)
+        item_paths = {str(f.file_path) for f in item.files.all() if f.file_path}
+        if file_path:
+            item_paths.add(file_path)
+        for p_str in item_paths:
+            if not primary_file_path:
+                primary_file_path = p_str
+            rel = p_str
+            for pref in ('/volume1/common/Media/Books/', '/books/'):
+                if rel.startswith(pref):
+                    rel = rel[len(pref):]
+                    break
+            if '/' in rel and not folder_name:
+                folder_name = rel.split('/', 1)[0].strip()
+        for t_name, t_paths in (idx_tags.get('tag_to_paths') or {}).items():
+            if item_paths & set(t_paths):
+                tags_list.append(t_name)
+                if len(tags_list) >= 8:
+                    break
+    except Exception:
+        pass
+
+    # Always pull opening content excerpt & physical filename from the EPUB/PDF so even un-enriched books get accurate titles & topics!
+    content_excerpt = ''
+    physical_file_name = os.path.basename(primary_file_path.replace('\\', '/')) if primary_file_path else ''
+    if primary_file_path:
+        try:
+            prev = extract_book_preview_data(file_path=primary_file_path, item_id=str(item.id))
+            if prev.get('file_name'):
+                physical_file_name = str(prev['file_name'])
+            pages = prev.get('pages') or []
+            chunks = [str(p.get('text') or '').strip() for p in pages[:5] if p.get('text')]
+            content_excerpt = '\n'.join(chunks)[:2400]
+        except Exception:
+            content_excerpt = ''
+
+    spec = _design_cover_spec_with_ai_or_heuristics(
+        title=eff_title,
+        subtitle=eff_subtitle,
+        authors=eff_authors,
+        publisher=eff_pub,
+        tags=tags_list,
+        folder=folder_name,
+        description=eff_desc,
+        content_excerpt=content_excerpt,
+        physical_file_name=physical_file_name,
+        style_hint=style_hint or query,
+        version_num=version_num,
+        item_seed_str=str(item.id),
+    )
+
+    display_title = (spec.get('cover_title') or eff_title).strip()
+    display_authors = (spec.get('cover_author') or eff_authors).strip()
+
+    cover_data_uri = _generate_ai_cover_image_with_gemini(
+        title=display_title,
+        subtitle=eff_subtitle,
+        authors=display_authors,
+        publisher=eff_pub,
+        spec=spec,
+        content_excerpt=content_excerpt,
+        style_hint=style_hint or query,
+        version_num=version_num,
+    )
+    used_ai_image = bool(cover_data_uri)
+
+    if not cover_data_uri:
+        seed_int = int(
+            hashlib.md5(f"{item.id}:{display_title}:{version_num}:{time.time()}".encode('utf-8', errors='ignore')).hexdigest()[:8],
+            16,
+        )
+        cover_data_uri = _render_generated_book_cover_jpeg(
+            title=display_title,
+            subtitle=eff_subtitle,
+            authors=display_authors,
+            publisher=eff_pub,
+            spec=spec,
+            seed_int=seed_int,
+        )
+
+    layout_pretty = 'AI Illustration' if used_ai_image else str(spec.get('layout_style') or 'modern').replace('_', ' ').title()
+    style_label = f"🎨 Generated #{version_num} ({layout_pretty})"
+    prompt_summary = f"{display_title} | {spec.get('genre_badge', '')} | {spec.get('illustration_prompt') or spec.get('subtitle_or_hook', '')}"[:490].strip(' |')
+
+    new_gen_id = None
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO catalog_generated_covers (item_id, cover_data_uri, style_label, prompt_summary, created_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                [str(item.id), cover_data_uri, style_label[:128], prompt_summary[:500]],
+            )
+            row = cur.fetchone()
+            if row:
+                new_gen_id = int(row[0])
+    except Exception:
+        pass
+
+    # If the book in BookDB still had a raw filename/code title (e.g. `309_c2x.PDF`) or placeholder author (`mstory`),
+    # persist the content-resolved title, author, and synopsis to CatalogItem so searching by the cover title finds it!
+    metadata_updated = False
+    update_fields_meta: List[str] = []
+    sub_hook = str(spec.get('subtitle_or_hook') or '').strip()
+    if display_title and not _is_raw_filename_or_junk_title(display_title) and _is_raw_filename_or_junk_title(item.title or ''):
+        full_new_title = f"{display_title}: {sub_hook}" if (sub_hook and sub_hook.lower() not in display_title.lower() and len(display_title) + len(sub_hook) <= 95) else display_title
+        item.title = full_new_title[:490]
+        update_fields_meta.append('title')
+        metadata_updated = True
+    cur_auth_low = (item.authors or '').strip().lower()
+    if display_authors and cur_auth_low in ('', 'unknown', 'unknown author', 'mstory', 'admin', 'user', '..', '.'):
+        item.authors = display_authors[:490]
+        update_fields_meta.append('authors')
+        metadata_updated = True
+    if not (item.description or '').strip():
+        synth_desc_parts = [p for p in (sub_hook, spec.get('illustration_prompt') or '') if p]
+        if synth_desc_parts:
+            item.description = ' — '.join(synth_desc_parts)[:1900]
+            update_fields_meta.append('description')
+            metadata_updated = True
+    if update_fields_meta:
+        update_fields_meta.append('updated_at')
+        try:
+            item.save(update_fields=update_fields_meta)
+        except Exception:
+            pass
+
+    apply_res: Dict[str, Any] = {}
+    if apply_immediately:
+        apply_res = apply_book_cover_to_item(
+            item,
+            cover_data_uri,
+            file_id=file_id,
+            file_path=primary_file_path,
+            isbn=isbn,
+            title=item.title or display_title or eff_title,
+            authors=item.authors or display_authors or eff_authors,
+            user_selected=True,
+        )
+
+    saved_list = get_saved_generated_covers_for_item(item.id)
+    return {
+        'ok': True,
+        'item_id': str(item.id),
+        'generated_id': new_gen_id,
+        'version_num': version_num,
+        'style_label': style_label,
+        'prompt_summary': prompt_summary,
+        'cover_url': cover_data_uri,
+        'title': item.title or display_title or eff_title,
+        'authors': item.authors or display_authors or eff_authors,
+        'description': item.description or eff_desc,
+        'metadata_updated': metadata_updated,
+        'has_original_cover': bool(orig_backup),
+        'original_cover': orig_backup or '',
+        'saved_generated_covers': saved_list,
+        'missing_cover_count': apply_res.get('missing_cover_count'),
+    }
+
+
+def generate_ai_description_from_content(
+    item_or_id: Any = None,
+    file_id: str = '',
+    file_path: str = '',
+    isbn: str = '',
+    title: str = '',
+    authors: str = '',
+    publisher: str = '',
+    apply_immediately: bool = True,
+) -> Dict[str, Any]:
+    """
+    On-demand AI Content-Based Description Generator (`POST /mylibrary/api/ai-description/`):
+    Designed specifically for books that have no description and resulted in a No Match
+    (`NOT_FOUND` / `NO_ISBN`), reading the actual content inside the EPUB/PDF/ebook file
+    (front matter, table of contents, preface, opening chapters, and/or rendered page images
+    for scanned PDFs) and synthesizing a grounded 2-4 sentence synopsis via Gemini AI.
+    """
+    import base64
+    import sys
+
+    item: Optional[CatalogItem] = None
+    if item_or_id or file_id or file_path or isbn or title:
+        item = resolve_catalog_item_by_id_or_fallback(
+            item_or_id,
+            file_id=file_id,
+            file_path=file_path,
+            isbn=isbn,
+            title=title,
+            authors=authors,
+        )
+
+    resolved_loc: Optional[FileLocation] = None
+    raw_path = (file_path or '').strip()
+
+    if file_id:
+        resolved_loc = FileLocation.objects.select_related('catalog_item').filter(id=file_id).first()
+        if resolved_loc:
+            if not item and resolved_loc.catalog_item:
+                item = resolved_loc.catalog_item
+            if not raw_path:
+                raw_path = resolved_loc.file_path or ''
+
+    if not raw_path and item:
+        files_all = list(item.files.all())
+        for ext_pref in ('.epub', '.pdf', '.mobi', '.azw3', '.fb2', '.txt'):
+            cand = next((f for f in files_all if (f.file_path or '').lower().endswith(ext_pref)), None)
+            if cand:
+                resolved_loc = cand
+                raw_path = cand.file_path or ''
+                break
+        if not raw_path and files_all:
+            resolved_loc = files_all[0]
+            raw_path = files_all[0].file_path or ''
+
+    phys_path = _resolve_physical_file_path(raw_path) if raw_path else None
+    if (not phys_path or not phys_path.exists()) and item:
+        for cand in item.files.all():
+            if cand.file_path:
+                cand_phys = _resolve_physical_file_path(cand.file_path)
+                if cand_phys and cand_phys.exists():
+                    resolved_loc = cand
+                    raw_path = cand.file_path
+                    phys_path = cand_phys
+                    break
+
+    if not phys_path or not phys_path.exists():
+        return {
+            'ok': False,
+            'error': f'Physical book file not accessible on NAS: {raw_path or file_id or item_or_id}',
+        }
+
+    base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+    for sub in ('scanner', 'nas_scanner'):
+        cand_dir = str((base_dir / sub).resolve())
+        if os.path.isdir(cand_dir):
+            if cand_dir in sys.path:
+                sys.path.remove(cand_dir)
+            sys.path.insert(0, cand_dir)
+
+    epubmeta_cfg = _load_scanner_epubmeta_config()
+    gemini_key = epubmeta_cfg.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY') or ''
+    if not gemini_key:
+        return {
+            'ok': False,
+            'error': 'Gemini API key is not configured (set gemini_api_key in scanner config or GEMINI_API_KEY env var).',
+        }
+    gemini_model = epubmeta_cfg.get('gemini_model') or os.environ.get('GEMINI_MODEL') or 'gemini-3.5-flash-lite'
+
+    # 1. Extract rich content text (front matter + TOC + opening chapters/pages) and fallback page images for scanned PDFs
+    content_chunks: List[str] = []
+    page_images_bytes: List[bytes] = []
+    emb_title = ''
+    emb_authors = ''
+    emb_pub = ''
+
+    try:
+        from epubmeta.readers import get_reader
+        rdr = get_reader(phys_path)
+        if rdr:
+            try:
+                emb = rdr.read_metadata()
+                if emb:
+                    emb_title = (emb.title or '').strip()
+                    emb_authors = ', '.join(a.strip() for a in (emb.authors or []) if a and a.strip())
+                    emb_pub = (emb.publisher or '').strip()
+            except Exception:
+                pass
+            try:
+                ft = rdr.extract_front_text(max_pages=24) or ''
+                if ft.strip():
+                    content_chunks.append(ft.strip())
+            except Exception:
+                pass
+            if sum(len(c) for c in content_chunks) < 350:
+                try:
+                    imgs = rdr.extract_front_images(max_pages=4) or []
+                    for im_b in imgs[:4]:
+                        if im_b and len(im_b) > 500:
+                            page_images_bytes.append(im_b)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Supplement with deeper chapter/page sampling via preview/PyMuPDF if front matter was short (e.g. cover/copyright only)
+    combined_text = '\n\n'.join(content_chunks).strip()
+    if len(combined_text) < 1200 and phys_path.suffix.lower() == '.pdf':
+        try:
+            import pymupdf
+            doc = pymupdf.open(phys_path)
+            try:
+                n_pages = len(doc)
+                sample_indices = list(range(min(18, n_pages)))
+                if n_pages > 20:
+                    mid = min(n_pages - 1, max(18, n_pages // 5))
+                    sample_indices.extend(range(mid, min(n_pages, mid + 4)))
+                extra_txt: List[str] = []
+                seen_idx = set()
+                for pi in sample_indices:
+                    if pi in seen_idx:
+                        continue
+                    seen_idx.add(pi)
+                    ptxt = (doc[pi].get_text() or '').strip()
+                    if ptxt:
+                        extra_txt.append(f'[Page {pi + 1}]\n{ptxt[:2500]}')
+                if extra_txt:
+                    combined_text = '\n\n'.join(extra_txt).strip()
+                if len(combined_text) < 350 and not page_images_bytes:
+                    for pi in range(min(4, n_pages)):
+                        pix = doc[pi].get_pixmap(dpi=120)
+                        page_images_bytes.append(pix.tobytes('png'))
+            finally:
+                doc.close()
+        except Exception:
+            pass
+    elif len(combined_text) < 800:
+        try:
+            prev = extract_book_preview_data(file_path=raw_path or str(phys_path), item_id=str(item.id) if item else None)
+            if prev.get('ok'):
+                p_texts = [f"[{p.get('label', 'Section')}]\n{str(p.get('text') or '').strip()}" for p in (prev.get('pages') or []) if str(p.get('text') or '').strip()]
+                if p_texts and len('\n\n'.join(p_texts)) > len(combined_text):
+                    combined_text = '\n\n'.join(p_texts)
+                if len(combined_text) < 350 and not page_images_bytes:
+                    for im_obj in (prev.get('images') or [])[:4]:
+                        d_uri = str(im_obj.get('data_uri') or '')
+                        if d_uri.startswith('data:image') and ',' in d_uri:
+                            page_images_bytes.append(base64.b64decode(d_uri.split(',', 1)[1]))
+        except Exception:
+            pass
+
+    if not combined_text.strip() and not page_images_bytes:
+        return {
+            'ok': False,
+            'error': f'Could not extract readable text or page images from {phys_path.name} to summarize.',
+        }
+
+    eff_title = (title or (item.title if item else '') or emb_title or phys_path.stem).strip()
+    eff_authors = (authors or (item.authors if item else '') or emb_authors or '').strip()
+    eff_pub = (publisher or (item.publisher if item else '') or emb_pub or '').strip()
+    rel_hint = raw_path or str(phys_path)
+
+    # Gather folder & tag context if available
+    folder_name = ''
+    for pref in ('/volume1/common/Media/Books/', '/books/'):
+        if rel_hint.startswith(pref):
+            rem = rel_hint[len(pref):]
+            if '/' in rem:
+                folder_name = rem.split('/', 1)[0].strip()
+            break
+
+    ai_parsed: Dict[str, Any] = {}
+    last_ai_err = ''
+
+    # 2. Try GeminiBookExtractor first (tracks daily AI token usage in scanner_state.db)
+    tracker = None
+    try:
+        from epubmeta.isbn.ai_extractor import GeminiBookExtractor
+        from epubmeta.state import StateTracker
+        db_path = _get_scanner_db_path()
+        if db_path:
+            tracker = StateTracker(db_path)
+        max_daily_cost = epubmeta_cfg.get('max_daily_cost_usd')
+        extractor = GeminiBookExtractor(
+            api_key=gemini_key,
+            model=gemini_model,
+            raise_on_quota=False,
+            state_tracker=tracker,
+            max_daily_cost_usd=max_daily_cost,
+            batch_mode=False,
+        )
+        if hasattr(extractor, 'generate_description_from_content'):
+            ai_parsed = extractor.generate_description_from_content(
+                text=combined_text[:16000] if combined_text else None,
+                images=page_images_bytes[:4] if page_images_bytes else None,
+                title=eff_title,
+                authors=eff_authors,
+                publisher=eff_pub,
+                file_path_hint=rel_hint,
+            ) or {}
+    except Exception as ext_err:
+        last_ai_err = str(ext_err)
+
+    # 3. Direct Gemini REST fallback across candidate models (works even if google-genai SDK is absent in web container)
+    if not (ai_parsed.get('description') or '').strip():
+        try:
+            import requests
+            prompt_text = (
+                "You are an expert literary and technical book cataloger. "
+                "This book/document did not match external ISBN catalogs and currently has no description. "
+                "Carefully read the provided actual book content (front matter, table of contents, preface, "
+                "introduction, opening chapters, and/or rendered page images) along with the file clues below, "
+                "and write an accurate, informative 2-4 sentence description (synopsis) grounded strictly in the book's content.\n\n"
+                f"Current Title: {eff_title}\n"
+                f"Current Author(s): {eff_authors}\n"
+                f"Current Publisher: {eff_pub}\n"
+                f"Collection / Folder: {folder_name}\n"
+                f"File Path: {rel_hint}\n\n"
+            )
+            if combined_text.strip():
+                prompt_text += f"--- EXTRACTED BOOK CONTENT ---\n{combined_text[:15000]}\n--- END CONTENT ---\n\n"
+            prompt_text += (
+                "Respond ONLY with a valid JSON object with these keys:\n"
+                "{\n"
+                '  "description": "2-4 sentence informative synopsis based strictly on the document content",\n'
+                '  "title": "clean human-readable title if identifiable from content, else null",\n'
+                '  "authors": ["author 1", ...],\n'
+                '  "publisher": "publisher or organization if identifiable, else null",\n'
+                '  "subjects": ["subject/topic 1", "subject/topic 2", ...]\n'
+                "}\n"
+                "Rules: Base the description directly on the actual content inside the book. "
+                "Never output generic filler like 'This PDF document contains pages.' Keep it 2-4 sentences (40-110 words)."
+            )
+            parts_payload: List[Dict[str, Any]] = [{'text': prompt_text}]
+            for im_b in page_images_bytes[:4]:
+                parts_payload.append({
+                    'inlineData': {
+                        'mimeType': 'image/png',
+                        'data': base64.b64encode(im_b).decode('ascii'),
+                    }
+                })
+            seen_models = []
+            for cand_m in (gemini_model, 'gemini-3.5-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash'):
+                if not cand_m or cand_m in seen_models:
+                    continue
+                seen_models.append(cand_m)
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{cand_m}:generateContent?key={gemini_key}"
+                resp = requests.post(
+                    url,
+                    json={
+                        'contents': [{'parts': parts_payload}],
+                        'generationConfig': {'temperature': 0.35, 'maxOutputTokens': 700},
+                    },
+                    timeout=18.0,
+                )
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    cand_text = (
+                        ((resp_json.get('candidates') or [{}])[0].get('content') or {}).get('parts') or [{}]
+                    )[0].get('text') or ''
+                    m_json = re.search(r'\{.*\}', cand_text, re.S)
+                    if m_json:
+                        parsed_obj = json.loads(m_json.group(0))
+                        if isinstance(parsed_obj, dict) and parsed_obj.get('description'):
+                            ai_parsed = parsed_obj
+                            if tracker and hasattr(tracker, 'record_ai_usage'):
+                                try:
+                                    um = resp_json.get('usageMetadata') or {}
+                                    in_tok = int(um.get('promptTokenCount') or max(len(prompt_text) // 3, 600))
+                                    out_tok = int(um.get('candidatesTokenCount') or 120)
+                                    cost_est = (in_tok / 1_000_000.0) * 0.10 + (out_tok / 1_000_000.0) * 0.40
+                                    tracker.record_ai_usage(input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost_est)
+                                except Exception:
+                                    pass
+                            break
+                else:
+                    last_ai_err = f'HTTP {resp.status_code}: {resp.text[:180]}'
+                    if resp.status_code in (402, 429):
+                        break
+        except Exception as rest_err:
+            last_ai_err = str(rest_err)
+
+    # 4. Fallback if Gemini API is unreachable: synthesize a clean 2-4 sentence synopsis
+    #    strictly from THIS book's own extracted Preface / Introduction / opening prose.
+    if not (ai_parsed.get('description') or '').strip() and combined_text.strip():
+        raw_lines = [ln.strip() for ln in combined_text.splitlines()]
+        noise_re = re.compile(
+            r'^(?:\[Page\s+\d+\]|\[Section.*\]|page\s+\d+|table of contents|contents|copyright|all rights reserved|'
+            r'isbn[\s:-]|printed in|published by|library of congress|www\.|http://|https://|\d+\s*$)',
+            re.I,
+        )
+        # Look for Preface / Introduction / Abstract / Overview / About This Book section first
+        prose_paras: List[str] = []
+        cur_buf: List[str] = []
+        in_intro_sec = False
+        intro_hdr_re = re.compile(r'^(?:preface|introduction|overview|abstract|about this book|summary|foreword)\b', re.I)
+        for ln in raw_lines:
+            if not ln:
+                if cur_buf:
+                    para = re.sub(r'\s+', ' ', ' '.join(cur_buf)).strip()
+                    cur_buf = []
+                    if len(para) >= 80 and not noise_re.match(para) and sum(c.isalpha() for c in para) > len(para) * 0.55:
+                        if in_intro_sec:
+                            prose_paras.insert(0, para)
+                        else:
+                            prose_paras.append(para)
+                continue
+            if intro_hdr_re.match(ln) and len(ln) < 60:
+                in_intro_sec = True
+                continue
+            if noise_re.match(ln):
+                continue
+            # Skip TOC leader lines like "Chapter 1 ..... 12"
+            if re.search(r'\.{3,}\s*\d+$', ln) or re.match(r'^(?:chapter|part|section)\s+\d+\b', ln, re.I):
+                continue
+            cur_buf.append(ln)
+        if cur_buf:
+            para = re.sub(r'\s+', ' ', ' '.join(cur_buf)).strip()
+            if len(para) >= 80 and not noise_re.match(para) and sum(c.isalpha() for c in para) > len(para) * 0.55:
+                prose_paras.append(para)
+
+        if prose_paras:
+            best_text = re.sub(r'(\w)-\s+(\w)', r'\1\2', ' '.join(prose_paras[:5]))
+            all_sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', best_text) if len(s.strip()) >= 40 and s.strip()[0].isupper() and s.strip()[-1] in '.!?']
+            clean_sents = [s for s in all_sents if not re.search(r'\[\d+\]|©|ISBN|doi:|pp\.\s*\d', s)]
+            chosen = (clean_sents if len(clean_sents) >= 2 else all_sents)[:4]
+            if chosen:
+                ai_parsed['description'] = ' '.join(chosen)[:900]
+            else:
+                ai_parsed['description'] = best_text[:650]
+
+    gen_desc = _strip_html(str(ai_parsed.get('description') or '').strip())
+    if not gen_desc:
+        return {
+            'ok': False,
+            'error': f'Gemini AI could not generate a description from book content ({last_ai_err or "empty response"}).',
+        }
+
+    sugg_title = str(ai_parsed.get('title') or '').strip()
+    raw_sugg_authors = ai_parsed.get('authors') or []
+    if isinstance(raw_sugg_authors, str):
+        raw_sugg_authors = [a.strip() for a in raw_sugg_authors.split(',') if a.strip()]
+    sugg_authors = format_normalized_authors_str(raw_sugg_authors) or ', '.join(str(a).strip() for a in raw_sugg_authors if str(a).strip())
+    sugg_pub = str(ai_parsed.get('publisher') or '').strip()
+    sugg_subjects = [str(s).strip() for s in (ai_parsed.get('subjects') or []) if str(s).strip()][:8]
+
+    applied = False
+    if apply_immediately and item is not None:
+        item.description = gen_desc[:4000]
+        upd_fields = ['description', 'updated_at']
+        item.save(update_fields=upd_fields)
+        applied = True
+
+    # Also update candidate_metadata_json / updated_metadata_json in scanner_state.db if tracked,
+    # while preserving orig_description untouched so Revert to Original remains non-destructive.
+    if apply_immediately:
+        try:
+            db_path = _get_scanner_db_path()
+            path_variants: List[str] = []
+            for p_cand in [raw_path, str(phys_path)] + ([str(f.file_path) for f in item.files.all() if f.file_path] if item else []):
+                if not p_cand:
+                    continue
+                if p_cand not in path_variants:
+                    path_variants.append(p_cand)
+                if p_cand.startswith('/books/'):
+                    v_nas = '/volume1/common/Media/Books/' + p_cand[len('/books/'):]
+                    if v_nas not in path_variants:
+                        path_variants.append(v_nas)
+                elif p_cand.startswith('/volume1/common/Media/Books/'):
+                    v_dk = '/books/' + p_cand[len('/volume1/common/Media/Books/'):]
+                    if v_dk not in path_variants:
+                        path_variants.append(v_dk)
+
+            if path_variants and (is_postgres_scanner_enabled() or (db_path and db_path.exists())):
+                conn = connect_scanner_db(db_path, timeout=8.0)
+                conn.row_factory = sqlite3.Row
+                try:
+                    cur = conn.cursor()
+                    placeholders = ','.join(['?'] * len(path_variants))
+                    cur.execute(
+                        f"SELECT file_path, candidate_metadata_json, updated_metadata_json FROM processed_files WHERE file_path IN ({placeholders})",
+                        tuple(path_variants),
+                    )
+                    rows = cur.fetchall()
+                    for r in rows:
+                        cand_d = {}
+                        upd_d = {}
+                        try:
+                            cand_d = json.loads(r['candidate_metadata_json'] or '{}') if r['candidate_metadata_json'] else {}
+                        except Exception:
+                            cand_d = {}
+                        try:
+                            upd_d = json.loads(r['updated_metadata_json'] or '{}') if r['updated_metadata_json'] else {}
+                        except Exception:
+                            upd_d = {}
+                        cand_d['description'] = gen_desc
+                        if sugg_subjects and not cand_d.get('subjects'):
+                            cand_d['subjects'] = sugg_subjects
+                        upd_d['description'] = gen_desc
+                        cur.execute(
+                            "UPDATE processed_files SET candidate_metadata_json = ?, updated_metadata_json = ? WHERE file_path = ?",
+                            (json.dumps(cand_d, ensure_ascii=False), json.dumps(upd_d, ensure_ascii=False), r['file_path']),
+                        )
+                    if rows:
+                        conn.commit()
+                finally:
+                    conn.close()
+
+            diag_map = _ENRICHED_PATHS_CACHE.get('diag_by_path')
+            if isinstance(diag_map, dict):
+                for pv in path_variants:
+                    if pv in diag_map and isinstance(diag_map[pv], dict):
+                        diag_map[pv]['candidate_description'] = gen_desc
+        except Exception:
+            pass
+
+    return {
+        'ok': True,
+        'item_id': str(item.id) if item else '',
+        'file_id': str(resolved_loc.id) if resolved_loc else file_id,
+        'file_path': raw_path or str(phys_path),
+        'description': gen_desc,
+        'suggested_title': sugg_title,
+        'suggested_authors': sugg_authors,
+        'suggested_publisher': sugg_pub,
+        'subjects': sugg_subjects,
+        'applied': applied,
+        'source': 'ai-content',
     }
 
 
@@ -6406,17 +8378,72 @@ def has_excessive_white_border_cover(cover_data_or_bytes: Any) -> bool:
         return False
 
 
+def is_partial_banner_cover(cover_data_or_bytes: Any) -> bool:
+    """
+    Return True if `cover_data_or_bytes` is a partial top-of-cover banner or square graphic slice
+    (e.g. `200x133` or `200x195` extracted from `first_page.images[0]` on a PDF cover page where the
+    rest of the cover page is vector shapes and title/author text, so `width / height >= 0.80`).
+    """
+    raw_bytes = _decode_cover_bytes(cover_data_or_bytes)
+    if not raw_bytes or len(raw_bytes) < 400:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw_bytes)) as im:
+            w, h = im.size
+            if w <= 0 or h <= 0:
+                return True
+            if (w / float(h)) >= 0.80:
+                return True
+            if w == 200 and h < 225:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def is_legacy_scanner_pdf_cover(cover_data_or_bytes: Any) -> bool:
+    """
+    Return True if `cover_data_or_bytes` is a legacy `200x300` thumbnail (`w <= 200 and h <= 300`)
+    extracted by the old `pypdf` `first_page.images[0].data` scanner, which grabbed only the
+    embedded background image XObject on Page 1 without rendering overlaid PDF title/author text
+    or vector graphics (whereas full-page rendered PDF covers use `max_size=(360, 540)`).
+    """
+    raw_bytes = _decode_cover_bytes(cover_data_or_bytes)
+    if not raw_bytes or len(raw_bytes) < 400:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw_bytes)) as im:
+            w, h = im.size
+            if w <= 200 and h <= 300:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def should_prefer_candidate_cover(orig_cover: Any, cand_cover: Any) -> bool:
     """
     Return True if `cand_cover` should be preferred over `orig_cover`:
       1. `orig_cover` is missing or a text-only page and `cand_cover` is a genuine graphic cover, OR
-      2. `orig_cover` has an excessive white page border around a small cover and `cand_cover` does not, OR
-      3. `cand_cover` has the same cover layout/design as `orig_cover` AND is in color
+      2. `orig_cover` is a partial top-of-cover banner/square slice (`is_partial_banner_cover`) and `cand_cover` is not, OR
+      3. `orig_cover` is a legacy `200x300` `pypdf` `first_page.images[0]` thumbnail (missing overlaid Page 1 text) and `cand_cover` is not, OR
+      4. `orig_cover` has an excessive white page border around a small cover and `cand_cover` does not, OR
+      5. `cand_cover` has the same cover layout/design as `orig_cover` AND is in color
          while `orig_cover` is grayscale/monochrome or significantly less colorful.
     """
     if classify_cover_image(cand_cover) is not None:
         return False
     if classify_cover_image(orig_cover) in ('missing', 'text_only'):
+        return True
+    if is_partial_banner_cover(orig_cover) and not is_partial_banner_cover(cand_cover):
+        return True
+    if is_legacy_scanner_pdf_cover(orig_cover) and not is_legacy_scanner_pdf_cover(cand_cover):
         return True
     if has_excessive_white_border_cover(orig_cover) and not has_excessive_white_border_cover(cand_cover):
         return True
@@ -6817,19 +8844,10 @@ def get_interesting_item_ids() -> List[str]:
     try:
         from django.db import connection
         with connection.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM catalog_interesting_books b
-                WHERE b.item_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                   OR NOT EXISTS (
-                       SELECT 1 FROM catalog_catalogitem c WHERE c.id = b.item_id::uuid
-                   )
-                """
-            )
             cur.execute("SELECT item_id FROM catalog_interesting_books ORDER BY marked_at DESC")
             ids = [str(r[0]) for r in cur.fetchall() if r and r[0]]
         _INTERESTING_CACHE['ids'] = ids
-        _INTERESTING_CACHE['expires_at'] = now_m + 60.0
+        _INTERESTING_CACHE['expires_at'] = now_m + 180.0
         return ids
     except Exception:
         return _INTERESTING_CACHE['ids']
@@ -6928,49 +8946,21 @@ def get_bad_metadata_item_ids() -> List[str]:
     try:
         from django.db import connection
         with connection.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM catalog_bad_metadata_books b
-                WHERE b.item_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                   OR NOT EXISTS (
-                       SELECT 1 FROM catalog_catalogitem c WHERE c.id = b.item_id::uuid
-                   )
-                """
-            )
             cur.execute("SELECT item_id FROM catalog_bad_metadata_books ORDER BY marked_at DESC")
             ids = [str(r[0]) for r in cur.fetchall() if r and r[0]]
         _BAD_METADATA_CACHE['ids'] = ids
-        _BAD_METADATA_CACHE['expires_at'] = now_m + 60.0
+        _BAD_METADATA_CACHE['expires_at'] = now_m + 180.0
         return ids
     except Exception:
         return _BAD_METADATA_CACHE['ids']
 
 
-_REMOVED_PROTECTION_CACHE: Dict[str, Any] = {'expires_at': 0.0, 'ids': []}
+_REMOVED_PROTECTION_CACHE: Dict[str, Any] = {'expires_at': 0.0, 'ids': [], '_refreshing': False}
 
 
-def get_removed_protection_item_ids() -> List[Any]:
-    """
-    Return the list of `CatalogItem.id`s that have at least one file with 'nodrm'
-    in `file_name`, ordered newest first (`created_at DESC, title ASC`).
-    Cached for 300s in memory and persisted to disk for instant (<1ms) sidebar badge and shelf rendering.
-    """
-    import uuid as _uuid
+def _rebuild_removed_protection_cache() -> List[Any]:
     now_m = time.monotonic()
-    if now_m < _REMOVED_PROTECTION_CACHE['expires_at'] and _REMOVED_PROTECTION_CACHE['ids']:
-        return _REMOVED_PROTECTION_CACHE['ids']
     disk_file = Path('/books_bad/.removed_protection_cache.json')
-    if not _REMOVED_PROTECTION_CACHE['ids'] and disk_file.exists():
-        try:
-            age_s = max(0.0, time.time() - disk_file.stat().st_mtime)
-            if age_s < 600.0:
-                raw_disk = json.loads(disk_file.read_text(encoding='utf-8')) or []
-                if isinstance(raw_disk, list) and raw_disk:
-                    _REMOVED_PROTECTION_CACHE['ids'] = [_uuid.UUID(str(x)) for x in raw_disk]
-                    _REMOVED_PROTECTION_CACHE['expires_at'] = now_m + max(60.0, 300.0 - age_s)
-                    return _REMOVED_PROTECTION_CACHE['ids']
-        except Exception:
-            pass
     try:
         from django.db.models import F
         raw_ids = list(
@@ -6985,7 +8975,7 @@ def get_removed_protection_item_ids() -> List[Any]:
                 seen.add(cid)
                 dedup_ids.append(cid)
         _REMOVED_PROTECTION_CACHE['ids'] = dedup_ids
-        _REMOVED_PROTECTION_CACHE['expires_at'] = now_m + 300.0
+        _REMOVED_PROTECTION_CACHE['expires_at'] = now_m + 600.0
         try:
             if disk_file.parent.exists():
                 disk_file.write_text(json.dumps([str(x) for x in dedup_ids]), encoding='utf-8')
@@ -6994,20 +8984,49 @@ def get_removed_protection_item_ids() -> List[Any]:
         return dedup_ids
     except Exception:
         return _REMOVED_PROTECTION_CACHE['ids']
+    finally:
+        _REMOVED_PROTECTION_CACHE['_refreshing'] = False
 
 
-_PACKT_BOOKS_CACHE: Dict[str, Any] = {'expires_at': 0.0, 'dir_mtime': 0.0, 'ids': []}
-
-
-def get_packt_books_shelf_ids() -> List[Any]:
+def get_removed_protection_item_ids() -> List[Any]:
     """
-    Return the list of `CatalogItem.id`s whose files are in `/books/Computer Mags & FAQ/978/`
-    (or `/volume1/common/Media/Books/Computer Mags & FAQ/978/`), sorted by most recent
-    physical file modification date (`file_modified_at` / filesystem `st_mtime`) first!
-    Also backfills `FileLocation.file_modified_at` from the filesystem so `item.file_date`
-    displays the real file date on the book cards.
+    Return the list of `CatalogItem.id`s that have at least one file with 'nodrm'
+    in `file_name`, ordered newest first (`created_at DESC, title ASC`).
+    Cached for 600s in memory with stale-while-revalidate and persisted to disk.
     """
     import uuid as _uuid
+    now_m = time.monotonic()
+    if now_m < _REMOVED_PROTECTION_CACHE['expires_at'] and _REMOVED_PROTECTION_CACHE['ids']:
+        return _REMOVED_PROTECTION_CACHE['ids']
+    if _REMOVED_PROTECTION_CACHE['ids']:
+        if not _REMOVED_PROTECTION_CACHE.get('_refreshing'):
+            _REMOVED_PROTECTION_CACHE['_refreshing'] = True
+            _REMOVED_PROTECTION_CACHE['expires_at'] = now_m + 600.0
+            import threading
+            threading.Thread(target=_rebuild_removed_protection_cache, daemon=True).start()
+        return _REMOVED_PROTECTION_CACHE['ids']
+    disk_file = Path('/books_bad/.removed_protection_cache.json')
+    if disk_file.exists():
+        try:
+            age_s = max(0.0, time.time() - disk_file.stat().st_mtime)
+            raw_disk = json.loads(disk_file.read_text(encoding='utf-8')) or []
+            if isinstance(raw_disk, list) and raw_disk:
+                _REMOVED_PROTECTION_CACHE['ids'] = [_uuid.UUID(str(x)) for x in raw_disk]
+                _REMOVED_PROTECTION_CACHE['expires_at'] = now_m + (600.0 if age_s < 1800.0 else 30.0)
+                if age_s >= 1800.0 and not _REMOVED_PROTECTION_CACHE.get('_refreshing'):
+                    _REMOVED_PROTECTION_CACHE['_refreshing'] = True
+                    import threading
+                    threading.Thread(target=_rebuild_removed_protection_cache, daemon=True).start()
+                return _REMOVED_PROTECTION_CACHE['ids']
+        except Exception:
+            pass
+    return _rebuild_removed_protection_cache()
+
+
+_PACKT_BOOKS_CACHE: Dict[str, Any] = {'expires_at': 0.0, 'dir_mtime': 0.0, 'ids': [], '_refreshing': False}
+
+
+def _rebuild_packt_books_cache() -> List[Any]:
     from datetime import datetime as _dt, timezone as _tz
     from django.db.models import Q
 
@@ -7017,7 +9036,6 @@ def get_packt_books_shelf_ids() -> List[Any]:
     for cand_dir in (
         Path('/books/Computer Mags & FAQ/978'),
         Path('/volume1/common/Media/Books/Computer Mags & FAQ/978'),
-        Path(r'U:\Media\Books\Computer Mags & FAQ\978'),
     ):
         try:
             if cand_dir.exists() and cand_dir.is_dir():
@@ -7027,29 +9045,7 @@ def get_packt_books_shelf_ids() -> List[Any]:
         except Exception:
             continue
 
-    if (
-        now_m < _PACKT_BOOKS_CACHE['expires_at']
-        and _PACKT_BOOKS_CACHE['ids']
-        and (not cur_dir_mtime or cur_dir_mtime == _PACKT_BOOKS_CACHE.get('dir_mtime', 0.0))
-    ):
-        return _PACKT_BOOKS_CACHE['ids']
-
     disk_file = Path('/books_bad/.packt_books_cache.json')
-    if not _PACKT_BOOKS_CACHE['ids'] and disk_file.exists():
-        try:
-            age_s = max(0.0, time.time() - disk_file.stat().st_mtime)
-            if age_s < 300.0:
-                raw_disk = json.loads(disk_file.read_text(encoding='utf-8')) or {}
-                disk_ids = raw_disk.get('ids') if isinstance(raw_disk, dict) else raw_disk
-                saved_dm = raw_disk.get('dir_mtime', 0.0) if isinstance(raw_disk, dict) else 0.0
-                if isinstance(disk_ids, list) and disk_ids and (not cur_dir_mtime or saved_dm == cur_dir_mtime):
-                    _PACKT_BOOKS_CACHE['ids'] = [_uuid.UUID(str(x)) for x in disk_ids]
-                    _PACKT_BOOKS_CACHE['dir_mtime'] = cur_dir_mtime
-                    _PACKT_BOOKS_CACHE['expires_at'] = now_m + max(60.0, 180.0 - age_s)
-                    return _PACKT_BOOKS_CACHE['ids']
-        except Exception:
-            pass
-
     try:
         mtime_by_name: Dict[str, float] = {}
         if packt_dir is not None:
@@ -7124,7 +9120,7 @@ def get_packt_books_shelf_ids() -> List[Any]:
         ]
         _PACKT_BOOKS_CACHE['ids'] = sorted_ids
         _PACKT_BOOKS_CACHE['dir_mtime'] = cur_dir_mtime
-        _PACKT_BOOKS_CACHE['expires_at'] = now_m + 180.0
+        _PACKT_BOOKS_CACHE['expires_at'] = now_m + 300.0
         try:
             if disk_file.parent.exists():
                 disk_file.write_text(
@@ -7136,6 +9132,50 @@ def get_packt_books_shelf_ids() -> List[Any]:
         return sorted_ids
     except Exception:
         return _PACKT_BOOKS_CACHE['ids']
+    finally:
+        _PACKT_BOOKS_CACHE['_refreshing'] = False
+
+
+def get_packt_books_shelf_ids() -> List[Any]:
+    """
+    Return the list of `CatalogItem.id`s whose files are in `/books/Computer Mags & FAQ/978/`
+    (or `/volume1/common/Media/Books/Computer Mags & FAQ/978/`), sorted by most recent
+    physical file modification date (`file_modified_at` / filesystem `st_mtime`) first!
+    """
+    import uuid as _uuid
+
+    now_m = time.monotonic()
+    if now_m < _PACKT_BOOKS_CACHE['expires_at'] and _PACKT_BOOKS_CACHE['ids']:
+        return _PACKT_BOOKS_CACHE['ids']
+
+    if _PACKT_BOOKS_CACHE['ids']:
+        if not _PACKT_BOOKS_CACHE.get('_refreshing'):
+            _PACKT_BOOKS_CACHE['_refreshing'] = True
+            _PACKT_BOOKS_CACHE['expires_at'] = now_m + 300.0
+            import threading
+            threading.Thread(target=_rebuild_packt_books_cache, daemon=True).start()
+        return _PACKT_BOOKS_CACHE['ids']
+
+    disk_file = Path('/books_bad/.packt_books_cache.json')
+    if disk_file.exists():
+        try:
+            age_s = max(0.0, time.time() - disk_file.stat().st_mtime)
+            raw_disk = json.loads(disk_file.read_text(encoding='utf-8')) or {}
+            disk_ids = raw_disk.get('ids') if isinstance(raw_disk, dict) else raw_disk
+            saved_dm = raw_disk.get('dir_mtime', 0.0) if isinstance(raw_disk, dict) else 0.0
+            if isinstance(disk_ids, list) and disk_ids:
+                _PACKT_BOOKS_CACHE['ids'] = [_uuid.UUID(str(x)) for x in disk_ids]
+                _PACKT_BOOKS_CACHE['dir_mtime'] = saved_dm
+                _PACKT_BOOKS_CACHE['expires_at'] = now_m + (300.0 if age_s < 1800.0 else 30.0)
+                if age_s >= 1800.0 and not _PACKT_BOOKS_CACHE.get('_refreshing'):
+                    _PACKT_BOOKS_CACHE['_refreshing'] = True
+                    import threading
+                    threading.Thread(target=_rebuild_packt_books_cache, daemon=True).start()
+                return _PACKT_BOOKS_CACHE['ids']
+        except Exception:
+            pass
+
+    return _rebuild_packt_books_cache()
 
 
 def set_book_bad_metadata(item_id: Any, is_bad: Optional[bool] = None, reason: str = '') -> Dict[str, Any]:
@@ -9103,10 +11143,20 @@ class OPDSCoverView(View):
             raise Http404('Catalog item not found.')
 
         if item.cover_thumbnail and item.cover_thumbnail.startswith('data:image'):
-            if has_excessive_white_border_cover(item.cover_thumbnail):
+            is_pdf_item = _item_has_pdf_file(item)
+            if (
+                has_excessive_white_border_cover(item.cover_thumbnail)
+                or is_partial_banner_cover(item.cover_thumbnail)
+                or (is_pdf_item and is_legacy_scanner_pdf_cover(item.cover_thumbnail))
+            ):
                 try:
-                    cropped_uri = extract_original_cover_for_item(item)
-                    if cropped_uri and cropped_uri.startswith('data:image') and not has_excessive_white_border_cover(cropped_uri):
+                    cropped_uri = extract_original_cover_for_item(item, ignore_backup=True)
+                    if (
+                        cropped_uri
+                        and cropped_uri.startswith('data:image')
+                        and not has_excessive_white_border_cover(cropped_uri)
+                        and not is_partial_banner_cover(cropped_uri)
+                    ):
                         item.cover_thumbnail = cropped_uri
                         item.save(update_fields=['cover_thumbnail'])
                 except Exception:

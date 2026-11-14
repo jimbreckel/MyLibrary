@@ -208,6 +208,7 @@ class BookProcessor:
         update_cover: bool = False,
         min_confidence: float = 0.50,
         pdf_require_isbn: bool = False,
+        ai_describe_no_match: bool = False,
         scanner_bridge: Optional[Any] = None,
         mylibrary_client: Optional[Any] = None,
     ):
@@ -222,6 +223,7 @@ class BookProcessor:
         self.update_cover = update_cover
         self.min_confidence = min_confidence
         self.pdf_require_isbn = pdf_require_isbn
+        self.ai_describe_no_match = bool(ai_describe_no_match)
         self.scanner_bridge = scanner_bridge
         self.mylibrary_client = mylibrary_client
         self._memory_cache: List[Dict[str, Any]] = []
@@ -917,6 +919,57 @@ class BookProcessor:
                 ):
                     msg = f"Queued for Gemini Batch API (50% cost reduction): {file_path.name}"
                     return reader, embedded_meta, None, None, None, msg
+                if (
+                    self.ai_describe_no_match
+                    and not (embedded_meta and embedded_meta.description and embedded_meta.description.strip())
+                    and self.ai_extractor
+                    and self.ai_extractor.is_available
+                    and not getattr(self.ai_extractor, "batch_mode", False)
+                ):
+                    try:
+                        from .matcher import MatchResult
+                        norm_key = str(file_path.resolve())
+                        ft = self._front_texts.get(norm_key) or reader.extract_front_text(max_pages=20)
+                        imgs = None
+                        if not ft or len(ft.strip()) < 300:
+                            try:
+                                imgs = reader.extract_front_images(max_pages=3)
+                            except Exception:
+                                imgs = None
+                        ai_desc_res = self.ai_extractor.generate_description_from_content(
+                            text=ft,
+                            images=imgs,
+                            title=(embedded_meta.title if embedded_meta else None) or fn_info.get("title"),
+                            authors=(", ".join(embedded_meta.authors) if embedded_meta and embedded_meta.authors else None) or fn_info.get("author"),
+                            publisher=embedded_meta.publisher if embedded_meta else None,
+                            file_path_hint=str(file_path),
+                        )
+                        if ai_desc_res and ai_desc_res.get("description"):
+                            eff_authors = list(embedded_meta.authors) if (embedded_meta and embedded_meta.authors) else list(ai_desc_res.get("authors") or ([fn_info["author"]] if fn_info.get("author") else []))
+                            best_target_meta = BookMetadata(
+                                title=(embedded_meta.title if embedded_meta and embedded_meta.title else None) or ai_desc_res.get("title") or fn_info.get("title") or file_path.stem,
+                                authors=eff_authors,
+                                publisher=(embedded_meta.publisher if embedded_meta and embedded_meta.publisher else None) or ai_desc_res.get("publisher"),
+                                published_date=embedded_meta.published_date if embedded_meta else None,
+                                isbn13=embedded_meta.isbn13 if embedded_meta else best_isbn,
+                                isbn10=embedded_meta.isbn10 if embedded_meta else None,
+                                description=ai_desc_res["description"],
+                                subjects=list(embedded_meta.subjects) if (embedded_meta and embedded_meta.subjects) else list(ai_desc_res.get("subjects") or []),
+                                language=embedded_meta.language if embedded_meta else None,
+                                source="ai-content-summary",
+                                ai_used=True,
+                            )
+                            best_match_result = MatchResult(
+                                score=1.0,
+                                is_confident=True,
+                                title_score=1.0,
+                                author_score=1.0,
+                                details=["AI-generated description from book content (no external catalog match)"],
+                            )
+                            self._match_scores[str(file_path)] = 1.0
+                            return reader, embedded_meta, best_target_meta, best_isbn, best_match_result, None
+                    except Exception as ai_desc_err:
+                        logger.warning("AI content description fallback failed for %s: %s", file_path.name, ai_desc_err)
                 if is_pdf and self.pdf_require_isbn:
                     msg = f"Skipped PDF without verifiable ISBN (--pdf-require-isbn): {file_path.name}"
                     logger.info(msg)
@@ -1039,8 +1092,13 @@ class BookProcessor:
                 from .readers.epub import EpubReader
                 norm_key = str(file_path)
                 needs_db_sync = bool(self.state_tracker or self.scanner_bridge or self.mylibrary_client)
+                try:
+                    is_large_file = file_path.stat().st_size > 20 * 1024 * 1024
+                except Exception:
+                    is_large_file = False
+                _hash_fn = compute_file_quick_hash if is_large_file else compute_full_sha256
                 orig_sha256 = (
-                    (self._orig_sha256.get(norm_key) or compute_full_sha256(file_path))
+                    (self._orig_sha256.get(norm_key) or _hash_fn(file_path))
                     if needs_db_sync
                     else None
                 )
@@ -1084,7 +1142,7 @@ class BookProcessor:
                                 backup=self.backup,
                                 backup_path=backup_dest,
                             )
-                        new_sha256 = compute_full_sha256(file_path) if needs_db_sync else None
+                        new_sha256 = _hash_fn(file_path) if needs_db_sync else None
                         result["status"] = "SUCCESS"
                         result["unchanged"] = False
                         result["message"] = f"Successfully updated metadata for {file_path.name}"
