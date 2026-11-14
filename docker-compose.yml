@@ -35,8 +35,8 @@ services:
       context: ./nas_scanner
       dockerfile: Dockerfile
     container_name: mylibrary_scanner
-    mem_limit: 2g
-    memswap_limit: 2g
+    mem_limit: 3584m
+    memswap_limit: 3584m
     volumes:
       - ./nas_scanner/config.json:/config/config.json
       - ./nas_scanner/scanner_state.db:/app/scanner_state.db

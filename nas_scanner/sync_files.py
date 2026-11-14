@@ -65,7 +65,7 @@ def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
             drop_dir = Path(drop_path_str)
             if not drop_dir.exists() or not drop_dir.is_dir():
                 continue
-            files = list(find_files(drop_dir, max_levels=3))
+            files = list(find_files(drop_dir, max_depth=3))
             if not files:
                 continue
             print(f"\n[OrgPeriodicals] Organizing {len(files)} incoming file(s) from {drop_dir}...", flush=True)
@@ -118,18 +118,33 @@ def init_local_db():
     conn.close()
 
 
-def load_all_cached_states():
-    """Load all cached file states from SQLite into a memory dictionary to optimize lookups."""
+def load_all_cached_states(directory=None):
+    """Load cached file states for `directory` into a compact tuple dictionary `(modified_at, size, hash)`."""
     cache = {}
     try:
         conn = _connect_db()
         cursor = conn.cursor()
-        cursor.execute('SELECT filepath, modified_at, size, hash FROM file_states')
-        for row in cursor.fetchall():
-            cache[row[0]] = {'modified_at': row[1], 'size': row[2], 'hash': row[3]}
+        if directory:
+            norm_dir = os.path.abspath(directory)
+            dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
+            upper_bound = dir_prefix[:-1] + chr(ord(dir_prefix[-1]) + 1)
+            cursor.execute(
+                'SELECT filepath, modified_at, size, hash FROM file_states '
+                'WHERE (filepath >= ? AND filepath < ?) OR filepath = ?',
+                (dir_prefix, upper_bound, norm_dir)
+            )
+        else:
+            cursor.execute('SELECT filepath, modified_at, size, hash FROM file_states')
+        while True:
+            rows = cursor.fetchmany(50000)
+            if not rows:
+                break
+            for row in rows:
+                cache[row[0]] = (row[1], row[2], row[3])
+        cursor.close()
         conn.close()
     except Exception as e:
-        print(f"Warning: Failed to load cache: {e}")
+        print(f"Warning: Failed to load cache: {e}", flush=True)
     return cache
 
 
@@ -290,7 +305,7 @@ def scan_directory(
     # 1. Load cached file states first and stream os.walk directly (avoiding a 1.48M-item scan_items list)
     files_to_parse = []  # list of (abspath, modified_at, size, name)
     unchanged_for_enrich = []  # list of (abspath, cached_hash) only for enrich_allowed_exts
-    cache = load_all_cached_states()
+    cache = load_all_cached_states(directory)
 
     def _inspect_entry(abspath: str, name: str):
         nonlocal total_files, skipped_files, failed_files
@@ -301,12 +316,12 @@ def scan_directory(
             size = 0 if os.path.isdir(abspath) else stat.st_size
 
             cached = cache.pop(abspath, None)
-            is_unchanged = (not force and cached and cached['modified_at'] == modified_at and cached['size'] == size)
+            is_unchanged = (not force and cached is not None and cached[0] == modified_at and cached[1] == size)
 
             if is_unchanged:
                 skipped_files += 1
                 if want_enrich and os.path.splitext(abspath)[1].lower() in enrich_allowed_exts:
-                    unchanged_for_enrich.append((abspath, cached.get('hash')))
+                    unchanged_for_enrich.append((abspath, cached[2]))
                 return
 
             files_to_parse.append((abspath, modified_at, size, name))

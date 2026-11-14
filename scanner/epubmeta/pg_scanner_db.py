@@ -38,24 +38,23 @@ class PgRow(Mapping):
     """
     Hybrid row object supporting both positional tuple indexing/unpacking (`row[0]`, `a, b = row`)
     and case-insensitive column-name dictionary access (`row['file_path']`, `dict(row)`, `row.keys()`),
-    matching `sqlite3.Row` and raw `sqlite3` tuple behavior simultaneously.
+    matching `sqlite3.Row` and raw `sqlite3` tuple behavior simultaneously without per-row dict overhead.
     """
 
-    __slots__ = ("_vals", "_cols", "_map")
+    __slots__ = ("_vals", "_cols")
 
     def __init__(self, cols: Sequence[str], vals: Sequence[Any]):
-        self._cols = tuple(cols)
-        self._vals = tuple(vals)
-        m: dict[str, Any] = {}
-        for c, v in zip(self._cols, self._vals):
-            m[c] = v
-            m[c.lower()] = v
-        self._map = m
+        self._cols = cols if isinstance(cols, tuple) else tuple(cols)
+        self._vals = vals if isinstance(vals, tuple) else tuple(vals)
 
     def __getitem__(self, key: int | slice | str) -> Any:
         if isinstance(key, (int, slice)):
             return self._vals[key]
-        return self._map[key]
+        k_low = key.lower()
+        for idx, c in enumerate(self._cols):
+            if c == key or c.lower() == k_low:
+                return self._vals[idx]
+        raise KeyError(key)
 
     def __iter__(self):
         return iter(self._vals)
@@ -73,7 +72,10 @@ class PgRow(Mapping):
         return list(self._vals)
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self._map.get(key, default)
+        try:
+            return self[key]
+        except KeyError:
+            return default
 
     def __repr__(self) -> str:
         return f"PgRow({dict(zip(self._cols, self._vals))!r})"
@@ -342,7 +344,7 @@ class PgCursorWrapper:
         if not rows:
             return []
         desc = self._cur.description
-        cols = [d.name if hasattr(d, "name") else d[0] for d in desc]
+        cols = tuple(d.name if hasattr(d, "name") else d[0] for d in desc)
         return [PgRow(cols, r) for r in rows]
 
     def fetchall(self) -> List[PgRow]:
@@ -352,7 +354,7 @@ class PgCursorWrapper:
         if not rows:
             return []
         desc = self._cur.description
-        cols = [d.name if hasattr(d, "name") else d[0] for d in desc]
+        cols = tuple(d.name if hasattr(d, "name") else d[0] for d in desc)
         return [PgRow(cols, r) for r in rows]
 
     def close(self) -> None:

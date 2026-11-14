@@ -2,13 +2,15 @@ import os
 from pathlib import Path
 from typing import Generator
 
-def find_files(base_path: str, max_depth: int = 2) -> Generator[Path, None, None]:
+def find_files(base_path: str, max_depth: int = 2, max_levels: int = None) -> Generator[Path, None, None]:
     """
     Search for PDF and EPUB files up to max_depth levels.
     
     max_depth = 1: search base_path only.
     max_depth = 2: search base_path and its immediate subdirectories.
     """
+    if max_levels is not None:
+        max_depth = max_levels
     base = Path(base_path).resolve()
     if not base.exists():
         return
