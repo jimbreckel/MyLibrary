@@ -803,18 +803,40 @@ class DashboardView(ListView):
         elif shelf == 'enriched':
             enr_idx = get_enriched_item_ids_index()
             qs = qs.filter(id__in=enr_idx['enriched_ids'])
+        elif shelf in ('no_match', 'no_isbn', 'not_found'):
+            enr_idx = get_enriched_item_ids_index()
+            nm_ids = enr_idx.get('no_match_ids') or []
+            qs = qs.filter(id__in=nm_ids)
+            if nm_ids and not query and not sort_by:
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(nm_ids[:1500])],
+                    default=len(nm_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_nm_order=order_expr).order_by('_nm_order', 'title')
         elif shelf in ('needs_review', 'in_review'):
             enr_idx = get_enriched_item_ids_index()
-            qs = qs.filter(id__in=enr_idx['needs_review_ids'])
+            rev_type = self.request.GET.get('review_type', '').strip().lower()
             strict_ids = enr_idx.get('strict_in_review_ids') or []
-            if strict_ids and not query and not sort_by:
-                qs = qs.annotate(
-                    _rev_prio=Case(
-                        When(id__in=strict_ids, then=0),
-                        default=1,
+            if rev_type == 'all':
+                qs = qs.filter(id__in=enr_idx['needs_review_ids'])
+                if strict_ids and not query and not sort_by:
+                    qs = qs.annotate(
+                        _rev_prio=Case(
+                            When(id__in=strict_ids, then=0),
+                            default=1,
+                            output_field=IntegerField(),
+                        )
+                    ).order_by('_rev_prio', 'title')
+            else:
+                qs = qs.filter(id__in=strict_ids)
+                if strict_ids and not query and not sort_by:
+                    order_expr = Case(
+                        *[When(id=pk, then=pos) for pos, pk in enumerate(strict_ids[:1500])],
+                        default=len(strict_ids),
                         output_field=IntegerField(),
                     )
-                ).order_by('_rev_prio', 'title')
+                    qs = qs.annotate(_rev_order=order_expr).order_by('_rev_order', 'title')
         elif shelf == 'needs_enriching':
             enr_idx = get_enriched_item_ids_index()
             if not item_types:
@@ -916,21 +938,42 @@ class DashboardView(ListView):
         elif enrich_status in ('missing_cover', 'missing_covers', 'needs_cover'):
             nc_data = get_needs_cover_enriched_shelf()
             qs = qs.filter(id__in=nc_data.get('item_ids', []))
-        elif enrich_status in ('needs_enriching', 'enriched', 'needs_review'):
+        elif enrich_status in ('needs_enriching', 'enriched', 'needs_review', 'no_match', 'no_isbn', 'not_found'):
             enr_idx = get_enriched_item_ids_index()
             if enrich_status == 'enriched':
                 qs = qs.filter(id__in=enr_idx['enriched_ids'])
+            elif enrich_status in ('no_match', 'no_isbn', 'not_found'):
+                nm_ids = enr_idx.get('no_match_ids') or []
+                qs = qs.filter(id__in=nm_ids)
+                if nm_ids and not query and not sort_by:
+                    order_expr = Case(
+                        *[When(id=pk, then=pos) for pos, pk in enumerate(nm_ids[:1500])],
+                        default=len(nm_ids),
+                        output_field=IntegerField(),
+                    )
+                    qs = qs.annotate(_nm_order=order_expr).order_by('_nm_order', 'title')
             elif enrich_status == 'needs_review':
-                qs = qs.filter(id__in=enr_idx['needs_review_ids'])
+                rev_type = self.request.GET.get('review_type', '').strip().lower()
                 strict_ids = enr_idx.get('strict_in_review_ids') or []
-                if strict_ids and not query and not sort_by:
-                    qs = qs.annotate(
-                        _rev_prio=Case(
-                            When(id__in=strict_ids, then=0),
-                            default=1,
+                if rev_type == 'all':
+                    qs = qs.filter(id__in=enr_idx['needs_review_ids'])
+                    if strict_ids and not query and not sort_by:
+                        qs = qs.annotate(
+                            _rev_prio=Case(
+                                When(id__in=strict_ids, then=0),
+                                default=1,
+                                output_field=IntegerField(),
+                            )
+                        ).order_by('_rev_prio', 'title')
+                else:
+                    qs = qs.filter(id__in=strict_ids)
+                    if strict_ids and not query and not sort_by:
+                        order_expr = Case(
+                            *[When(id=pk, then=pos) for pos, pk in enumerate(strict_ids[:1500])],
+                            default=len(strict_ids),
                             output_field=IntegerField(),
                         )
-                    ).order_by('_rev_prio', 'title')
+                        qs = qs.annotate(_rev_order=order_expr).order_by('_rev_order', 'title')
             elif enrich_status == 'needs_enriching':
                 if not item_types and shelf not in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_all'):
                     qs = qs.filter(item_type='BOOK')
@@ -1096,9 +1139,16 @@ class DashboardView(ListView):
                 precomputed_count = len(get_removed_protection_item_ids())
             elif shelf in ('packt', 'packt_books') and not item_types and not enrich_status:
                 precomputed_count = len(get_packt_books_shelf_ids())
+            elif (shelf in ('no_match', 'no_isbn', 'not_found') or (not shelf and enrich_status in ('no_match', 'no_isbn', 'not_found'))) and not item_types:
+                enr_idx = get_enriched_item_ids_index()
+                precomputed_count = len(enr_idx.get('no_match_ids') or [])
             elif (shelf in ('needs_review', 'in_review') or (not shelf and enrich_status == 'needs_review')) and not item_types:
                 enr_idx = get_enriched_item_ids_index()
-                precomputed_count = len(enr_idx.get('needs_review_ids') or [])
+                rev_type = self.request.GET.get('review_type', '').strip().lower()
+                if rev_type == 'all':
+                    precomputed_count = len(enr_idx.get('needs_review_ids') or [])
+                else:
+                    precomputed_count = len(enr_idx.get('strict_in_review_ids') or [])
             elif (shelf == 'enriched' or (not shelf and enrich_status == 'enriched')) and not item_types:
                 enr_idx = get_enriched_item_ids_index()
                 precomputed_count = len(enr_idx.get('enriched_ids') or [])
@@ -1183,6 +1233,7 @@ class DashboardView(ListView):
         context['selected_read_status'] = self.request.GET.get('read_status', '').strip().lower()
         context['selected_enrich_status'] = self.request.GET.get('enrich_status', '').strip().lower()
         context['selected_cover_issue'] = self.request.GET.get('cover_issue', '').strip().lower()
+        context['selected_review_type'] = self.request.GET.get('review_type', '').strip().lower()
 
         stats, available_formats = _get_cached_dashboard_meta()
         context['available_formats'] = available_formats
@@ -1193,7 +1244,8 @@ class DashboardView(ListView):
         enr_cnt = len(enr_idx.get('enriched_ids') or [])
         rev_cnt = len(enr_idx.get('needs_review_ids') or [])
         strict_rev_cnt = len(enr_idx.get('strict_in_review_ids') or [])
-        no_isbn_rev_cnt = max(0, rev_cnt - strict_rev_cnt)
+        no_match_cnt = len(enr_idx.get('no_match_ids') or [])
+        no_isbn_rev_cnt = no_match_cnt or max(0, rev_cnt - strict_rev_cnt)
         excl_cnt = len(enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx.get('enriched_ids') or [])
         cyc_metrics = _get_scanner_cycle_metrics(
             fallback_total_files=stats.get('total_files') or 0,
@@ -1204,6 +1256,8 @@ class DashboardView(ListView):
         context['packt_books_count'] = len(get_packt_books_shelf_ids())
         context['strict_in_review_count'] = strict_rev_cnt
         context['no_isbn_review_count'] = no_isbn_rev_cnt
+        context['no_match_count'] = no_isbn_rev_cnt
+        context['all_review_and_no_match_count'] = rev_cnt
         tm_ids = get_tomags_item_ids(sync_disk=(context['selected_shelf'] in ('tomags', 'to_mags') or context['selected_enrich_status'] in ('tomags', 'to_mags')))
         tm_cnt = len(tm_ids)
         context['tomags_count'] = tm_cnt
@@ -1216,7 +1270,9 @@ class DashboardView(ListView):
         context['enrich_status_counts'] = {
             'enriched': enr_cnt,
             'needs_enriching': needs_enr_cnt,
-            'needs_review': rev_cnt,
+            'needs_review': strict_rev_cnt,
+            'no_match': no_isbn_rev_cnt,
+            'all_review': rev_cnt,
             'tomags': tm_cnt,
             'missing_cover': nc_cnt,
         }
@@ -2779,6 +2835,14 @@ class ConversionItemsAPIView(APIView):
                                 if isinstance(_ENRICHED_PATHS_CACHE.get('strict_in_review_ids'), list):
                                     try:
                                         _ENRICHED_PATHS_CACHE['strict_in_review_ids'].remove(cat_item.id)
+                                    except ValueError:
+                                        pass
+                        if isinstance(_ENRICHED_PATHS_CACHE.get('no_match_item_ids_set'), set):
+                            if cat_item.id in _ENRICHED_PATHS_CACHE['no_match_item_ids_set']:
+                                _ENRICHED_PATHS_CACHE['no_match_item_ids_set'].discard(cat_item.id)
+                                if isinstance(_ENRICHED_PATHS_CACHE.get('no_match_item_ids'), list):
+                                    try:
+                                        _ENRICHED_PATHS_CACHE['no_match_item_ids'].remove(cat_item.id)
                                     except ValueError:
                                         pass
                         if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set'), set):

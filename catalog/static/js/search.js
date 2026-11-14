@@ -3998,7 +3998,7 @@ const initCatalogSearch = () => {
     };
     window.erUseAll = window.erSelectAllSide;
 
-    function adjustLiveEnrichCounters({ enrichedDelta = 0, needsEnrichingDelta = 0, needsReviewDelta = 0 }) {
+    function adjustLiveEnrichCounters({ enrichedDelta = 0, needsEnrichingDelta = 0, needsReviewDelta = 0, noMatchDelta = 0 }) {
         const parseCount = (str) => {
             const digits = String(str || '').replace(/[^0-9]/g, '');
             return digits ? parseInt(digits, 10) : null;
@@ -4025,13 +4025,19 @@ const initCatalogSearch = () => {
             const cur = parseCount(sbReview.textContent);
             if (cur !== null) sbReview.textContent = fmtCount(cur + needsReviewDelta);
         }
+        const sbNoMatch = document.getElementById('sidebar-no-match-count');
+        if (sbNoMatch && noMatchDelta !== 0) {
+            const cur = parseCount(sbNoMatch.textContent);
+            if (cur !== null) sbNoMatch.textContent = fmtCount(cur + noMatchDelta);
+        }
 
         // Also update the "(of N)" total in the top results-count bar when viewing that shelf
         const qs = window.location.search || '';
-        const isReviewShelf = qs.includes('needs_review') || qs.includes('in_review');
+        const isNoMatchShelf = qs.includes('no_match') || qs.includes('no_isbn') || qs.includes('not_found');
+        const isReviewShelf = (qs.includes('needs_review') || qs.includes('in_review')) && !isNoMatchShelf;
         const isEnrichedShelf = qs.includes('shelf=enriched') || qs.includes('enrich_status=enriched');
         const isNeedsEnrichShelf = qs.includes('needs_enriching');
-        const activeShelfDelta = isReviewShelf ? needsReviewDelta : (isEnrichedShelf ? enrichedDelta : (isNeedsEnrichShelf ? needsEnrichingDelta : 0));
+        const activeShelfDelta = isNoMatchShelf ? noMatchDelta : (isReviewShelf ? needsReviewDelta : (isEnrichedShelf ? enrichedDelta : (isNeedsEnrichShelf ? needsEnrichingDelta : 0)));
         if (activeShelfDelta !== 0) {
             const resCountEl = document.querySelector('.results-count');
             if (resCountEl) {
@@ -4065,6 +4071,12 @@ const initCatalogSearch = () => {
                         const nxt = fmtCount(parseInt(m[1].replace(/,/g, ''), 10) + needsReviewDelta);
                         opt.textContent = opt.textContent.replace(/\([0-9,]+\)/, `(${nxt})`);
                     }
+                } else if (opt.value === 'no_match' && noMatchDelta !== 0) {
+                    const m = opt.textContent.match(/\(([0-9,]+)\)/);
+                    if (m) {
+                        const nxt = fmtCount(parseInt(m[1].replace(/,/g, ''), 10) + noMatchDelta);
+                        opt.textContent = opt.textContent.replace(/\([0-9,]+\)/, `(${nxt})`);
+                    }
                 }
             });
         }
@@ -4082,13 +4094,17 @@ const initCatalogSearch = () => {
             if (detBtn && detBtn.getAttribute('data-is-enriched') === 'true') return 'enriched';
             const qs = window.location.search || '';
             if (qs.includes('needs_enriching')) return 'needs_enriching';
+            if (qs.includes('no_match') || qs.includes('no_isbn') || qs.includes('not_found')) return 'no_match';
             if (qs.includes('needs_review') || qs.includes('in_review')) return 'needs_review';
-            if (detBtn && detBtn.getAttribute('data-enrich-status')) return 'needs_review';
+            const st = detBtn ? (detBtn.getAttribute('data-enrich-status') || '').toUpperCase() : '';
+            if (st === 'NEEDS_REVIEW') return 'needs_review';
+            if (st) return 'no_match';
             return 'needs_enriching';
         }
         if (key && _itemEnrichBucketMap[key]) return _itemEnrichBucketMap[key];
         const qs = window.location.search || '';
         if (qs.includes('needs_enriching')) return 'needs_enriching';
+        if (qs.includes('no_match') || qs.includes('no_isbn') || qs.includes('not_found')) return 'no_match';
         if (qs.includes('needs_review') || qs.includes('in_review')) return 'needs_review';
         return fallbackBucket || 'needs_enriching';
     }
@@ -4108,6 +4124,7 @@ const initCatalogSearch = () => {
             enrichedDelta: (newBucket === 'enriched' ? 1 : 0) - (oldBucket === 'enriched' ? 1 : 0),
             needsEnrichingDelta: (newBucket === 'needs_enriching' ? 1 : 0) - (oldBucket === 'needs_enriching' ? 1 : 0),
             needsReviewDelta: (newBucket === 'needs_review' ? 1 : 0) - (oldBucket === 'needs_review' ? 1 : 0),
+            noMatchDelta: (newBucket === 'no_match' ? 1 : 0) - (oldBucket === 'no_match' ? 1 : 0),
         });
     }
 
@@ -4783,10 +4800,10 @@ const initCatalogSearch = () => {
                     }
                 } else {
                     const targetId = itemId || data.item_id;
-                    transitionCardEnrichBucket(targetId, 'needs_review', wasInReview ? 'needs_review' : 'needs_enriching');
+                    const st = (data.status || 'FAILED').toUpperCase();
+                    transitionCardEnrichBucket(targetId, (st === 'NEEDS_REVIEW' ? 'needs_review' : 'no_match'), wasInReview ? 'needs_review' : 'needs_enriching');
                     btn.disabled = false;
                     btn._reviewData = data;
-                    const st = (data.status || 'FAILED').toUpperCase();
                     let label = `<i class="fa-solid fa-triangle-exclamation"></i> Failed`;
                     let bg = 'rgba(239,68,68,0.18)';
                     let border = 'rgba(239,68,68,0.5)';
@@ -4938,7 +4955,7 @@ const initCatalogSearch = () => {
                         url.searchParams.set('type', paramValue);
                     }
                 } else if (paramName === 'enrich_status') {
-                    if (['needs_enriching', 'needs_review', 'in_review', 'enriched'].includes(url.searchParams.get('shelf') || '')) {
+                    if (['needs_enriching', 'needs_review', 'in_review', 'no_match', 'no_isbn', 'not_found', 'enriched'].includes(url.searchParams.get('shelf') || '')) {
                         url.searchParams.delete('shelf');
                     }
                     if (paramValue) {

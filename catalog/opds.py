@@ -1124,6 +1124,10 @@ _ENRICHED_PATHS_CACHE: Dict[str, Any] = {
     'enriched_item_ids_set': set(),
     'needs_review_item_ids': None,
     'needs_review_item_ids_set': set(),
+    'strict_in_review_ids': None,
+    'strict_in_review_ids_set': set(),
+    'no_match_item_ids': None,
+    'no_match_item_ids_set': set(),
     'last_dup_merge_at': 0.0,
     '_refreshing': False,
 }
@@ -1174,6 +1178,7 @@ def _sync_incremental_enriched_changes() -> None:
     new_success_paths: List[str] = []
     new_review_paths: List[str] = []
     new_strict_review_paths: List[str] = []
+    new_no_match_paths: List[str] = []
     new_excluded_paths: List[str] = []
     new_ignored_paths: List[str] = []
     max_ts = last_ts
@@ -1285,6 +1290,10 @@ def _sync_incremental_enriched_changes() -> None:
                             new_strict_review_paths.append(p_str)
                             if alt_p:
                                 new_strict_review_paths.append(alt_p)
+                        elif st_val in ('NOT_FOUND', 'NO_ISBN', 'FAILED'):
+                            new_no_match_paths.append(p_str)
+                            if alt_p:
+                                new_no_match_paths.append(alt_p)
     except Exception:
         return
 
@@ -1294,6 +1303,8 @@ def _sync_incremental_enriched_changes() -> None:
     rev_list = _ENRICHED_PATHS_CACHE.get('needs_review_item_ids')
     strict_rev_set = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids_set')
     strict_rev_list = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids')
+    no_match_set = _ENRICHED_PATHS_CACHE.get('no_match_item_ids_set')
+    no_match_list = _ENRICHED_PATHS_CACHE.get('no_match_item_ids')
     excl_set = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set')
     excl_list = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids')
 
@@ -1325,6 +1336,13 @@ def _sync_incremental_enriched_changes() -> None:
                             strict_rev_list.remove(cid)
                         except ValueError:
                             pass
+                if isinstance(no_match_set, set) and cid in no_match_set:
+                    no_match_set.discard(cid)
+                    if isinstance(no_match_list, list):
+                        try:
+                            no_match_list.remove(cid)
+                        except ValueError:
+                            pass
         except Exception:
             pass
 
@@ -1348,6 +1366,13 @@ def _sync_incremental_enriched_changes() -> None:
                     if isinstance(strict_rev_list, list):
                         try:
                             strict_rev_list.remove(cid)
+                        except ValueError:
+                            pass
+                if isinstance(no_match_set, set) and cid in no_match_set:
+                    no_match_set.discard(cid)
+                    if isinstance(no_match_list, list):
+                        try:
+                            no_match_list.remove(cid)
                         except ValueError:
                             pass
         except Exception:
@@ -1377,7 +1402,28 @@ def _sync_incremental_enriched_changes() -> None:
             for cid in s_cids:
                 if cid not in enr_set and cid not in strict_rev_set:
                     strict_rev_set.add(cid)
-                    strict_rev_list.append(cid)
+                    strict_rev_list.insert(0, cid)
+                if isinstance(no_match_set, set) and cid in no_match_set:
+                    no_match_set.discard(cid)
+                    if isinstance(no_match_list, list):
+                        try:
+                            no_match_list.remove(cid)
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+    if new_no_match_paths and isinstance(no_match_set, set) and isinstance(no_match_list, list) and isinstance(enr_set, set):
+        try:
+            nm_cids = list(
+                FileLocation.objects.filter(file_path__in=new_no_match_paths)
+                .order_by()
+                .values_list('catalog_item_id', flat=True)
+            )
+            for cid in nm_cids:
+                if cid not in enr_set and (not isinstance(strict_rev_set, set) or cid not in strict_rev_set) and cid not in no_match_set:
+                    no_match_set.add(cid)
+                    no_match_list.insert(0, cid)
         except Exception:
             pass
 
@@ -1435,6 +1481,7 @@ def _flush_enriched_cache_to_disk() -> None:
             'enriched_item_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('enriched_item_ids') or ())],
             'needs_review_item_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('needs_review_item_ids') or ())],
             'strict_in_review_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or ())],
+            'no_match_item_ids': [str(x) for x in (_ENRICHED_PATHS_CACHE.get('no_match_item_ids') or ())],
             'non_success_item_ids': non_success_only,
         }
         raw = json.dumps(payload, ensure_ascii=False)
@@ -1504,6 +1551,11 @@ def _load_enriched_cache_from_disk() -> bool:
             enr_ids = [_uuid.UUID(str(x)) for x in (data.get('enriched_item_ids') or ())]
             rev_ids = [_uuid.UUID(str(x)) for x in (data.get('needs_review_item_ids') or ())]
             strict_rev_ids = [_uuid.UUID(str(x)) for x in (data.get('strict_in_review_ids') or ())]
+            strict_rev_set = set(strict_rev_ids)
+            if 'no_match_item_ids' in data:
+                no_match_ids = [_uuid.UUID(str(x)) for x in (data.get('no_match_item_ids') or ())]
+            else:
+                no_match_ids = [cid for cid in rev_ids if cid not in strict_rev_set]
             if 'non_success_item_ids' in data:
                 non_succ_ids = [_uuid.UUID(str(x)) for x in (data.get('non_success_item_ids') or ())]
                 excl_set = set(enr_ids) | set(non_succ_ids) | set(rev_ids)
@@ -1523,7 +1575,9 @@ def _load_enriched_cache_from_disk() -> bool:
             _ENRICHED_PATHS_CACHE['needs_review_item_ids'] = rev_ids
             _ENRICHED_PATHS_CACHE['needs_review_item_ids_set'] = set(rev_ids)
             _ENRICHED_PATHS_CACHE['strict_in_review_ids'] = strict_rev_ids
-            _ENRICHED_PATHS_CACHE['strict_in_review_ids_set'] = set(strict_rev_ids)
+            _ENRICHED_PATHS_CACHE['strict_in_review_ids_set'] = strict_rev_set
+            _ENRICHED_PATHS_CACHE['no_match_item_ids'] = no_match_ids
+            _ENRICHED_PATHS_CACHE['no_match_item_ids_set'] = set(no_match_ids)
             _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'] = excl_ids
             _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'] = excl_set
             _ENRICHED_PATHS_CACHE['expires_at'] = time.monotonic() + 3600.0
@@ -1756,25 +1810,31 @@ def _rebuild_enriched_index_cache() -> None:
         except Exception:
             pass
 
+    strict_rev_ids: List[Any] = []
     strict_rev_ids_set: set = set()
     for p in strict_review_paths:
         if p in paths_set:
             continue
         c_list = path_to_cids.get(p)
         if c_list:
-            strict_rev_ids_set.update(c_list)
-    strict_rev_ids_set -= enr_ids_set
-    strict_rev_ids = list(strict_rev_ids_set)
+            for cid in c_list:
+                if cid not in enr_ids_set and cid not in strict_rev_ids_set:
+                    strict_rev_ids_set.add(cid)
+                    strict_rev_ids.append(cid)
 
-    raw_rev_ids: set = set()
+    no_match_ids: List[Any] = []
+    no_match_ids_set: set = set()
     for p in review_paths:
         if p in paths_set:
             continue
         c_list = path_to_cids.get(p)
         if c_list:
-            raw_rev_ids.update(c_list)
-    raw_rev_ids -= enr_ids_set
-    rev_ids: List[Any] = list(strict_rev_ids) + [cid for cid in raw_rev_ids if cid not in strict_rev_ids_set]
+            for cid in c_list:
+                if cid not in enr_ids_set and cid not in strict_rev_ids_set and cid not in no_match_ids_set:
+                    no_match_ids_set.add(cid)
+                    no_match_ids.append(cid)
+
+    rev_ids: List[Any] = list(strict_rev_ids) + list(no_match_ids)
 
     non_success_ids_set: set = set()
     for p in non_success_paths:
@@ -1798,6 +1858,8 @@ def _rebuild_enriched_index_cache() -> None:
     _ENRICHED_PATHS_CACHE['needs_review_item_ids_set'] = set(rev_ids)
     _ENRICHED_PATHS_CACHE['strict_in_review_ids'] = strict_rev_ids
     _ENRICHED_PATHS_CACHE['strict_in_review_ids_set'] = strict_rev_ids_set
+    _ENRICHED_PATHS_CACHE['no_match_item_ids'] = no_match_ids
+    _ENRICHED_PATHS_CACHE['no_match_item_ids_set'] = no_match_ids_set
     _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'] = excl_ids
     _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'] = excl_ids_set
     _ENRICHED_PATHS_CACHE['expires_at'] = time.monotonic() + 3600.0
@@ -1823,6 +1885,7 @@ def get_enriched_item_ids_index() -> Dict[str, Any]:
       - `enriched_ids`: items with at least one file marked `status = 'SUCCESS'` in `scanner_state.db`
       - `needs_review_ids`: items with a file marked `status IN ('NEEDS_REVIEW', 'FAILED', 'NOT_FOUND', 'NO_ISBN')`
       - `strict_in_review_ids`: items with `status = 'NEEDS_REVIEW'` (ordered first in In Review)
+      - `no_match_ids`: items with `status IN ('NOT_FOUND', 'NO_ISBN', 'FAILED')` (No Match / No ISBN)
       - `excluded_from_needs_enriching_ids`: all items already in `processed_files` (`SUCCESS` + `NEEDS_REVIEW` + `IGNORED` + etc.)
       - `excluded_from_needs_enriching_ids_set`: set of UUIDs for O(1) Python filtering
     """
@@ -1832,11 +1895,18 @@ def get_enriched_item_ids_index() -> Dict[str, Any]:
         and _ENRICHED_PATHS_CACHE.get('needs_review_item_ids') is not None
         and _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids') is not None
     ):
+        no_match_cached = _ENRICHED_PATHS_CACHE.get('no_match_item_ids')
+        if no_match_cached is None:
+            strict_set = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids_set') or set(_ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or ())
+            no_match_cached = [cid for cid in (_ENRICHED_PATHS_CACHE.get('needs_review_item_ids') or ()) if cid not in strict_set]
+            _ENRICHED_PATHS_CACHE['no_match_item_ids'] = no_match_cached
+            _ENRICHED_PATHS_CACHE['no_match_item_ids_set'] = set(no_match_cached)
         return {
             'enriched_ids': _ENRICHED_PATHS_CACHE['enriched_item_ids'],
             'enriched_ids_set': _ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set(),
             'needs_review_ids': _ENRICHED_PATHS_CACHE['needs_review_item_ids'],
             'strict_in_review_ids': _ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or [],
+            'no_match_ids': no_match_cached,
             'excluded_from_needs_enriching_ids': _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids'],
             'excluded_from_needs_enriching_ids_set': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set') or set(),
         }
@@ -1846,6 +1916,7 @@ def get_enriched_item_ids_index() -> Dict[str, Any]:
         'enriched_ids_set': _ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set(),
         'needs_review_ids': _ENRICHED_PATHS_CACHE.get('needs_review_item_ids') or [],
         'strict_in_review_ids': _ENRICHED_PATHS_CACHE.get('strict_in_review_ids') or [],
+        'no_match_ids': _ENRICHED_PATHS_CACHE.get('no_match_item_ids') or [],
         'excluded_from_needs_enriching_ids': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids') or [],
         'excluded_from_needs_enriching_ids_set': _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set') or set(),
     }
@@ -1990,14 +2061,32 @@ def _record_in_memory_diag(file_loc: FileLocation, phys_path: Optional[Path], st
                     rev_set.add(item_id)
                     rev_lst = _ENRICHED_PATHS_CACHE.get('needs_review_item_ids')
                     if isinstance(rev_lst, list):
-                        rev_lst.append(item_id)
+                        rev_lst.insert(0, item_id)
                 if status == 'NEEDS_REVIEW':
                     s_rev_set = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids_set')
                     if isinstance(s_rev_set, set) and item_id not in s_rev_set:
                         s_rev_set.add(item_id)
                         s_rev_lst = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids')
                         if isinstance(s_rev_lst, list):
-                            s_rev_lst.append(item_id)
+                            s_rev_lst.insert(0, item_id)
+                    nm_set = _ENRICHED_PATHS_CACHE.get('no_match_item_ids_set')
+                    if isinstance(nm_set, set) and item_id in nm_set:
+                        nm_set.discard(item_id)
+                        nm_lst = _ENRICHED_PATHS_CACHE.get('no_match_item_ids')
+                        if isinstance(nm_lst, list):
+                            try:
+                                nm_lst.remove(item_id)
+                            except ValueError:
+                                pass
+                elif status in ('NOT_FOUND', 'NO_ISBN', 'FAILED'):
+                    s_rev_set = _ENRICHED_PATHS_CACHE.get('strict_in_review_ids_set')
+                    if not (isinstance(s_rev_set, set) and item_id in s_rev_set):
+                        nm_set = _ENRICHED_PATHS_CACHE.get('no_match_item_ids_set')
+                        if isinstance(nm_set, set) and item_id not in nm_set:
+                            nm_set.add(item_id)
+                            nm_lst = _ENRICHED_PATHS_CACHE.get('no_match_item_ids')
+                            if isinstance(nm_lst, list):
+                                nm_lst.insert(0, item_id)
                 excl_set = _ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set')
                 if isinstance(excl_set, set) and item_id not in excl_set:
                     excl_set.add(item_id)
@@ -2670,6 +2759,7 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                     ('enriched_item_ids_set', 'enriched_item_ids'),
                     ('needs_review_item_ids_set', 'needs_review_item_ids'),
                     ('strict_in_review_ids_set', 'strict_in_review_ids'),
+                    ('no_match_item_ids_set', 'no_match_item_ids'),
                     ('excluded_from_needs_enriching_ids_set', 'excluded_from_needs_enriching_ids'),
                 ):
                     s = _ENRICHED_PATHS_CACHE.get(set_key)
@@ -3449,6 +3539,7 @@ def move_file_location_to_tomags(file_loc: FileLocation) -> Dict[str, Any]:
                     ('enriched_item_ids_set', 'enriched_item_ids'),
                     ('needs_review_item_ids_set', 'needs_review_item_ids'),
                     ('strict_in_review_ids_set', 'strict_in_review_ids'),
+                    ('no_match_item_ids_set', 'no_match_item_ids'),
                     ('excluded_from_needs_enriching_ids_set', 'excluded_from_needs_enriching_ids'),
                 ):
                     s = _ENRICHED_PATHS_CACHE.get(set_key)
@@ -4655,6 +4746,14 @@ def enrich_file_location_on_demand(
                         _ENRICHED_PATHS_CACHE['strict_in_review_ids'].remove(item.id)
                     except ValueError:
                         pass
+        if isinstance(_ENRICHED_PATHS_CACHE.get('no_match_item_ids_set'), set):
+            if item.id in _ENRICHED_PATHS_CACHE['no_match_item_ids_set']:
+                _ENRICHED_PATHS_CACHE['no_match_item_ids_set'].discard(item.id)
+                if isinstance(_ENRICHED_PATHS_CACHE.get('no_match_item_ids'), list):
+                    try:
+                        _ENRICHED_PATHS_CACHE['no_match_item_ids'].remove(item.id)
+                    except ValueError:
+                        pass
         if isinstance(_ENRICHED_PATHS_CACHE.get('excluded_from_needs_enriching_ids_set'), set):
             if item.id not in _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set']:
                 _ENRICHED_PATHS_CACHE['excluded_from_needs_enriching_ids_set'].add(item.id)
@@ -5172,6 +5271,7 @@ def revert_catalog_item_enrichment(
                 ('enriched_item_ids_set', 'enriched_item_ids'),
                 ('needs_review_item_ids_set', 'needs_review_item_ids'),
                 ('strict_in_review_ids_set', 'strict_in_review_ids'),
+                ('no_match_item_ids_set', 'no_match_item_ids'),
                 ('excluded_from_needs_enriching_ids_set', 'excluded_from_needs_enriching_ids'),
             ):
                 id_set = _ENRICHED_PATHS_CACHE.get(set_key)

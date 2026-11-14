@@ -249,9 +249,13 @@
                         <span><i class="fa-solid fa-hourglass-half" style="color:#c084fc;"></i> Needs Enriching</span>
                         <small id="sidebar-needs-enriching-count" style="color:#c084fc; font-weight:700;">{{ enrich_status_counts.needs_enriching|default:0|intcomma }}</small>
                     </a>
-                    <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books flagged In Review ({{ strict_in_review_count|default:0|intcomma }} Review + {{ no_isbn_review_count|default:0|intcomma }} No ISBN)">
+                    <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};" title="Books with low-confidence candidate matches needing review/approval">
                         <span><i class="fa-solid fa-clipboard-question" style="color:#fbbf24;"></i> In Review</span>
                         <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{ enrich_status_counts.needs_review|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=no_match" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}#f97316{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}rgba(249,115,22,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}rgba(249,115,22,0.38){% else %}transparent{% endif %};" title="Books where enrichment found no catalog match (NOT_FOUND / NO_ISBN), ordered by most recently checked first">
+                        <span><i class="fa-solid fa-magnifying-glass-minus" style="color:#f97316;"></i> No Match</span>
+                        <small id="sidebar-no-match-count" style="color:#f97316; font-weight:700;">{{ enrich_status_counts.no_match|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=removed_protection" style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}#10b981{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.38){% else %}transparent{% endif %};" title="Books with 'nodrm' in the filename, sorted newest first">
                         <span><i class="fa-solid fa-lock-open" style="color:#10b981;"></i> Removed Protection</span>
@@ -429,8 +433,18 @@
                     &mdash; <span style="color:#c084fc; font-weight:600;"><i class="fa-solid fa-hourglass-half"></i> Needs Enriching</span>
                 {% elif selected_enrich_status == 'enriched' %}
                     &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i> Enriched</span>
-                {% elif selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}
-                    &mdash; <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-clipboard-question"></i> In Review</span>
+                {% elif selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}
+                    &mdash;
+                    {% if selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}
+                        <span style="color:#f97316; font-weight:600;"><i class="fa-solid fa-magnifying-glass-minus"></i> No Match (Most Recently Checked First):</span>
+                    {% else %}
+                        <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-clipboard-question"></i> In Review:</span>
+                    {% endif %}
+                    <span style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem;">
+                        <a href="{% url 'catalog:dashboard' %}?shelf=needs_review" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_review_type != 'all' and selected_shelf == 'needs_review' or selected_review_type != 'all' and selected_shelf == 'in_review' or selected_review_type != 'all' and selected_enrich_status == 'needs_review' %}background:rgba(251,191,36,0.28); border:1px solid rgba(251,191,36,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fcd34d;{% endif %}"><i class="fa-solid fa-clipboard-question"></i> In Review ({{ strict_in_review_count|default:0|intcomma }})</a>
+                        <a href="{% url 'catalog:dashboard' %}?shelf=no_match" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}background:rgba(249,115,22,0.28); border:1px solid rgba(249,115,22,0.7); color:#ffedd5;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fdba74;{% endif %}"><i class="fa-solid fa-magnifying-glass-minus"></i> No Match ({{ no_match_count|default:0|intcomma }})</a>
+                        <a href="{% url 'catalog:dashboard' %}?shelf=needs_review&amp;review_type=all" style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_review_type == 'all' %}background:rgba(56,189,248,0.28); border:1px solid rgba(56,189,248,0.7); color:#e0f2fe;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">All ({{ all_review_and_no_match_count|default:0|intcomma }})</a>
+                    </span>
                 {% endif %}
                 {% if selected_tag %}
                     &mdash; <span style="color:#a78bfa; font-weight:600;"><i class="fa-solid fa-tag"></i> Tag: {{ selected_tag }}</span>
@@ -459,11 +473,12 @@
                 <div class="control-group" title="Filter books by Enrichment status (Needs Enriching vs Enriched)">
                     <i class="fa-solid fa-wand-magic-sparkles control-icon" style="color:#c084fc;"></i>
                     <select id="top-enrich-status-select" class="control-select" aria-label="Filter by Enrichment Status">
-                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' and selected_shelf != 'missing_cover' %}selected{% endif %}>Enrich: All</option>
+                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' and selected_shelf != 'no_match' and selected_shelf != 'no_isbn' and selected_shelf != 'not_found' and selected_shelf != 'missing_cover' %}selected{% endif %}>Enrich: All</option>
                         <option value="needs_enriching" {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}selected{% endif %}>⏳ Needs Enriching ({{ enrich_status_counts.needs_enriching|default:0|intcomma }})</option>
                         <option value="enriched" {% if selected_enrich_status == 'enriched' or selected_shelf == 'enriched' %}selected{% endif %}>✨ Enriched ({{ enrich_status_counts.enriched|default:0|intcomma }})</option>
                         <option value="missing_cover" {% if selected_enrich_status == 'missing_cover' or selected_shelf == 'missing_cover' %}selected{% endif %}>🖼️ Missing / Text Cover ({{ missing_cover_count|default:0|intcomma }})</option>
                         <option value="needs_review" {% if selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}selected{% endif %}>📋 In Review ({{ enrich_status_counts.needs_review|default:0|intcomma }})</option>
+                        <option value="no_match" {% if selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}selected{% endif %}>🔍 No Match ({{ enrich_status_counts.no_match|default:0|intcomma }})</option>
                     </select>
                 </div>
 
@@ -530,7 +545,7 @@
         {% if items %}
             <div class="catalog-grid">
                 {% for item in items %}
-                    <article class="media-card" id="card-{{ item.id }}" data-enrich-bucket="{% if item.has_tomags_file %}tomags{% elif item.is_enriched %}enriched{% elif selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}needs_enriching{% elif item.enrich_diag %}needs_review{% else %}needs_enriching{% endif %}">
+                    <article class="media-card" id="card-{{ item.id }}" data-enrich-bucket="{% if item.has_tomags_file %}tomags{% elif item.is_enriched %}enriched{% elif selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}needs_enriching{% elif item.enrich_diag.status == 'NEEDS_REVIEW' %}needs_review{% elif item.enrich_diag %}no_match{% else %}needs_enriching{% endif %}">
                         <!-- Cover Image / Fallback -->
                         <div class="card-header-image">
                             {% if item.cover_thumbnail %}
