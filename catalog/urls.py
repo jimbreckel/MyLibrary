@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, re_path
 from . import views
 from . import api
 from . import opds
@@ -32,6 +32,7 @@ urlpatterns = [
     path('api/cover-search/', views.CoverSearchAPIView.as_view(), name='api_cover_search'),
     path('api/cover-apply/', views.CoverApplyAPIView.as_view(), name='api_cover_apply'),
     path('api/cover-generate/', views.CoverGenerateAPIView.as_view(), name='api_cover_generate'),
+    path('api/cover-telemetry/', views.CoverTelemetryAPIView.as_view(), name='api_cover_telemetry'),
     path('api/ai-description/', views.AiDescriptionGenerateAPIView.as_view(), name='api_ai_description'),
     path('api/ai-title-author/', views.AiTitleAuthorGenerateAPIView.as_view(), name='api_ai_title_author'),
     path('api/interesting/', views.ToggleInterestingAPIView.as_view(), name='api_toggle_interesting'),
@@ -78,4 +79,7 @@ urlpatterns = [
     path('opds/ajax/books', opds.CalibreAjaxBooksView.as_view(), name='calibre_ajax_books'),
     path('opds/ajax/search', opds.CalibreAjaxBooksView.as_view(), name='calibre_ajax_search'),
     path('opds/ajax/book/<str:item_id>', opds.CalibreAjaxBooksView.as_view(), name='calibre_ajax_book_detail'),
+
+    # Redirect URLs where query parameters were typed after /mylibrary/ without a leading '?' (e.g. /mylibrary/enrich_status=needs_enriching)
+    re_path(r'^(?P<malformed_query>[a-zA-Z_][a-zA-Z0-9_]*=.*)$', views.MalformedQueryRedirectView.as_view(), name='malformed_query_redirect'),
 ]

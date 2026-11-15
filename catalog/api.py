@@ -605,15 +605,26 @@ class FileCleanupAPIView(APIView):
         if deleted_paths is not None:
             if not isinstance(deleted_paths, list):
                 return Response({"error": "deleted_paths must be a list of file paths."}, status=status.HTTP_400_BAD_REQUEST)
-            if not deleted_paths:
+
+            # Safety guard: never prune a FileLocation whose physical file still exists on disk
+            verified_deleted_paths = []
+            for p in deleted_paths:
+                if not p or not isinstance(p, str):
+                    continue
+                root_seg = '/' + p.lstrip('/').split('/', 1)[0] if p.startswith('/') else ''
+                if root_seg and os.path.isdir(root_seg) and os.path.exists(p):
+                    continue
+                verified_deleted_paths.append(p)
+
+            if not verified_deleted_paths:
                 return Response({
                     "status": "success",
                     "deleted_locations": 0,
                     "deleted_catalog_items": 0
                 }, status=status.HTTP_200_OK)
 
-            # Query locations matching any of the deleted paths
-            matching_locs = FileLocation.objects.filter(file_path__in=deleted_paths)
+            # Query locations matching any of the verified deleted paths
+            matching_locs = FileLocation.objects.filter(file_path__in=verified_deleted_paths)
             catalog_item_ids = set(matching_locs.values_list('catalog_item_id', flat=True))
             deleted_count, _ = matching_locs.delete()
 

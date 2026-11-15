@@ -1066,6 +1066,69 @@ class BookProcessor:
                 except Exception as cover_err:
                     logger.debug("Failed to download cover image: %s", cover_err)
 
+            # If the provider's cover is missing, a text-only page, or B&W/low-color (e.g. Open Library /b/id/ scan),
+            # check Open Library ISBN cover and Apple Books (matching ISBN or Title + Author) for a color cover.
+            cur_cov_bytes = best_target_meta.cover_bytes
+            cur_cov_weak = (
+                not cur_cov_bytes
+                or _is_text_only_cover_bytes(cur_cov_bytes)
+                or _is_mostly_white_page_cover_bytes(cur_cov_bytes)
+                or _cover_colorfulness_score_bytes(cur_cov_bytes) < 0.055
+            )
+            if cur_cov_weak:
+                try:
+                    import re as _re
+                    import urllib.parse as _up
+                    import requests
+                    from .matcher import score_title as _score_t, score_authors as _score_a
+
+                    cand_isbn = best_target_meta.isbn13 or best_target_meta.isbn10 or best_isbn or ""
+                    alt_urls: List[str] = []
+                    if cand_isbn:
+                        ol_isbn_url = f"https://covers.openlibrary.org/b/isbn/{cand_isbn}-L.jpg?default=false"
+                        if ol_isbn_url != best_target_meta.cover_url:
+                            alt_urls.append(ol_isbn_url)
+
+                    q_title = (best_target_meta.title or "").strip()
+                    q_authors = [a.strip() for a in (best_target_meta.authors or []) if a and a.strip()]
+                    q_term = f"{q_title} {q_authors[0] if q_authors else ''}".strip()
+                    if q_term:
+                        r_ab = requests.get(
+                            f"https://itunes.apple.com/search?media=ebook&entity=ebook&limit=5&term={_up.quote(q_term)}",
+                            timeout=5,
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        )
+                        if r_ab.status_code == 200:
+                            for ab_it in (r_ab.json().get("results") or []):
+                                ab_art = ab_it.get("artworkUrl100")
+                                if not ab_art:
+                                    continue
+                                ab_t = str(ab_it.get("trackName") or "").strip()
+                                ab_a = str(ab_it.get("artistName") or "").strip()
+                                t_sc = _score_t(ab_t, q_title) if q_title else 0.0
+                                a_sc = _score_a([ab_a] if ab_a else [], q_authors) if q_authors else 1.0
+                                if t_sc >= 0.70 and (not q_authors or a_sc >= 0.55):
+                                    alt_urls.append(_re.sub(r"/\d+x\d+bb\.", "/600x600bb.", str(ab_art)))
+                                    break
+
+                    cur_col = _cover_colorfulness_score_bytes(cur_cov_bytes) if cur_cov_bytes else 0.0
+                    for alt_u in alt_urls:
+                        try:
+                            r_alt = requests.get(alt_u, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+                            if r_alt.status_code == 200 and len(r_alt.content) > 1500:
+                                alt_b = r_alt.content
+                                if not _is_text_only_cover_bytes(alt_b) and not _is_mostly_white_page_cover_bytes(alt_b):
+                                    alt_col = _cover_colorfulness_score_bytes(alt_b)
+                                    if not cur_cov_bytes or _is_text_only_cover_bytes(cur_cov_bytes) or alt_col >= max(0.055, cur_col + 0.04):
+                                        best_target_meta.cover_url = alt_u
+                                        best_target_meta.cover_bytes = alt_b
+                                        logger.info("Upgraded cover image to color version from %s (colorfulness=%.3f)", alt_u, alt_col)
+                                        break
+                        except Exception:
+                            continue
+                except Exception as alt_err:
+                    logger.debug("Fallback color cover check skipped: %s", alt_err)
+
             return reader, embedded_meta, best_target_meta, best_isbn, best_match_result, None
 
         except Exception as exc:

@@ -9,19 +9,19 @@ from .validator import normalize_isbn, validate_isbn10, validate_isbn13, clean_i
 # Regex patterns
 # 1. Labeled ISBNs: "ISBN-13: 978-0-13-235088-4", "ISBN: 0-201-63361-2", "eISBN: 9780132350884"
 LABELED_ISBN_RE = re.compile(
-    r"(?P<label>(?:e-?|print\s+)?isbn(?:-?(?:10|13))?)\s*[:#\s]\s*"
-    r"(?P<candidate>(?:97[89][\s\-]*)?(?:\d[\s\-]*){9}[\dX])\b",
+    r"(?P<label>(?:e-?|print\s+)?isbn(?:-?(?:10|13))?)\s*[:#\s_]\s*"
+    r"(?P<candidate>(?:97[89][\s\-]*)?(?:\d[\s\-]*){9}[\dX])(?![0-9A-Za-z])",
     re.IGNORECASE,
 )
 
-# 2. Raw unlabelled ISBN-13 (starts with 978 or 979, with hyphens or spaces or raw digits)
+# 2. Raw unlabelled ISBN-13 (starts with 978 or 979, with hyphens or spaces or raw digits, including underscore-delimited filenames like 978-1-4302-5398-3_Book)
 RAW_ISBN13_RE = re.compile(
-    r"\b(?P<candidate>97[89][\s\-]*(?:\d[\s\-]*){9}\d)\b"
+    r"(?<![0-9A-Za-z])(?P<candidate>97[89][\s\-]*(?:\d[\s\-]*){9}\d)(?![0-9A-Za-z])"
 )
 
 # 3. Raw unlabelled ISBN-10 (10 digits/X with hyphens e.g. 0-201-63361-2)
 RAW_ISBN10_RE = re.compile(
-    r"\b(?P<candidate>\d[\s\-]+(?:\d[\s\-]*){8}[\dX])\b",
+    r"(?<![0-9A-Za-z])(?P<candidate>\d[\s\-]+(?:\d[\s\-]*){8}[\dX])(?![0-9A-Za-z])",
     re.IGNORECASE,
 )
 

@@ -1357,7 +1357,12 @@ const initCatalogSearch = () => {
                     isbn: active.isbn || '',
                     title: active.title || '',
                     authors: active.authors || '',
-                    cover_url: imgs[imgIdx].data_uri
+                    cover_url: imgs[imgIdx].data_uri,
+                    selected_candidate: {
+                        source: 'Peek Inside Page',
+                        title: imgs[imgIdx].label || `Page ${imgIdx + 1}`,
+                        candidate_index: imgIdx,
+                    },
                 })
             })
                 .then(r => r.json())
@@ -2638,18 +2643,20 @@ const initCatalogSearch = () => {
                 clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
                 const covers = data.covers || [];
+                window._lastCoverSearchCandidates = covers;
                 if (covers.length === 0) {
                     if (statusEl) statusEl.textContent = 'No covers found for that query. Try editing the title or author above and click Search Web.';
                     return;
                 }
                 if (statusEl) statusEl.textContent = `Found ${covers.length} cover(s) across Web Images & Book Catalogs — click any cover below to apply it immediately:`;
                 resultsEl.innerHTML = '';
-                covers.forEach(c => {
+                covers.forEach((c, idx) => {
                     const isOrig = c.source === 'Original Cover';
                     const isGen = Boolean(c.is_generated || (c.source && c.source.startsWith('🎨')));
                     const isColorMatch = Boolean(c.same_cover_in_color);
                     const card = document.createElement('div');
                     card.className = 'cover-cand-card';
+                    card._candData = Object.assign({}, c, { candidate_index: idx });
                     if (isColorMatch) {
                         card.style.borderColor = '#f59e0b';
                         card.style.boxShadow = '0 0 0 2px rgba(245, 158, 11, 0.55)';
@@ -2734,6 +2741,8 @@ const initCatalogSearch = () => {
                 query: searchQuery,
                 cover_url: coverUrl,
                 fallback_url: fallbackUrl || '',
+                selected_candidate: (cardEl && cardEl._candData) || null,
+                all_candidates: window._lastCoverSearchCandidates || [],
             })
         })
             .then(async r => {
@@ -4187,17 +4196,19 @@ const initCatalogSearch = () => {
                 clearTimeout(timeoutId);
                 if (searchBtn) searchBtn.disabled = false;
                 const covers = resData.covers || [];
+                window._lastErCoverSearchCandidates = covers;
                 if (covers.length === 0) {
                     if (statusEl) statusEl.textContent = 'No covers found for that query. Try editing the search box above and click Search Covers.';
                     return;
                 }
                 if (statusEl) statusEl.textContent = `Found ${covers.length} cover(s) — click any cover below to select & apply it:`;
                 resultsEl.innerHTML = '';
-                covers.forEach(c => {
+                covers.forEach((c, idx) => {
                     const isOrig = c.source === 'Original Cover';
                     const isGen = Boolean(c.is_generated || (c.source && c.source.startsWith('🎨')));
                     const card = document.createElement('div');
                     card.className = 'cover-cand-card';
+                    card._candData = Object.assign({}, c, { candidate_index: idx });
                     if (isOrig) {
                         card.style.borderColor = '#4ade80';
                         card.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.45)';
@@ -4303,6 +4314,8 @@ const initCatalogSearch = () => {
                     query: erInput ? erInput.value.trim() : '',
                     cover_url: coverUrl,
                     fallback_url: fallbackUrl || '',
+                    selected_candidate: (cardEl && cardEl._candData) || { source: sourceName || 'Web Cover', cover_url: coverUrl },
+                    all_candidates: window._lastErCoverSearchCandidates || [],
                 })
             })
                 .then(r => r.json())
@@ -5487,9 +5500,13 @@ const initCatalogSearch = () => {
             if (detBtn) {
                 payload.title = detBtn.getAttribute('data-title') || '';
                 payload.authors = detBtn.getAttribute('data-authors') || '';
+                payload.isbn = detBtn.getAttribute('data-isbn') || '';
                 try {
                     const fArr = JSON.parse(detBtn.getAttribute('data-files') || '[]');
-                    if (fArr.length > 0 && fArr[0].id) payload.fallback_file_id = fArr[0].id;
+                    if (fArr.length > 0) {
+                        if (fArr[0].id) payload.fallback_file_id = fArr[0].id;
+                        if (fArr[0].file_path) payload.file_path = fArr[0].file_path;
+                    }
                 } catch (e) { }
             }
         }

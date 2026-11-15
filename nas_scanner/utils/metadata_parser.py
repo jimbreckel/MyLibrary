@@ -484,8 +484,8 @@ def generate_thumbnail(image_bytes, max_size=(360, 540)):
             img.save(out_buf, format='JPEG', quality=80)
             base64_str = base64.b64encode(out_buf.getvalue()).decode('utf-8')
             return f"data:image/jpeg;base64,{base64_str}"
-    except Exception as e:
-        print(f"Error generating thumbnail: {e}")
+    except Exception:
+        pass
     return None
 
 

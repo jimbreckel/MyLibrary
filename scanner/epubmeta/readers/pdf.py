@@ -312,7 +312,10 @@ class PdfReader(BaseReader):
                 isbn13, _ = normalize_isbn(isbns[0][0])
 
             # Check XMP metadata if available
-            xmp = doc.get_xml_metadata() or ""
+            try:
+                xmp = doc.get_xml_metadata() or ""
+            except Exception:
+                xmp = ""
             if xmp and not isbn13:
                 xmp_isbns = extract_isbns_from_text(xmp)
                 if xmp_isbns:

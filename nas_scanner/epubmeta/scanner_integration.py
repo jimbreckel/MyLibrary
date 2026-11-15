@@ -199,6 +199,12 @@ class EnrichmentSession:
         if force:
             return True
 
+        excl_dirs = self.get_excluded_dirs()
+        if excl_dirs:
+            path_parts = [seg.lower() for seg in Path(abspath).parent.parts if seg]
+            if any(seg in excl_dirs for seg in path_parts):
+                return False
+
         if self.mylibrary_client:
             skip_ml, _ = self.mylibrary_client.should_skip_file(
                 Path(abspath),

@@ -6,7 +6,7 @@ import logging
 import json
 import smtplib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.header import Header
@@ -210,20 +210,69 @@ def main():
     lock_file = os.path.join(logs_dir, 'nas_scanner_loop.lock')
     try:
         with ScannerLock(lock_file):
-            # Check for config path inside container
+            # Check for bind-mounted config path inside container and always keep local config.json synced
             config_in_container = "/config/config.json"
-            if os.path.exists(config_in_container) and not os.path.exists("config.json"):
+            if os.path.exists(config_in_container):
                 try:
-                    os.symlink(config_in_container, "config.json")
-                    logger.info(f"Linked config file from {config_in_container}")
+                    if os.path.exists("config.json") or os.path.islink("config.json"):
+                        if not (os.path.islink("config.json") and os.path.realpath("config.json") == os.path.realpath(config_in_container)):
+                            os.remove("config.json")
+                    if not os.path.exists("config.json"):
+                        os.symlink(config_in_container, "config.json")
+                        logger.info(f"Linked config file from {config_in_container}")
                 except Exception as e:
                     import shutil
                     shutil.copy(config_in_container, "config.json")
                     logger.info(f"Copied config file from {config_in_container}: {e}")
 
-            logger.info(f"Starting MyLibrary Scanner Loop (Interval: {interval_hours} hours)...")
+            logger.info(f"Starting MyLibrary Scanner Loop (Interval: {interval_hours} hours start-to-start)...")
             
             trigger_file = os.path.join("logs", "trigger_scan.flag")
+            schedule_file = os.path.join("logs", "scan_schedule.json")
+
+            def _write_schedule(state_str, start_dt, next_dt, finished_dt=None):
+                try:
+                    payload = {
+                        "state": state_str,
+                        "cycle_started_at": start_dt.isoformat(),
+                        "next_scan_at": next_dt.isoformat(),
+                        "interval_hours": interval_hours,
+                    }
+                    if finished_dt is not None:
+                        payload["last_finished_at"] = finished_dt.isoformat()
+                    with open(schedule_file, "w", encoding="utf-8") as sf:
+                        json.dump(payload, sf)
+                except Exception:
+                    pass
+
+            # Honor existing start-to-start schedule across loop restarts when idle
+            if os.path.exists(schedule_file) and not os.path.exists(trigger_file):
+                try:
+                    with open(schedule_file, "r", encoding="utf-8") as sf:
+                        existing_sched = json.load(sf) or {}
+                    if existing_sched.get("state") == "sleeping" and existing_sched.get("next_scan_at"):
+                        sched_next_dt = datetime.fromisoformat(existing_sched["next_scan_at"]).astimezone(_EST_TZ)
+                        now_est_dt = datetime.now(tz=_EST_TZ)
+                        rem_wait = (sched_next_dt - now_est_dt).total_seconds()
+                        if 0 < rem_wait <= interval_seconds:
+                            logger.info(
+                                f"All scans finished — Resuming start-to-start schedule: "
+                                f"Next scan in {rem_wait / 3600.0:.2f} hours at {sched_next_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                                f"({interval_hours:g}h from scan start). Sleeping..."
+                            )
+                            resume_target_mono = time.monotonic() + rem_wait
+                            while time.monotonic() < resume_target_mono:
+                                if os.path.exists(trigger_file):
+                                    try:
+                                        os.remove(trigger_file)
+                                    except Exception:
+                                        pass
+                                    logger.info("Manual scan trigger detected! Starting new scan cycle immediately...")
+                                    break
+                                time.sleep(2.0)
+                except Exception:
+                    pass
+
             while True:
                 if os.path.exists(trigger_file):
                     try:
@@ -231,22 +280,12 @@ def main():
                     except Exception:
                         pass
 
-                summary_reports = {}
-
-                # Run unified book/magazine scanner + epubmeta enricher (single os.walk pass)
-                if os.path.exists("sync_files.py"):
-                    summary_reports["sync_files.py (Unified Sync & Enrichment)"] = run_script("sync_files.py")
-
-                
-                # Run audiobook scanner
-                if os.path.exists("sync_audiobooks.py"):
-                    summary_reports["sync_audiobooks.py"] = run_script("sync_audiobooks.py")
-                
-                # Run calibre scanner if libraries are configured
+                # Refresh interval_hours from config before starting cycle
+                cfg_to_read = "/config/config.json" if os.path.exists("/config/config.json") else "config.json"
                 has_calibre_config = False
-                if os.path.exists("config.json"):
+                if os.path.exists(cfg_to_read):
                     try:
-                        with open("config.json", 'r') as f:
+                        with open(cfg_to_read, 'r') as f:
                             c_data = json.load(f)
                             if c_data.get("calibre_libraries"):
                                 has_calibre_config = True
@@ -256,16 +295,46 @@ def main():
                     except Exception:
                         pass
 
+                cycle_start_mono = time.monotonic()
+                cycle_start_dt = datetime.now(tz=_EST_TZ)
+                next_scan_dt = cycle_start_dt + timedelta(seconds=interval_seconds)
+                _write_schedule("scanning", cycle_start_dt, next_scan_dt)
+
+                summary_reports = {}
+
+                # Run unified book/magazine scanner + epubmeta enricher (single os.walk pass)
+                if os.path.exists("sync_files.py"):
+                    summary_reports["sync_files.py (Unified Sync & Enrichment)"] = run_script("sync_files.py")
+
+                # Run audiobook scanner
+                if os.path.exists("sync_audiobooks.py"):
+                    summary_reports["sync_audiobooks.py"] = run_script("sync_audiobooks.py")
+
                 if has_calibre_config and os.path.exists("sync_calibre.py"):
                     summary_reports["sync_calibre.py"] = run_script("sync_calibre.py")
 
-                    
                 # Send email report
                 send_status_email(summary_reports)
-                    
-                logger.info(f"\nAll scans finished. Next scan in {interval_hours} hours. Sleeping...")
-                slept = 0.0
-                while slept < interval_seconds:
+
+                finish_dt = datetime.now(tz=_EST_TZ)
+                elapsed_seconds = time.monotonic() - cycle_start_mono
+                remaining_seconds = interval_seconds - elapsed_seconds
+
+                if remaining_seconds <= 0:
+                    logger.info(
+                        f"\nAll scans finished (took {elapsed_seconds / 3600.0:.2f}h >= {interval_hours:g}h start-to-start interval). "
+                        f"Scheduled scan was deferred due to overlap; starting deferred scan cycle immediately..."
+                    )
+                    continue
+
+                _write_schedule("sleeping", cycle_start_dt, next_scan_dt, finished_dt=finish_dt)
+                logger.info(
+                    f"\nAll scans finished (took {elapsed_seconds / 60.0:.1f}m). "
+                    f"Next scan in {remaining_seconds / 3600.0:.2f} hours at {next_scan_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                    f"({interval_hours:g}h from scan start). Sleeping..."
+                )
+                target_mono = cycle_start_mono + interval_seconds
+                while time.monotonic() < target_mono:
                     if os.path.exists(trigger_file):
                         try:
                             os.remove(trigger_file)
@@ -274,7 +343,6 @@ def main():
                         logger.info("Manual scan trigger detected! Starting new scan cycle immediately...")
                         break
                     time.sleep(2.0)
-                    slept += 2.0
     except LockError as e:
         logger.error(f"Error starting scanner loop: {e}")
         sys.exit(1)

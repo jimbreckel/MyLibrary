@@ -2355,7 +2355,7 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
     if scanner_lines:
         last_line = scanner_lines[-1]
         for line in reversed(scanner_lines[-5:]):
-            m_int = re.search(r'Next scan in\s+([\d.]+)\s+hours', line, re.IGNORECASE)
+            m_int = re.search(r'\((?:Interval:\s*|every\s*)([\d.]+)\s*h', line, re.IGNORECASE)
             if m_int:
                 try:
                     scan_interval_hours = float(m_int.group(1))
@@ -2369,7 +2369,12 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             current_activity = last_line
         elif lock_exists or (seconds_since_log is not None and seconds_since_log < 600):
             is_scanning = True
-            current_activity = last_line
+            meaningful_line = last_line
+            for cand_line in reversed(scanner_lines):
+                if cand_line.strip() and 'Error generating thumbnail:' not in cand_line:
+                    meaningful_line = cand_line
+                    break
+            current_activity = meaningful_line
 
         for line in reversed(scanner_lines):
             if 'Scanning library:' in line:
@@ -2379,17 +2384,71 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
                 current_library = line.split('Scanning:', 1)[1].strip()
                 break
 
-    # Compute Next Scan timestamp & countdown
+    # Resolve start timestamp of the latest scan cycle (start-to-start 4h scheduling)
+    cycle_start_dt = None
+    next_scan_dt = None
+    schedule_file = scanner_dir / 'logs' / 'scan_schedule.json'
+    if schedule_file.exists():
+        try:
+            sched_data = json.loads(schedule_file.read_text(encoding='utf-8')) or {}
+            if sched_data.get('interval_hours'):
+                scan_interval_hours = float(sched_data['interval_hours'])
+            if sched_data.get('cycle_started_at'):
+                cycle_start_dt = datetime.fromisoformat(sched_data['cycle_started_at']).astimezone(_EST_TZ)
+            if sched_data.get('next_scan_at'):
+                next_scan_dt = datetime.fromisoformat(sched_data['next_scan_at']).astimezone(_EST_TZ)
+        except Exception:
+            pass
+
+    # Also verify against the latest "Starting sync_files.py at YYYY-MM-DD HH:MM:SS" in scanner.log
+    if scanner_log_path.exists():
+        try:
+            with open(scanner_log_path, 'rb') as lf:
+                lf.seek(0, os.SEEK_END)
+                fsize = lf.tell()
+                read_bytes = min(fsize, 512 * 1024)
+                lf.seek(max(0, fsize - read_bytes))
+                tail_chunk = lf.read().decode('utf-8', errors='replace')
+            m_starts = list(re.finditer(r'Starting sync_files\.py at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', tail_chunk))
+            if m_starts:
+                parsed_start = datetime.strptime(m_starts[-1].group(1), '%Y-%m-%d %H:%M:%S').replace(tzinfo=_EST_TZ)
+                if cycle_start_dt is None or parsed_start > cycle_start_dt:
+                    cycle_start_dt = parsed_start
+                    next_scan_dt = cycle_start_dt + timedelta(hours=scan_interval_hours)
+        except Exception:
+            pass
+
+    if next_scan_dt is None and cycle_start_dt is not None:
+        next_scan_dt = cycle_start_dt + timedelta(hours=scan_interval_hours)
+    elif next_scan_dt is None and log_dt is not None:
+        next_scan_dt = log_dt + timedelta(hours=scan_interval_hours)
+
+    # Compute Next Scan timestamp & countdown (measured start-to-start; deferred if overlapping)
     next_scan_at = ''
     next_scan_iso = ''
     next_scan_in_seconds = None
     next_scan_countdown = ''
 
     if is_scanning:
-        next_scan_at = f'After current scan (+{scan_interval_hours:g}h interval)'
-        next_scan_countdown = 'Scanning now'
-    elif log_dt is not None:
-        next_scan_dt = log_dt + timedelta(hours=scan_interval_hours)
+        if next_scan_dt is not None:
+            rem_sec = int((next_scan_dt - now_dt).total_seconds())
+            if rem_sec > 0:
+                next_scan_at = next_scan_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+                next_scan_iso = next_scan_dt.isoformat()
+                next_scan_in_seconds = rem_sec
+                hrs, rem = divmod(rem_sec, 3600)
+                mins, secs = divmod(rem, 60)
+                cd_str = f'in {hrs}h {mins}m {secs}s' if hrs > 0 else (f'in {mins}m {secs}s' if mins > 0 else f'in {secs}s')
+                next_scan_countdown = f'Scanning now — next {cd_str}'
+            else:
+                next_scan_at = 'Deferred (overlap)'
+                next_scan_iso = ''
+                next_scan_in_seconds = 0
+                next_scan_countdown = 'Scanning now — next scan deferred until current finishes'
+        else:
+            next_scan_at = f'Every {scan_interval_hours:g}h (from start)'
+            next_scan_countdown = 'Scanning now'
+    elif next_scan_dt is not None:
         next_scan_at = next_scan_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         next_scan_iso = next_scan_dt.isoformat()
         rem_sec = int((next_scan_dt - now_dt).total_seconds())
@@ -2406,7 +2465,7 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             else:
                 next_scan_countdown = f'in {secs}s'
         if is_sleeping:
-            current_activity = f'All scans finished — Next scan {next_scan_countdown} (every {scan_interval_hours:g}h)'
+            current_activity = f'All scans finished — Next scan {next_scan_countdown} (every {scan_interval_hours:g}h from start)'
 
     max_standby_age = int(scan_interval_hours * 3600 + 1800)
     daemon_active = (
@@ -2416,11 +2475,14 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
         or (seconds_since_log is not None and seconds_since_log < max_standby_age)
     )
 
-    # Automatic self-healing: if a scan cycle is overdue and no active scan is running, launch/wake the scanner loop
-    overdue_threshold = int(scan_interval_hours * 3600 + 180)
-    if not is_scanning and seconds_since_log is not None and seconds_since_log > overdue_threshold:
-        launch_res = _ensure_scanner_daemon_or_trigger(scanner_dir, force_trigger=False)
-        if launch_res.get('ok') and launch_res.get('mode') in ('spawned_daemon', 'woke_sleeping_loop'):
+    # Automatic self-healing & start-to-start enforcement: if next_scan_dt has arrived and no scan is currently running, trigger immediately
+    is_overdue = (
+        (next_scan_dt is not None and (now_dt - next_scan_dt).total_seconds() > 30)
+        or (seconds_since_log is not None and seconds_since_log > int(scan_interval_hours * 3600 + 180))
+    )
+    if not is_scanning and is_overdue:
+        launch_res = _ensure_scanner_daemon_or_trigger(scanner_dir, force_trigger=True)
+        if launch_res.get('ok') and launch_res.get('mode') in ('spawned_daemon', 'woke_sleeping_loop', 'queued_trigger'):
             scanner_lines = _tail_log_file(scanner_log_path, max_lines=40)
             lock_exists = (scanner_dir / 'nas_scanner.lock').exists() or (scanner_dir / 'scanner.lock').exists()
             loop_lock_exists = (scanner_dir / 'nas_scanner_loop.lock').exists()
@@ -2428,9 +2490,10 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             is_sleeping = False
             daemon_active = True
             current_activity = scanner_lines[-1] if scanner_lines else 'Starting MyLibrary Scanner Loop...'
-            next_scan_at = f'After current scan (+{scan_interval_hours:g}h interval)'
-            next_scan_iso = ''
-            next_scan_in_seconds = None
+            new_next_dt = now_dt + timedelta(hours=scan_interval_hours)
+            next_scan_at = new_next_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+            next_scan_iso = new_next_dt.isoformat()
+            next_scan_in_seconds = int(scan_interval_hours * 3600)
             next_scan_countdown = 'Scanning now'
             if scanner_log_path.exists():
                 try:
@@ -4179,6 +4242,8 @@ class CoverApplyAPIView(APIView):
         title = (body.get('title') or '').strip()
         authors = (body.get('authors') or '').strip()
         query = (body.get('query') or '').strip()
+        selected_candidate = body.get('selected_candidate') if isinstance(body.get('selected_candidate'), dict) else None
+        all_candidates = body.get('all_candidates') if isinstance(body.get('all_candidates'), list) else None
         if not (item_id or file_id or file_path or isbn or title or query) or not cover_url:
             return Response({'ok': False, 'error': 'item_id and cover_url are required.'}, status=400)
 
@@ -4192,8 +4257,34 @@ class CoverApplyAPIView(APIView):
             title=title,
             authors=authors,
             query=query,
+            selected_candidate=selected_candidate,
+            all_candidates=all_candidates,
         )
         return Response(res, status=200 if res.get('ok') else 422)
+
+
+class CoverTelemetryAPIView(APIView):
+    """
+    Cover Selection Telemetry API (`GET /mylibrary/api/cover-telemetry/`):
+    Returns captured cover selection records (manual & automatic) with before/after image metrics,
+    title/author similarity scores, candidate lists, and optional base64 thumbnails for algorithm analysis.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        from .opds import get_cover_selection_telemetry
+        try:
+            limit = int(request.query_params.get('limit') or 100)
+        except Exception:
+            limit = 100
+        include_thumbnails = str(request.query_params.get('thumbnails') or '0').lower() in ('1', 'true', 'yes')
+        rows = get_cover_selection_telemetry(limit=limit, include_thumbnails=include_thumbnails)
+        return Response({
+            'ok': True,
+            'count': len(rows),
+            'records': rows,
+        })
 
 
 class CoverGenerateAPIView(APIView):
@@ -4491,6 +4582,26 @@ class WebLogoutView(View):
         logout(request)
         script_prefix = getattr(settings, 'FORCE_SCRIPT_NAME', '') or ''
         return HttpResponseRedirect(f"{script_prefix.rstrip('/')}/login/")
+
+
+class MalformedQueryRedirectView(View):
+    """
+    Redirects URLs where query parameters were appended to `/mylibrary/` without a `?`
+    (e.g. `/mylibrary/enrich_status=needs_enriching` -> `/mylibrary/?enrich_status=needs_enriching`).
+    """
+
+    def get(self, request, malformed_query=''):
+        from django.http import HttpResponseRedirect
+        from urllib.parse import unquote
+
+        script_prefix = getattr(settings, 'FORCE_SCRIPT_NAME', '') or ''
+        base_path = f"{script_prefix.rstrip('/')}/" if script_prefix else '/'
+        clean_q = unquote(malformed_query or '').lstrip('?&')
+        extra_qs = request.META.get('QUERY_STRING', '').strip()
+        if extra_qs:
+            clean_q = f"{clean_q}&{extra_qs}" if clean_q else extra_qs
+        target = f"{base_path}?{clean_q}" if clean_q else base_path
+        return HttpResponseRedirect(target)
 
 
 class DuplicatesDashboardView(TemplateView):

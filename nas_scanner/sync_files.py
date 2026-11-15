@@ -127,11 +127,10 @@ def load_all_cached_states(directory=None):
         if directory:
             norm_dir = os.path.abspath(directory)
             dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
-            upper_bound = dir_prefix[:-1] + chr(ord(dir_prefix[-1]) + 1)
             cursor.execute(
                 'SELECT filepath, modified_at, size, hash FROM file_states '
-                'WHERE (filepath >= ? AND filepath < ?) OR filepath = ?',
-                (dir_prefix, upper_bound, norm_dir)
+                'WHERE filepath LIKE ? OR filepath = ?',
+                (dir_prefix + '%', norm_dir)
             )
         else:
             cursor.execute('SELECT filepath, modified_at, size, hash FROM file_states')
@@ -297,10 +296,6 @@ def scan_directory(
         '_quarantine', 'quarantine', 'bak', 'books_bad', '@eadir', '#recycle',
         '.recycle', '$recycle.bin', '.appledouble', '.trashes', '.spotlight-v100',
     }
-    if epubmeta_config:
-        for d in epubmeta_config.get('exclude_dirs', []):
-            if d and str(d).strip():
-                excluded_dirs.add(str(d).strip().lower())
 
     # 1. Load cached file states first and stream os.walk directly (avoiding a 1.48M-item scan_items list)
     files_to_parse = []  # list of (abspath, modified_at, size, name)
@@ -355,6 +350,7 @@ def scan_directory(
     deleted_paths = [
         cached_path for cached_path in cache.keys()
         if (cached_path == norm_dir or cached_path.startswith(dir_prefix))
+        and not os.path.exists(cached_path)
     ]
     del cache
     import gc
@@ -537,8 +533,8 @@ if __name__ == '__main__':
     epubmeta_config = None
     calibre_libraries = []
 
-    # Check for config.json
-    config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+    # Check for config.json (prefer bind-mounted /config/config.json inside container)
+    config_path = '/config/config.json' if os.path.exists('/config/config.json') else os.path.join(os.path.dirname(__file__), 'config.json')
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r') as f:

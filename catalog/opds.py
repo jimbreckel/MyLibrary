@@ -2794,6 +2794,58 @@ def resolve_catalog_item_by_id_or_fallback(
         except Exception:
             pass
 
+    # Final recovery fallback: if the CatalogItem / FileLocation was pruned while the physical file still exists on disk
+    try:
+        disk_path = ''
+        if fpath and os.path.exists(fpath):
+            disk_path = fpath
+        elif fpath and fpath.startswith('/volume1/common/Media/Books/'):
+            alt_p = '/books/' + fpath[len('/volume1/common/Media/Books/'):]
+            if os.path.exists(alt_p):
+                disk_path = alt_p
+        elif t_clean:
+            conn = _get_scanner_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT file_path FROM processed_files WHERE orig_title = ? OR title = ? LIMIT 5",
+                        (t_clean, t_clean),
+                    )
+                    for r in cur.fetchall():
+                        cand_p = str(r[0] or '').strip()
+                        if cand_p and os.path.exists(cand_p):
+                            disk_path = cand_p
+                            break
+                finally:
+                    conn.close()
+        if disk_path and os.path.isfile(disk_path):
+            existing_loc = FileLocation.objects.select_related('catalog_item').filter(file_path=disk_path).first()
+            if existing_loc and existing_loc.catalog_item_id:
+                return CatalogItem.objects.prefetch_related('files').filter(id=existing_loc.catalog_item_id).first()
+            from datetime import datetime, timezone as dt_tz
+            st = os.stat(disk_path)
+            ext = os.path.splitext(disk_path)[1].lstrip('.').upper() or 'PDF'
+            rec_item = CatalogItem.objects.create(
+                id=_uuid.UUID(raw_id) if len(raw_id) == 36 else _uuid.uuid4(),
+                title=t_clean or os.path.splitext(os.path.basename(disk_path))[0],
+                authors=a_clean or 'Unknown',
+                isbn=clean_isbn if len(clean_isbn) in (10, 13) else None,
+                item_type='MAGAZINE' if disk_path.startswith(('/periodicals/', '/xAdult/')) else 'BOOK',
+            )
+            FileLocation.objects.create(
+                catalog_item=rec_item,
+                file_path=disk_path,
+                file_name=os.path.basename(disk_path)[:512],
+                file_format=ext[:16],
+                file_size=st.st_size,
+                file_hash='',
+                file_modified_at=datetime.fromtimestamp(st.st_mtime, tz=dt_tz.utc),
+            )
+            return CatalogItem.objects.prefetch_related('files').filter(id=rec_item.id).first()
+    except Exception:
+        pass
+
     return None
 
 
@@ -6453,6 +6505,15 @@ def enrich_file_location_on_demand(
                 target_meta.title = str(fallback_cand).strip()
                 break
 
+    if not getattr(target_meta, 'cover_bytes', None) and getattr(target_meta, 'cover_url', None):
+        try:
+            import requests as _req
+            r_cov = _req.get(target_meta.cover_url, timeout=4.5, headers={'User-Agent': 'Mozilla/5.0'})
+            if r_cov.status_code == 200 and len(r_cov.content) >= 1500:
+                target_meta.cover_bytes = r_cov.content
+        except Exception:
+            pass
+
     orig_payload_issue = classify_cover_image(orig_cover_thumb, item.cover_image_url or '')
     orig_is_low_color = bool(orig_cover_thumb and cover_colorfulness_score(orig_cover_thumb) < 0.055)
     orig_is_white_page = bool(
@@ -6462,38 +6523,67 @@ def enrich_file_location_on_demand(
             or is_hybrid_or_white_page_cover(orig_cover_thumb)
         )
     )
-    if not getattr(target_meta, 'cover_url', None) and (
+    cur_target_cov_bytes = getattr(target_meta, 'cover_bytes', None)
+    target_cov_is_weak = (
+        not cur_target_cov_bytes
+        or classify_cover_image(cur_target_cov_bytes) in ('missing', 'text_only')
+        or is_hybrid_or_white_page_cover(cur_target_cov_bytes)
+        or has_excessive_white_border_cover(cur_target_cov_bytes)
+        or cover_colorfulness_score(cur_target_cov_bytes) < 0.055
+    )
+    _auto_selected_wc = None
+    _auto_web_covs = []
+    if target_cov_is_weak and (
         orig_payload_issue in ('missing', 'text_only') or orig_is_low_color or orig_is_white_page
     ):
         try:
-            from epubmeta.matcher import score_title as _cov_score_title
+            import requests as _req
+            from epubmeta.matcher import score_title as _cov_score_title, score_authors as _cov_score_authors
             web_covs = search_book_covers_web(
                 title=target_meta.title or '',
                 authors=', '.join(target_meta.authors or []),
                 isbn=target_meta.isbn13 or target_meta.isbn10 or isbn or '',
                 item_id=str(item.id),
             )
-            for wc in web_covs:
+            _auto_web_covs = web_covs or []
+            want_authors = [a.strip() for a in (target_meta.authors or []) if a and str(a).strip()]
+            for _wc_idx, wc in enumerate(web_covs):
                 cu = wc.get('cover_url') or wc.get('fallback_url') or ''
                 wc_src = wc.get('source') or ''
-                if not cu or wc_src == 'Original Cover':
+                if not cu or wc_src == 'Original Cover' or cu.startswith('data:'):
                     continue
-                if wc.get('same_cover_in_color'):
-                    target_meta.cover_url = cu
-                    break
-                if (orig_payload_issue in ('missing', 'text_only') or orig_is_white_page) and 'Web Image Search' not in wc_src:
-                    if 'Open Library (ISBN)' in wc_src or _cov_score_title(wc.get('title') or '', target_meta.title or '') >= 0.65:
-                        target_meta.cover_url = cu
-                        break
-        except Exception:
-            pass
-
-    if not getattr(target_meta, 'cover_bytes', None) and getattr(target_meta, 'cover_url', None):
-        try:
-            import requests as _req
-            r_cov = _req.get(target_meta.cover_url, timeout=4.5, headers={'User-Agent': 'Mozilla/5.0'})
-            if r_cov.status_code == 200 and len(r_cov.content) >= 1500:
-                target_meta.cover_bytes = r_cov.content
+                is_color_same = bool(wc.get('same_cover_in_color'))
+                is_trusted_cat = 'Web Image Search' not in wc_src
+                t_score = _cov_score_title(wc.get('title') or '', target_meta.title or '') if target_meta.title else 0.0
+                wc_auth_str = str(wc.get('authors') or '').strip()
+                wc_auth_list = [a.strip() for a in wc_auth_str.split(',') if a.strip()] if wc_auth_str else []
+                a_score = _cov_score_authors(wc_auth_list, want_authors) if (want_authors and wc_auth_list) else 1.0
+                matches_book = (
+                    'Open Library (ISBN)' in wc_src
+                    or (t_score >= 0.65 and (not want_authors or not wc_auth_list or a_score >= 0.50))
+                )
+                if is_color_same or (
+                    (orig_payload_issue in ('missing', 'text_only') or orig_is_white_page or orig_is_low_color)
+                    and is_trusted_cat
+                    and matches_book
+                ):
+                    try:
+                        r_wc = _req.get(cu, timeout=4.5, headers={'User-Agent': 'Mozilla/5.0'})
+                        if r_wc.status_code == 200 and len(r_wc.content) >= 1500:
+                            wc_b = r_wc.content
+                            if (
+                                classify_cover_image(wc_b) is None
+                                and not is_hybrid_or_white_page_cover(wc_b)
+                                and not has_excessive_white_border_cover(wc_b)
+                                and cover_colorfulness_score(wc_b) >= 0.055
+                            ):
+                                target_meta.cover_url = cu
+                                target_meta.cover_bytes = wc_b
+                                _auto_selected_wc = dict(wc)
+                                _auto_selected_wc['candidate_index'] = _wc_idx
+                                break
+                    except Exception:
+                        continue
         except Exception:
             pass
 
@@ -6510,6 +6600,27 @@ def enrich_file_location_on_demand(
             cover_thumbnail=res.get('cover_thumbnail'),
             phys_path=phys_path,
         )
+        new_cov_thumb = res.get('cover_thumbnail')
+        if new_cov_thumb and new_cov_thumb != orig_cover_thumb:
+            try:
+                record_cover_selection_telemetry(
+                    item=item,
+                    prev_cover_thumb=orig_cover_thumb or '',
+                    prev_cover_url=item.cover_image_url or '',
+                    new_cover_thumb=new_cov_thumb or '',
+                    new_cover_url=str(getattr(target_meta, 'cover_url', '') or ''),
+                    user_selected=False,
+                    search_query=target_meta.title or item.title or '',
+                    selected_candidate=_auto_selected_wc or {
+                        'source': getattr(target_meta, 'source', 'Enrichment Provider'),
+                        'title': target_meta.title or '',
+                        'authors': ', '.join(target_meta.authors or []),
+                        'cover_url': getattr(target_meta, 'cover_url', '') or '',
+                    },
+                    all_candidates=_auto_web_covs,
+                )
+            except Exception:
+                pass
         s_map = _ENRICHED_PATHS_CACHE.get('status_by_path')
         if isinstance(s_map, dict):
             s_map.pop(str(file_loc.file_path or ''), None)
@@ -7699,6 +7810,265 @@ def search_book_covers_web(
     return results[:24]
 
 
+_COVER_TELEMETRY_TABLE_READY = False
+
+
+def _ensure_cover_telemetry_table() -> None:
+    global _COVER_TELEMETRY_TABLE_READY
+    if _COVER_TELEMETRY_TABLE_READY:
+        return
+    try:
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_cover_selection_telemetry (
+                    id SERIAL PRIMARY KEY,
+                    item_id VARCHAR(64) NOT NULL,
+                    file_path TEXT DEFAULT '',
+                    book_title TEXT DEFAULT '',
+                    book_authors TEXT DEFAULT '',
+                    book_isbn VARCHAR(64) DEFAULT '',
+                    search_query TEXT DEFAULT '',
+                    selection_mode VARCHAR(32) DEFAULT 'user_manual',
+                    selected_source VARCHAR(128) DEFAULT '',
+                    selected_url TEXT DEFAULT '',
+                    selected_title TEXT DEFAULT '',
+                    selected_authors TEXT DEFAULT '',
+                    candidate_index INTEGER DEFAULT -1,
+                    prev_issue VARCHAR(32) DEFAULT '',
+                    prev_colorfulness DOUBLE PRECISION DEFAULT 0.0,
+                    prev_is_white_page BOOLEAN DEFAULT FALSE,
+                    prev_has_white_border BOOLEAN DEFAULT FALSE,
+                    new_issue VARCHAR(32) DEFAULT '',
+                    new_colorfulness DOUBLE PRECISION DEFAULT 0.0,
+                    new_is_white_page BOOLEAN DEFAULT FALSE,
+                    same_design BOOLEAN DEFAULT FALSE,
+                    design_similarity DOUBLE PRECISION DEFAULT 0.0,
+                    title_match_score DOUBLE PRECISION DEFAULT 0.0,
+                    author_match_score DOUBLE PRECISION DEFAULT 0.0,
+                    prev_cover_thumbnail TEXT DEFAULT '',
+                    selected_cover_thumbnail TEXT DEFAULT '',
+                    candidates_json TEXT DEFAULT '[]',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cover_telemetry_created_at
+                ON catalog_cover_selection_telemetry (created_at DESC)
+                """
+            )
+        _COVER_TELEMETRY_TABLE_READY = True
+    except Exception:
+        pass
+
+
+def record_cover_selection_telemetry(
+    item: CatalogItem,
+    prev_cover_thumb: str,
+    prev_cover_url: str,
+    new_cover_thumb: str,
+    new_cover_url: str,
+    user_selected: bool = True,
+    search_query: str = '',
+    selected_candidate: Optional[Dict[str, Any]] = None,
+    all_candidates: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """
+    Capture cover selection events (both manual user selections and auto-enrichment upgrades)
+    with full before/after image metrics, title/author similarity scores, and candidate lists
+    into `catalog_cover_selection_telemetry` (PostgreSQL) and `nas_scanner/logs/cover_selection_telemetry.jsonl`
+    for algorithm analysis.
+    """
+    try:
+        _ensure_cover_telemetry_table()
+        sel_cand = selected_candidate if isinstance(selected_candidate, dict) else {}
+        cand_list = all_candidates if isinstance(all_candidates, list) else []
+
+        first_file = item.files.first()
+        f_path = (first_file.file_path if first_file and first_file.file_path else '') or ''
+        b_title = (item.title or '').strip()
+        b_authors = (item.authors or '').strip()
+        b_isbn = (item.isbn or '').strip()
+
+        sel_source = str(sel_cand.get('source') or ('User Selected' if user_selected else 'Auto Enrichment')).strip()
+        sel_title = str(sel_cand.get('title') or '').strip()
+        sel_authors = str(sel_cand.get('authors') or '').strip()
+        try:
+            cand_idx = int(sel_cand.get('candidate_index', -1))
+        except Exception:
+            cand_idx = -1
+
+        prev_issue = classify_cover_image(prev_cover_thumb, prev_cover_url) or 'graphic'
+        prev_col = round(float(cover_colorfulness_score(prev_cover_thumb)), 4) if prev_cover_thumb else 0.0
+        prev_white_page = bool(prev_cover_thumb and is_hybrid_or_white_page_cover(prev_cover_thumb))
+        prev_white_bdr = bool(prev_cover_thumb and has_excessive_white_border_cover(prev_cover_thumb))
+
+        new_issue = classify_cover_image(new_cover_thumb, new_cover_url) or 'graphic'
+        new_col = round(float(cover_colorfulness_score(new_cover_thumb)), 4) if new_cover_thumb else 0.0
+        new_white_page = bool(new_cover_thumb and is_hybrid_or_white_page_cover(new_cover_thumb))
+
+        same_des, des_sim = (False, 0.0)
+        if prev_cover_thumb and new_cover_thumb:
+            try:
+                same_des, des_sim = are_covers_same_design(prev_cover_thumb, new_cover_thumb)
+                des_sim = round(float(des_sim), 4)
+            except Exception:
+                same_des, des_sim = (False, 0.0)
+
+        t_score = 0.0
+        a_score = 0.0
+        try:
+            import sys
+            base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+            for sub in ('scanner', 'nas_scanner'):
+                cand_dir = str((base_dir / sub).resolve())
+                if os.path.isdir(cand_dir) and cand_dir not in sys.path:
+                    sys.path.insert(0, cand_dir)
+            from epubmeta.matcher import score_title as _st, score_authors as _sa
+            if sel_title and b_title:
+                t_score = round(float(_st(sel_title, b_title)), 4)
+            if sel_authors and b_authors:
+                sa_list = [x.strip() for x in sel_authors.split(',') if x.strip()]
+                ba_list = [x.strip() for x in b_authors.split(',') if x.strip()]
+                if sa_list and ba_list:
+                    a_score = round(float(_sa(sa_list, ba_list)), 4)
+        except Exception:
+            pass
+
+        compact_cands = []
+        for idx_c, c in enumerate(cand_list[:24]):
+            if not isinstance(c, dict):
+                continue
+            cu = str(c.get('cover_url') or '').strip()
+            compact_cands.append({
+                'index': idx_c,
+                'source': str(c.get('source') or ''),
+                'title': str(c.get('title') or ''),
+                'authors': str(c.get('authors') or ''),
+                'cover_url': cu[:300] if not cu.startswith('data:') else 'data:image/...',
+                'same_cover_in_color': bool(c.get('same_cover_in_color')),
+                'colorfulness': c.get('colorfulness'),
+                'design_similarity': c.get('design_similarity'),
+            })
+        cands_json_str = json.dumps(compact_cands, ensure_ascii=False)
+        mode_str = 'user_manual' if user_selected else 'auto_enrichment'
+
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO catalog_cover_selection_telemetry (
+                    item_id, file_path, book_title, book_authors, book_isbn, search_query,
+                    selection_mode, selected_source, selected_url, selected_title, selected_authors,
+                    candidate_index, prev_issue, prev_colorfulness, prev_is_white_page, prev_has_white_border,
+                    new_issue, new_colorfulness, new_is_white_page, same_design, design_similarity,
+                    title_match_score, author_match_score, prev_cover_thumbnail, selected_cover_thumbnail,
+                    candidates_json
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s
+                )
+                """,
+                [
+                    str(item.id), f_path, b_title, b_authors, b_isbn, search_query[:500],
+                    mode_str, sel_source[:128], (new_cover_url or '')[:1000], sel_title[:500], sel_authors[:500],
+                    cand_idx, prev_issue[:32], prev_col, prev_white_page, prev_white_bdr,
+                    new_issue[:32], new_col, new_white_page, bool(same_des), des_sim,
+                    t_score, a_score, prev_cover_thumb or '', new_cover_thumb or '',
+                    cands_json_str,
+                ],
+            )
+
+        # Also append a structured JSONL summary line for quick CLI/script analysis
+        try:
+            import datetime as _dt
+            base_dir = Path(getattr(settings, 'BASE_DIR', '.'))
+            log_dir = base_dir / 'nas_scanner' / 'logs'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            jsonl_path = log_dir / 'cover_selection_telemetry.jsonl'
+            entry = {
+                'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                'item_id': str(item.id),
+                'file_path': f_path,
+                'book_title': b_title,
+                'book_authors': b_authors,
+                'book_isbn': b_isbn,
+                'search_query': search_query,
+                'selection_mode': mode_str,
+                'selected_source': sel_source,
+                'selected_url': new_cover_url if not str(new_cover_url).startswith('data:') else 'data:image/...',
+                'selected_title': sel_title,
+                'selected_authors': sel_authors,
+                'candidate_index': cand_idx,
+                'prev_metrics': {
+                    'issue': prev_issue,
+                    'colorfulness': prev_col,
+                    'is_white_page': prev_white_page,
+                    'has_white_border': prev_white_bdr,
+                },
+                'new_metrics': {
+                    'issue': new_issue,
+                    'colorfulness': new_col,
+                    'is_white_page': new_white_page,
+                },
+                'comparison': {
+                    'same_design': bool(same_des),
+                    'design_similarity': des_sim,
+                    'title_match_score': t_score,
+                    'author_match_score': a_score,
+                },
+                'candidates': compact_cands,
+            }
+            with open(jsonl_path, 'a', encoding='utf-8') as jf:
+                jf.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def get_cover_selection_telemetry(limit: int = 100, include_thumbnails: bool = False) -> List[Dict[str, Any]]:
+    """Return captured cover selection telemetry events for algorithm analysis."""
+    _ensure_cover_telemetry_table()
+    out: List[Dict[str, Any]] = []
+    try:
+        from django.db import connection
+        cols = (
+            "id, item_id, file_path, book_title, book_authors, book_isbn, search_query, "
+            "selection_mode, selected_source, selected_url, selected_title, selected_authors, "
+            "candidate_index, prev_issue, prev_colorfulness, prev_is_white_page, prev_has_white_border, "
+            "new_issue, new_colorfulness, new_is_white_page, same_design, design_similarity, "
+            "title_match_score, author_match_score, candidates_json, created_at"
+        )
+        if include_thumbnails:
+            cols += ", prev_cover_thumbnail, selected_cover_thumbnail"
+        with connection.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM catalog_cover_selection_telemetry ORDER BY id DESC LIMIT %s",
+                [max(1, min(int(limit or 100), 500))],
+            )
+            col_names = [d[0] for d in cur.description]
+            for row in cur.fetchall():
+                d = dict(zip(col_names, row))
+                if d.get('created_at'):
+                    d['created_at'] = d['created_at'].isoformat()
+                try:
+                    d['candidates'] = json.loads(d.pop('candidates_json', '[]') or '[]')
+                except Exception:
+                    d['candidates'] = []
+                out.append(d)
+    except Exception:
+        pass
+    return out
+
+
 def apply_book_cover_to_item(
     item_or_id: Any,
     cover_url: str,
@@ -7710,6 +8080,8 @@ def apply_book_cover_to_item(
     authors: str = '',
     query: str = '',
     user_selected: bool = True,
+    selected_candidate: Optional[Dict[str, Any]] = None,
+    all_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Download `cover_url` (or `fallback_url` if the primary host blocks or fails),
@@ -7732,6 +8104,9 @@ def apply_book_cover_to_item(
     )
     if not item:
         return {'ok': False, 'error': f'CatalogItem not found: {item_or_id}'}
+
+    prev_cover_thumb = item.cover_thumbnail or ''
+    prev_cover_url = item.cover_image_url or ''
 
     cover_url = (cover_url or '').strip()
     fallback_url = (fallback_url or '').strip()
@@ -7789,6 +8164,21 @@ def apply_book_cover_to_item(
         pass
     item.cover_thumbnail = thumb_data_uri
     item.save(update_fields=['cover_image_url', 'cover_thumbnail', 'updated_at'])
+
+    try:
+        record_cover_selection_telemetry(
+            item=item,
+            prev_cover_thumb=prev_cover_thumb,
+            prev_cover_url=prev_cover_url,
+            new_cover_thumb=thumb_data_uri,
+            new_cover_url=chosen_ext_url or cover_url,
+            user_selected=user_selected,
+            search_query=query,
+            selected_candidate=selected_candidate,
+            all_candidates=all_candidates,
+        )
+    except Exception:
+        pass
 
     # Also persist updated cover_thumbnail in scanner_state.db if this item's files are tracked there
     try:

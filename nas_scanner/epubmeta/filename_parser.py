@@ -184,6 +184,8 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     if title_candidate:
         title_candidate = re.sub(r"\s*\([^)]*?\b(?:19\d{2}|20\d{2})\b[^)]*\)\s*(?:WW|YYePG|BLG|TLRG)?$", "", title_candidate, flags=re.I).strip()
         title_candidate = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG)$", "", title_candidate).strip()
+        # Restore version decimal points where Anna's Archive replaced '.' with '_ ' between digits (e.g. 'JDK 1_ 4' -> 'JDK 1.4')
+        title_candidate = re.sub(r"(?<=\d)_\s*(?=\d)", ".", title_candidate)
         # e.g. "Unabridged_ The Thrill of..." -> "Unabridged: The Thrill of..."
         title_candidate = re.sub(r"_\s+", ": ", title_candidate)
         title_candidate = re.sub(r"\s*_\s*", " ", title_candidate)
@@ -194,6 +196,8 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     if author_candidate:
         # Strip leading numeric library/Calibre IDs (e.g., "16685198 Mark Willenbrink")
         author_candidate = re.sub(r"^\d{5,12}\s+", "", author_candidate).strip()
+        # Strip Anna's Archive / bibliographic role tags like (auth_), (auth.), (ed_), (ed.), (eds_)
+        author_candidate = re.sub(r"\s*\((?:auth|ed|eds|tr|trans|comp)[_.]?\)", "", author_candidate, flags=re.I).strip()
         if author_candidate.lower() not in ("unknown", "unknown author"):
             norm_authors = split_and_normalize_authors(author_candidate)
             parsed_authors = [disp for disp, _ in norm_authors]

@@ -361,7 +361,7 @@
                 {% if dashboard.scanner.last_log_update %}
                     <span class="activity-timestamp"><i class="fa-regular fa-clock"></i> Last log event: <span id="last-log-update-label">{{ dashboard.scanner.last_log_update }}</span></span>
                 {% endif %}
-                <span class="library-pill" id="next-scan-pill" data-next-iso="{{ dashboard.scanner.next_scan_iso }}" data-interval-hours="{{ dashboard.scanner.scan_interval_hours }}" style="background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;">
+                <span class="library-pill" id="next-scan-pill" data-next-iso="{{ dashboard.scanner.next_scan_iso }}" data-interval-hours="{{ dashboard.scanner.scan_interval_hours }}" data-is-scanning="{% if dashboard.scanner.is_scanning %}true{% else %}false{% endif %}" style="background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;">
                     <i class="fa-solid fa-calendar-check"></i>
                     Next Scan:
                     <strong id="next-scan-time-label">{{ dashboard.scanner.next_scan_at|default:"Scheduled" }}</strong>
@@ -2715,21 +2715,36 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
             if (!pill) return;
             const nextIso = pill.getAttribute('data-next-iso') || '';
             const intervalHours = pill.getAttribute('data-interval-hours') || '4';
+            const isScanning = pill.getAttribute('data-is-scanning') === 'true';
             const timeLabel = document.getElementById('next-scan-time-label');
             const cdLabel = document.getElementById('next-scan-countdown-label');
             if (!nextIso) return;
             const targetDt = new Date(nextIso);
             if (isNaN(targetDt.getTime())) return;
+            const remSec = Math.floor((targetDt.getTime() - Date.now()) / 1000);
+            if (isScanning) {
+                if (remSec <= 0) {
+                    if (timeLabel) timeLabel.textContent = 'Deferred (overlap)';
+                    if (cdLabel) cdLabel.textContent = 'Scanning now — next scan deferred until current finishes';
+                } else {
+                    if (timeLabel) {
+                        timeLabel.textContent = targetDt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    }
+                    if (cdLabel) {
+                        cdLabel.textContent = `Scanning now — next ${formatCountdown(remSec)}`;
+                    }
+                }
+                return;
+            }
             if (timeLabel) {
                 const localTimeStr = targetDt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 timeLabel.textContent = localTimeStr;
             }
-            const remSec = Math.floor((targetDt.getTime() - Date.now()) / 1000);
             const cdText = formatCountdown(remSec);
             if (cdLabel) cdLabel.textContent = cdText;
             const actEl = document.getElementById('live-activity-line');
             if (actEl && actEl.textContent.includes('All scans finished')) {
-                actEl.textContent = `All scans finished — Next scan ${cdText} (every ${parseFloat(intervalHours)}h)`;
+                actEl.textContent = `All scans finished — Next scan ${cdText} (every ${parseFloat(intervalHours)}h from start)`;
             }
         }
 
@@ -2775,13 +2790,16 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                     const pill = document.getElementById('next-scan-pill');
                     if (pill) {
                         pill.setAttribute('data-next-iso', data.scanner.next_scan_iso || '');
+                        pill.setAttribute('data-is-scanning', data.scanner.is_scanning ? 'true' : 'false');
                         if (data.scanner.scan_interval_hours) {
                             pill.setAttribute('data-interval-hours', data.scanner.scan_interval_hours);
                         }
                     }
-                    if (data.scanner.is_scanning) {
-                        setTxt('next-scan-time-label', data.scanner.next_scan_at || 'After current scan');
-                        setTxt('next-scan-countdown-label', 'Scanning now');
+                    if (data.scanner.next_scan_iso) {
+                        tickNextScanCountdown();
+                    } else if (data.scanner.is_scanning) {
+                        setTxt('next-scan-time-label', data.scanner.next_scan_at || 'Deferred (overlap)');
+                        setTxt('next-scan-countdown-label', data.scanner.next_scan_countdown || 'Scanning now — next scan deferred until current finishes');
                     } else {
                         tickNextScanCountdown();
                     }

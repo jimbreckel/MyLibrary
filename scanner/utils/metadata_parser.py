@@ -484,12 +484,12 @@ def generate_thumbnail(image_bytes, max_size=(360, 540)):
             img.save(out_buf, format='JPEG', quality=80)
             base64_str = base64.b64encode(out_buf.getvalue()).decode('utf-8')
             return f"data:image/jpeg;base64,{base64_str}"
-    except Exception as e:
-        print(f"Error generating thumbnail: {e}")
+    except Exception:
+        pass
     return None
 
 
-def extract_metadata(filepath):
+def extract_metadata(filepath, item_type=None):
     """Main routing function to extract metadata based on file extension or directory."""
     if os.path.isdir(filepath):
         try:
@@ -565,6 +565,44 @@ def extract_metadata(filepath):
             'has_drm': False,
             'is_invalid': False
         }
+
+    norm_fp = filepath.replace('\\', '/')
+    is_periodical = (
+        item_type == 'MAGAZINE'
+        or norm_fp.startswith('/periodicals/')
+        or norm_fp.startswith('/xAdult/')
+        or '/Periodicals/' in norm_fp
+        or '/xAdult/' in norm_fp
+    )
+    if is_periodical:
+        try:
+            from pathlib import Path as _Path
+            from orgperiodicals.organizer import identify_and_organize_periodical
+            info = identify_and_organize_periodical(_Path(filepath), move_file=False)
+            series_title = info.get('series_title')
+            year = info.get('year')
+            bucket = info.get('bucket')
+            if not cover_bytes and info.get('cover_bytes'):
+                cover_bytes = info['cover_bytes']
+            if series_title and series_title not in ('Unorganized', 'Unknown'):
+                meta['authors'] = series_title
+                meta['publisher'] = series_title
+                stem = os.path.splitext(os.path.basename(filepath))[0].replace('_', ' ').replace('.', ' ').strip()
+                if not meta.get('title') or meta['title'].lower() in ('unknown', 'untitled') or len(meta['title']) < 3:
+                    meta['title'] = f"{series_title} ({year})" if year else series_title
+                elif series_title.lower() not in meta['title'].lower():
+                    meta['title'] = f"{series_title} - {stem}"
+            if year and not meta.get('published_date'):
+                meta['published_date'] = f"{year}-01-01"
+            subj_list = []
+            if bucket and bucket != "Adult Periodicals":
+                subj_list.append(bucket)
+            if series_title and series_title not in ('Unorganized', 'Unknown') and series_title not in subj_list:
+                subj_list.append(series_title)
+            if subj_list:
+                meta['subjects'] = subj_list
+        except Exception as per_err:
+            pass
 
     res = {**file_info, **meta}
     if cover_bytes:

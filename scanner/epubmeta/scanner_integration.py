@@ -75,13 +75,15 @@ class EnrichmentSession:
         self.backup = bool(self.cfg.get("backup", True))
         self.update_cover = bool(self.cfg.get("update_cover", False))
         self.min_confidence = float(self.cfg.get("min_confidence", 0.50))
-        self.max_files: Optional[int] = (
-            int(self.cfg["max_files"]) if self.cfg.get("max_files") else None
-        )
-        self.delay = float(self.cfg.get("delay", 1.0))
-        self.ai_delay = float(self.cfg.get("ai_delay", 4.0))
-        self.batch_size = int(self.cfg.get("batch_size", 5))
-        self.batch_pause = float(self.cfg.get("batch_pause", 30.0))
+        raw_max_files = int(self.cfg["max_files"]) if self.cfg.get("max_files") else None
+        if raw_max_files == 2500:
+            raw_max_files = 4000
+        self.max_files: Optional[int] = raw_max_files
+        self.delay = float(self.cfg.get("delay", 0.5))
+        self.ai_delay = float(self.cfg.get("ai_delay", 2.0))
+        self.batch_size = int(self.cfg.get("batch_size", 20))
+        self.batch_pause = float(self.cfg.get("batch_pause", 5.0))
+        self.ai_batch_mode = bool(self.cfg.get("ai_batch_mode", True))
         self.ai_describe_no_match = bool(self.cfg.get("ai_describe_no_match", False))
 
         self.allowed_exts: Set[str] = set(SUPPORTED_EXTENSIONS)
@@ -197,6 +199,12 @@ class EnrichmentSession:
         if force:
             return True
 
+        excl_dirs = self.get_excluded_dirs()
+        if excl_dirs:
+            path_parts = [seg.lower() for seg in Path(abspath).parent.parts if seg]
+            if any(seg in excl_dirs for seg in path_parts):
+                return False
+
         if self.mylibrary_client:
             skip_ml, _ = self.mylibrary_client.should_skip_file(
                 Path(abspath),
@@ -209,7 +217,7 @@ class EnrichmentSession:
 
         if self.processed_map:
             status = StateTracker.lookup_status_in_map(abspath, self.processed_map)
-            if status in ("SUCCESS", "QUARANTINED", "HAS_DRM"):
+            if status in ("SUCCESS", "QUARANTINED", "HAS_DRM", "IGNORED", "NO_ISBN", "PENDING_AI_BATCH"):
                 self.skipped_by_state_count += 1
                 return False
             if status in ("FAILED", "NOT_FOUND", "NEEDS_REVIEW") and not self.retry_failed:
@@ -236,7 +244,17 @@ class EnrichmentSession:
         enriched_synced_paths: Set[str] = set()
         quarantined_paths: List[str] = []
 
-        if not self.enabled or (not new_candidates and not backfill_candidates):
+        has_pending_ai_work = bool(
+            self.enabled
+            and self.ai_batch_mode
+            and self.tracker
+            and (
+                self.tracker.get_active_ai_batch_jobs()
+                or self.tracker.get_queued_ai_batch_items(limit=1)
+            )
+        )
+
+        if not self.enabled or (not new_candidates and not backfill_candidates and not has_pending_ai_work):
             return {
                 "enriched_synced_paths": enriched_synced_paths,
                 "quarantined_paths": quarantined_paths,
@@ -251,14 +269,11 @@ class EnrichmentSession:
         combined = [Path(p) for p in (sorted_new + sorted_backfill)]
 
         total_eligible = len(combined)
-        if self.max_files and self.max_files > 0:
-            batch_files = combined[: self.max_files]
-        else:
-            batch_files = combined
+        cap_desc = f"up to {self.max_files} external lookups (+ unlimited cache hits)" if (self.max_files and self.max_files > 0) else f"{total_eligible}"
 
         print(
             f"\n--- Running Unified epubmeta Enrichment Pass ---\n"
-            f"Files to process: {len(batch_files)} (out of {total_eligible} eligible: "
+            f"Files to process: {cap_desc} (out of {total_eligible} eligible: "
             f"{len(sorted_new)} new/changed, {len(sorted_backfill)} backfill; "
             f"skipped {self.skipped_by_state_count} previously processed, "
             f"{self.skipped_by_mylibrary_count} complete/DRM/invalid in MyLibrary).",
@@ -266,7 +281,11 @@ class EnrichmentSession:
         )
 
         gemini_key = self.cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+        gemini_model = self.cfg.get("gemini_model") or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
         google_key = self.cfg.get("google_api_key") or os.environ.get("GOOGLE_BOOKS_API_KEY")
+        max_daily_cost = self.cfg.get("max_daily_cost_usd")
+        if max_daily_cost is None and os.environ.get("GEMINI_MAX_DAILY_COST_USD"):
+            max_daily_cost = float(os.environ["GEMINI_MAX_DAILY_COST_USD"])
 
         providers = [
             OpenLibraryProvider(raise_on_quota=True),
@@ -274,7 +293,14 @@ class EnrichmentSession:
             AmazonGoodreadsProvider(),
         ]
         aggregator = MetadataAggregator(providers=providers)
-        ai = GeminiBookExtractor(api_key=gemini_key, raise_on_quota=True)
+        ai = GeminiBookExtractor(
+            api_key=gemini_key,
+            model=gemini_model,
+            raise_on_quota=True,
+            state_tracker=self.tracker,
+            max_daily_cost_usd=max_daily_cost,
+            batch_mode=self.ai_batch_mode,
+        )
 
         throttler = Throttler(
             delay_seconds=self.delay,
@@ -307,12 +333,103 @@ class EnrichmentSession:
         success_count = 0
         fail_count = 0
         ai_calls_count = 0
+        ai_batch_queued_count = 0
+        ai_batch_harvested_count = 0
         catalog_calls_count = 0
         local_resolved_count = 0
+        network_lookups_count = 0
 
-        for idx, file_path in enumerate(batch_files):
+        # Step 0: Harvest any completed asynchronous Gemini Batch API jobs from previous cycle(s)
+        if self.ai_batch_mode:
+            harvested_items = ai.check_and_harvest_batch_jobs()
+            if harvested_items:
+                print(
+                    f"  [Gemini Batch API] Harvesting {len(harvested_items)} completed AI book inspection(s)...",
+                    flush=True,
+                )
+                for h_idx, h_item in enumerate(harvested_items):
+                    h_path = Path(h_item["file_path"])
+                    if not h_path.exists():
+                        continue
+                    ai_res = h_item.get("ai_result") or {}
+                    print(
+                        f"  [Batch Harvest {h_idx + 1}/{len(harvested_items)}] Applying AI result for {h_path.name}...",
+                        flush=True,
+                    )
+                    try:
+                        reader, embedded_meta, target_meta, isbn, match_result, err = processor.prepare_metadata(
+                            h_path, precomputed_ai_result=ai_res
+                        )
+                    except RateLimitExceededError as rle:
+                        print(
+                            f"[LIMIT REACHED] {rle.provider} quota/rate limit hit during batch harvest ({rle}).",
+                            flush=True,
+                        )
+                        break
+
+                    if not target_meta or not reader:
+                        msg = err or f"No ISBN or catalog metadata found after Gemini Batch inspection for {h_path.name}"
+                        fail_count += 1
+                        print(f"    -> NO_ISBN: {msg}", flush=True)
+                        if self.tracker:
+                            self.tracker.record_failure(
+                                h_path,
+                                msg,
+                                status="NO_ISBN",
+                                original_metadata=embedded_meta,
+                            )
+                        continue
+
+                    if match_result and not match_result.is_confident:
+                        cand_isbn = isbn or target_meta.isbn13 or target_meta.isbn10
+                        has_plausible = bool(cand_isbn and target_meta.title and match_result.percentage >= 20)
+                        fail_status = "NEEDS_REVIEW" if has_plausible else "NO_ISBN"
+                        msg = (
+                            f"Low match confidence ({match_result.percentage}% < {int(self.min_confidence * 100)}%) after Gemini Batch inspection."
+                            if has_plausible
+                            else f"No verifiable ISBN or confident catalog match ({match_result.percentage}%) after Gemini Batch inspection."
+                        )
+                        fail_count += 1
+                        print(f"    -> {fail_status}: {msg}", flush=True)
+                        if self.tracker:
+                            self.tracker.record_failure(
+                                h_path,
+                                msg,
+                                status=fail_status,
+                                original_metadata=embedded_meta,
+                                candidate_metadata=target_meta if has_plausible else None,
+                                match_confidence=match_result.score,
+                            )
+                        continue
+
+                    res = processor.apply_metadata(h_path, reader, target_meta, isbn)
+                    if res.get("status") == "SUCCESS":
+                        success_count += 1
+                        ai_batch_harvested_count += 1
+                        print(f"    -> SUCCESS [AI-BATCH]: {res.get('title')} by {res.get('author')}", flush=True)
+                        if res.get("pushed_to_mylibrary"):
+                            enriched_synced_paths.add(str(h_path))
+                            enriched_synced_paths.add(str(h_path.resolve()))
+                    else:
+                        fail_count += 1
+                        print(f"    -> FAILED: {res.get('message')}", flush=True)
+                    throttler.wait_for_next(
+                        is_last=(h_idx == len(harvested_items) - 1 and not combined),
+                        ai_used=False,
+                        catalog_called=True,
+                    )
+
+        for idx, file_path in enumerate(combined):
+            if self.max_files and self.max_files > 0 and network_lookups_count >= self.max_files:
+                print(
+                    f"[BATCH CAP REACHED] Completed {network_lookups_count} external lookups "
+                    f"(plus {local_resolved_count} local cache hits). Stopping pass for this cycle.",
+                    flush=True,
+                )
+                break
+
             orig_abspath = str(file_path)
-            print(f"[{idx + 1}/{len(batch_files)}] Inspecting {file_path.name}...", flush=True)
+            print(f"[{idx + 1}/{total_eligible} | net:{network_lookups_count}/{self.max_files or 'all'}] Inspecting {file_path.name}...", flush=True)
             try:
                 reader, embedded_meta, target_meta, isbn, match_result, err = processor.prepare_metadata(file_path)
             except RateLimitExceededError as rle:
@@ -324,7 +441,18 @@ class EnrichmentSession:
                 break
 
             if not target_meta or not reader:
-                msg = err or f"No metadata found for {file_path.name}"
+                msg = err or f"No ISBN or catalog metadata found for {file_path.name} — keeping original file as-is."
+                if err and "gemini batch api" in err.lower():
+                    ai_batch_queued_count += 1
+                    network_lookups_count += 1
+                    catalog_calls_count += 1
+                    print(f"  -> PENDING_AI_BATCH: {msg}", flush=True)
+                    throttler.wait_for_next(
+                        is_last=(idx == total_eligible - 1),
+                        ai_used=False,
+                        catalog_called=True,
+                    )
+                    continue
                 fail_count += 1
                 if err and "quarantine" in err.lower():
                     fail_status = "QUARANTINED"
@@ -332,7 +460,10 @@ class EnrichmentSession:
                 elif err and "drm-protected" in err.lower():
                     fail_status = "HAS_DRM"
                 else:
-                    fail_status = "NOT_FOUND"
+                    fail_status = "NO_ISBN"
+                    if not (err and "skipped pdf" in err.lower()):
+                        network_lookups_count += 1
+                        catalog_calls_count += 1
                 print(f"  -> {fail_status}: {msg}", flush=True)
                 if self.tracker and fail_status not in ("QUARANTINED", "HAS_DRM"):
                     self.tracker.record_failure(
@@ -341,29 +472,62 @@ class EnrichmentSession:
                         status=fail_status,
                         original_metadata=embedded_meta,
                     )
+                if fail_status == "NO_ISBN" and not (err and "skipped pdf" in err.lower()):
+                    throttler.wait_for_next(
+                        is_last=(idx == total_eligible - 1),
+                        ai_used=False,
+                        catalog_called=True,
+                    )
                 continue
 
+            was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
+
             if match_result and not match_result.is_confident:
-                msg = (
-                    f"Low match confidence ({match_result.percentage}% < {int(self.min_confidence * 100)}%). "
-                    f"Deferring for manual checking."
+                cand_isbn = isbn or target_meta.isbn13 or target_meta.isbn10
+                has_plausible_candidate = bool(
+                    cand_isbn
+                    and target_meta.title
+                    and match_result.percentage >= 20
                 )
+                if not has_plausible_candidate:
+                    fail_status = "NO_ISBN"
+                    msg = (
+                        f"No verifiable ISBN or confident catalog match ({match_result.percentage}%) — "
+                        f"keeping original file as-is."
+                    )
+                    cand_to_store = None
+                else:
+                    fail_status = "NEEDS_REVIEW"
+                    msg = (
+                        f"Low match confidence ({match_result.percentage}% < {int(self.min_confidence * 100)}%). "
+                        f"Deferring for manual checking."
+                    )
+                    cand_to_store = target_meta
+
                 fail_count += 1
-                print(f"  -> DEFERRED: {msg}", flush=True)
+                if not was_cached:
+                    network_lookups_count += 1
+                    catalog_calls_count += 1
+                print(f"  -> {fail_status}: {msg}", flush=True)
                 if self.tracker:
                     self.tracker.record_failure(
                         file_path,
                         msg,
-                        status="NEEDS_REVIEW",
+                        status=fail_status,
                         original_metadata=embedded_meta,
-                        candidate_metadata=target_meta,
+                        candidate_metadata=cand_to_store,
                         match_confidence=match_result.score,
+                    )
+                if not was_cached:
+                    throttler.wait_for_next(
+                        is_last=(idx == total_eligible - 1),
+                        ai_used=bool(target_meta.ai_used),
+                        catalog_called=True,
                     )
                 continue
 
             res = processor.apply_metadata(file_path, reader, target_meta, isbn)
             status = res.get("status", "FAILED")
-            was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
             if status == "SUCCESS":
                 success_count += 1
                 cache_tag = " [CACHED]" if was_cached else ""
@@ -379,28 +543,51 @@ class EnrichmentSession:
             was_catalog = bool(
                 not was_cached
                 and target_meta.source
-                and any(p in target_meta.source for p in ("open-library", "google-books"))
+                and any(p in target_meta.source for p in ("open-library", "google-books", "amazon", "goodreads"))
             )
             if was_ai_used:
                 ai_calls_count += 1
+                network_lookups_count += 1
             elif was_catalog:
                 catalog_calls_count += 1
+                network_lookups_count += 1
             else:
                 local_resolved_count += 1
 
-            is_last = idx == len(batch_files) - 1
+            is_last = idx == total_eligible - 1 or (
+                bool(self.max_files and self.max_files > 0 and network_lookups_count >= self.max_files)
+            )
             throttler.wait_for_next(
                 is_last=is_last,
                 ai_used=was_ai_used,
                 catalog_called=was_catalog,
             )
 
+        # Step 2: Submit any newly queued items as an asynchronous Gemini Batch API job (50% token discount)
+        if self.ai_batch_mode:
+            submitted_jobs = ai.submit_queued_batch_jobs()
+            if submitted_jobs:
+                print(
+                    f"  [Gemini Batch API] Submitted {len(submitted_jobs)} asynchronous batch job(s) "
+                    f"({', '.join(submitted_jobs)}) at 50% token cost.",
+                    flush=True,
+                )
+
         elapsed = time.time() - start_time
+        ai_spend_str = ""
+        if self.tracker and hasattr(self.tracker, "get_daily_ai_usage"):
+            daily_ai = self.tracker.get_daily_ai_usage()
+            spent_today = float(daily_ai.get("estimated_cost_usd") or 0.0)
+            reqs_today = int(daily_ai.get("requests_count") or 0)
+            cap_part = f"/${float(max_daily_cost):.2f}" if max_daily_cost is not None else ""
+            ai_spend_str = f" (${spent_today:.4f}{cap_part} today, {reqs_today} reqs)"
+
         print(
             f"[SUMMARY] epubmeta Enrichment Finished in {elapsed:.1f}s | "
-            f"Enriched: {success_count} | Deferred/NotFound: {fail_count} | "
+            f"Enriched: {success_count} (BatchHarvested: {ai_batch_harvested_count}) | "
+            f"AI-Batch-Queued: {ai_batch_queued_count} | Deferred/NotFound: {fail_count} | "
             f"Quarantined: {len(quarantined_paths)} | "
-            f"Fast/Cache: {local_resolved_count} | Catalog: {catalog_calls_count} | AI: {ai_calls_count}",
+            f"Fast/Cache: {local_resolved_count} | Catalog: {catalog_calls_count} | AI: {ai_calls_count}{ai_spend_str}",
             flush=True,
         )
 
