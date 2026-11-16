@@ -457,10 +457,10 @@
     </div>
 
     <!-- Card 3: Scanner File State Cache -->
-    <div class="kpi-card clickable-metric" onclick="openHistoryChartModal('TRACKED')" title="Click to view Tracked File States (SQLite) growth graph over time">
+    <div class="kpi-card clickable-metric" onclick="openHistoryChartModal('TRACKED')" title="Click to view Tracked File States (BookDB) growth graph over time">
         <div class="kpi-card-top">
             <div>
-                <span class="kpi-label">Tracked File States (SQLite) <i class="fa-solid fa-chart-line" style="font-size:0.72rem; color:#38bdf8; margin-left:4px;"></i></span>
+                <span class="kpi-label">Tracked File States (BookDB) <i class="fa-solid fa-chart-line" style="font-size:0.72rem; color:#38bdf8; margin-left:4px;"></i></span>
                 <h2 class="kpi-value" id="kpi-tracked-files">{{ dashboard.conversion.tracked_files_count|intcomma }}</h2>
             </div>
             <div class="kpi-icon blue">
@@ -990,7 +990,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="7" class="empty-table-msg">No conversion records recorded yet in scanner_state.db.</td>
+                        <td colspan="7" class="empty-table-msg">No conversion records recorded yet in BookDB.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -1409,7 +1409,7 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
         QUARANTINED: { label: 'Quarantined', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.2)' },
         FAILED: { label: 'Failed', color: '#f97316', bg: 'rgba(249, 115, 22, 0.2)' },
         CACHE: { label: 'Local Metadata Cache', color: '#ec4899', bg: 'rgba(236, 72, 153, 0.2)' },
-        TRACKED: { label: 'Tracked File States (SQLite)', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.2)' }
+        TRACKED: { label: 'Tracked File States (BookDB)', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.2)' }
     };
 
     async function openHistoryChartModal(seriesKey = 'ALL') {

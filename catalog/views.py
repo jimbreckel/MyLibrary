@@ -143,6 +143,7 @@ def _get_scanner_cycle_metrics(
     eligible_to_enrich_initial = int(persisted.get('eligible_to_enrich_initial') or 0)
     skipped_complete_bookdb = int(persisted.get('skipped_complete_bookdb') or fallback_complete_bookdb or 0)
     new_changed_in_walk = int(persisted.get('new_changed_in_walk') or 0)
+    persisted_dirs_walked = int(persisted.get('dirs_walked') or 0)
     cycle_inspected = int(persisted.get('cycle_inspected') or 0)
     cycle_net_used = int(persisted.get('cycle_net_used') or 0)
     cycle_net_cap = 4000
@@ -175,7 +176,7 @@ def _get_scanner_cycle_metrics(
                 elig_matches = list(re.finditer(elig_pattern, tail_text))
                 # If the eligibility header scrolled past the 512 KB tail and hasn't been persisted yet,
                 # scan up to the last 8 MB of scanner.log once to recover and persist it.
-                if not elig_matches and (skipped_complete_bookdb <= 300000 or eligible_to_enrich_initial <= 0) and fsize > 512 * 1024:
+                if (not elig_matches and (skipped_complete_bookdb <= 300000 or eligible_to_enrich_initial <= 0) or persisted_dirs_walked <= 0) and fsize > 512 * 1024:
                     lf.seek(max(0, fsize - 8 * 1024 * 1024), os.SEEK_SET)
                     wider_text = lf.read().decode('utf-8', errors='replace')
                     elig_matches_wide = list(re.finditer(elig_pattern, wider_text))
@@ -184,6 +185,10 @@ def _get_scanner_cycle_metrics(
                         eligible_to_enrich_initial = int(m_w.group(1))
                         new_changed_in_walk = int(m_w.group(2))
                         skipped_complete_bookdb = int(m_w.group(5))
+                        header_dirty = True
+                    dw_wide = list(re.finditer(r'\[dirs_walked=(\d+)\]', wider_text))
+                    if dw_wide:
+                        persisted_dirs_walked = int(dw_wide[-1].group(1))
                         header_dirty = True
 
             last_elig_pos = -1
@@ -245,7 +250,13 @@ def _get_scanner_cycle_metrics(
 
             cycle_slice = tail_text[last_start_pos:]
             dw_matches = list(re.finditer(r'\[dirs_walked=(\d+)\]', cycle_slice))
-            dirs_walked = int(dw_matches[-1].group(1)) if dw_matches else cycle_slice.count('Walking directory:')
+            if dw_matches:
+                dirs_walked = int(dw_matches[-1].group(1))
+                if dirs_walked != persisted_dirs_walked:
+                    header_dirty = True
+            else:
+                cnt_walk = cycle_slice.count('Walking directory:')
+                dirs_walked = cnt_walk if cnt_walk > 0 else persisted_dirs_walked
             cycle_synced_log = 0
             cycle_skipped_log = 0
             cycle_failed_log = 0
@@ -2630,7 +2641,12 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
     )
     remaining_to_catalog = cyc_metrics['remaining_to_catalog']
     catalog_sync_chunk_info = cyc_metrics['catalog_sync_chunk_info']
-    raw_tracked_books = int(sqlite_stats.get('tracked_files_count') or 0)
+    raw_tracked_all = int(sqlite_stats.get('tracked_files_count') or 0)
+    if raw_tracked_all >= books_files_cnt + periodicals_files_cnt:
+        # `file_states` in PostgreSQL BookDB already tracks `/books`, `/periodicals`, and `/xAdult` together
+        raw_tracked_books = max(books_files_cnt, raw_tracked_all - periodicals_files_cnt - vx_files_cnt)
+    else:
+        raw_tracked_books = raw_tracked_all
     eff_tracked_total = raw_tracked_books + periodicals_files_cnt + (vx_files_cnt if vx_unlocked else 0)
     discovered_files_total = max(
         eff_tracked_total,
