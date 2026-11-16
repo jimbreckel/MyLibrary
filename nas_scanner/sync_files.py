@@ -28,11 +28,9 @@ def process_file_metadata(args):
         return abspath, None, str(e)
 
 
-def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
+def process_tobooks_drop_folder():
     """
-    Pre-Stage 0: Automatically organize incoming periodicals from `/toMags` into `/periodicals`
-    (or `/xAdult` when classified as 'Adult Periodicals'), `/xtoAdult` into `/xAdult`,
-    and incoming books from `/toBooks` into `/books/<Category>/<Shard>/`.
+    Priority 1 Pre-Stage: Automatically organize incoming books from `/toBooks` into `/books/<Category>/<Shard>/`.
     """
     try:
         from pathlib import Path
@@ -49,8 +47,14 @@ def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
                     else:
                         print(f"  [OrgBooks] Error: {r.get('error')}", flush=True)
     except Exception as e_tb:
-        print(f"Warning: Pre-Stage 0 OrgBooks check failed: {e_tb}", flush=True)
+        print(f"Warning: OrgBooks check failed: {e_tb}", flush=True)
 
+
+def process_periodicals_drop_folder(drop_path_str='/toMags', force_adult=False, epubmeta_config=None):
+    """
+    Priority 2/3 Pre-Stage: Organize incoming periodicals from `/toMags` into `/periodicals`
+    (or `/xtoAdult` into `/xAdult` when `force_adult=True`).
+    """
     try:
         from pathlib import Path
         from orgperiodicals.crawler import find_files
@@ -61,33 +65,39 @@ def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
         periodicals_dir = Path('/periodicals')
         adult_dir = Path('/xAdult')
 
-        for drop_path_str, force_adult in [('/toMags', False), ('/xtoAdult', True)]:
-            drop_dir = Path(drop_path_str)
-            if not drop_dir.exists() or not drop_dir.is_dir():
-                continue
-            files = list(find_files(drop_dir, max_depth=3))
-            if not files:
-                continue
-            print(f"\n[OrgPeriodicals] Organizing {len(files)} incoming file(s) from {drop_dir}...", flush=True)
-            for fp in files:
-                try:
-                    res = identify_and_organize_periodical(
-                        file_path=fp,
-                        periodicals_dir=periodicals_dir if periodicals_dir.exists() else None,
-                        adult_dir=adult_dir if adult_dir.exists() else None,
-                        gemini_key=gemini_key,
-                        move_file=True,
-                        force_adult=force_adult,
-                    )
-                    print(f"  [OrgPeriodicals] {res.get('status_msg')}", flush=True)
-                except Exception as f_err:
-                    print(f"  [OrgPeriodicals] Error organizing {fp.name}: {f_err}", flush=True)
+        drop_dir = Path(drop_path_str)
+        if not drop_dir.exists() or not drop_dir.is_dir():
+            return
+        files = list(find_files(drop_dir, max_depth=3))
+        if not files:
+            return
+        print(f"\n[OrgPeriodicals] Organizing {len(files)} incoming file(s) from {drop_dir}...", flush=True)
+        for fp in files:
             try:
-                clean_empty_dirs(drop_dir, periodicals_dir)
-            except Exception:
-                pass
+                res = identify_and_organize_periodical(
+                    file_path=fp,
+                    periodicals_dir=periodicals_dir if periodicals_dir.exists() else None,
+                    adult_dir=adult_dir if adult_dir.exists() else None,
+                    gemini_key=gemini_key,
+                    move_file=True,
+                    force_adult=force_adult,
+                )
+                print(f"  [OrgPeriodicals] {res.get('status_msg')}", flush=True)
+            except Exception as f_err:
+                print(f"  [OrgPeriodicals] Error organizing {fp.name}: {f_err}", flush=True)
+        try:
+            clean_empty_dirs(drop_dir, adult_dir if force_adult else periodicals_dir)
+        except Exception:
+            pass
     except Exception as e:
-        print(f"Warning: Pre-Stage 0 OrgPeriodicals check failed: {e}", flush=True)
+        print(f"Warning: OrgPeriodicals check failed for {drop_path_str}: {e}", flush=True)
+
+
+def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
+    """Backwards-compatible wrapper executing Books -> Magazines -> Adult drop folders in priority order."""
+    process_tobooks_drop_folder()
+    process_periodicals_drop_folder('/toMags', force_adult=False, epubmeta_config=epubmeta_config)
+    process_periodicals_drop_folder('/xtoAdult', force_adult=True, epubmeta_config=epubmeta_config)
 
 
 def upload_file_metadata(args):
@@ -119,7 +129,7 @@ def init_local_db():
 
 
 def load_all_cached_states(directory=None):
-    """Load cached file states for `directory` into a compact tuple dictionary `(modified_at, size, hash)`."""
+    """Load cached file states for `directory` into a compact tuple dictionary `(modified_at, size)`."""
     cache = {}
     try:
         conn = _connect_db()
@@ -128,18 +138,18 @@ def load_all_cached_states(directory=None):
             norm_dir = os.path.abspath(directory)
             dir_prefix = norm_dir if norm_dir.endswith(os.sep) else norm_dir + os.sep
             cursor.execute(
-                'SELECT filepath, modified_at, size, hash FROM file_states '
+                'SELECT filepath, modified_at, size FROM file_states '
                 'WHERE filepath LIKE ? OR filepath = ?',
                 (dir_prefix + '%', norm_dir)
             )
         else:
-            cursor.execute('SELECT filepath, modified_at, size, hash FROM file_states')
+            cursor.execute('SELECT filepath, modified_at, size FROM file_states')
         while True:
             rows = cursor.fetchmany(50000)
             if not rows:
                 break
             for row in rows:
-                cache[row[0]] = (row[1], row[2], row[3])
+                cache[row[0]] = (row[1], row[2])
         cursor.close()
         conn.close()
     except Exception as e:
@@ -299,7 +309,7 @@ def scan_directory(
 
     # 1. Load cached file states first and stream os.walk directly (avoiding a 1.48M-item scan_items list)
     files_to_parse = []  # list of (abspath, modified_at, size, name)
-    unchanged_for_enrich = []  # list of (abspath, cached_hash) only for enrich_allowed_exts
+    unchanged_for_enrich = []  # list of abspath strings only for enrich_allowed_exts
     cache = load_all_cached_states(directory)
 
     def _inspect_entry(abspath: str, name: str):
@@ -311,12 +321,17 @@ def scan_directory(
             size = 0 if os.path.isdir(abspath) else stat.st_size
 
             cached = cache.pop(abspath, None)
-            is_unchanged = (not force and cached is not None and cached[0] == modified_at and cached[1] == size)
+            is_unchanged = (
+                not force
+                and cached is not None
+                and (cached[0] == modified_at or cached[0] == 'backfilled')
+                and cached[1] == size
+            )
 
             if is_unchanged:
                 skipped_files += 1
                 if want_enrich and os.path.splitext(abspath)[1].lower() in enrich_allowed_exts:
-                    unchanged_for_enrich.append((abspath, cached[2]))
+                    unchanged_for_enrich.append(abspath)
                 return
 
             files_to_parse.append((abspath, modified_at, size, name))
@@ -324,15 +339,24 @@ def scan_directory(
             print(f"  Error reading stats for {name}: {e}")
             failed_files += 1
 
+    dirs_walked_count = 0
     if item_type == 'AUDIOBOOK':
+        dirs_walked_count = 1
+        print(f"  Walking directory: {directory} [dirs_walked={dirs_walked_count}]", flush=True)
         for name in os.listdir(directory):
             path = os.path.join(directory, name)
             if os.path.isdir(path):
                 _inspect_entry(os.path.abspath(path), name)
     else:
         for root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if d.lower() not in excluded_dirs and not d.startswith('._')]
-            print(f"  Walking directory: {root}", flush=True)
+            # Prioritize pure book folders ahead of magazine-like subfolders inside /books
+            dirs[:] = sorted(
+                [d for d in dirs if d.lower() not in excluded_dirs and not d.startswith('._')],
+                key=lambda d: (1 if ('mag' in d.lower() or 'periodical' in d.lower()) else 0, d.lower()),
+            )
+            dirs_walked_count += 1
+            if dirs_walked_count <= 5 or root.count('/') <= 2 or dirs_walked_count % 100 == 0:
+                print(f"  Walking directory: {root} [dirs_walked={dirs_walked_count}]", flush=True)
             if not recursive:
                 dirs.clear()
             for file in files:
@@ -343,6 +367,7 @@ def scan_directory(
                     continue
                 filepath = os.path.join(root, file)
                 _inspect_entry(os.path.abspath(filepath), file)
+        print(f"  Finished walking {directory} [dirs_walked={dirs_walked_count}] (discovered {total_files} files)", flush=True)
 
     # Compute deleted paths now from remaining cache entries and free 1.48M-entry cache BEFORE EnrichmentSession loads
     norm_dir = os.path.abspath(directory)
@@ -360,6 +385,7 @@ def scan_directory(
     enrich_session = None
     new_enrich_candidates = []
     backfill_enrich_candidates = []
+    total_backfill_eligible = 0
     if want_enrich:
         try:
             from epubmeta.scanner_integration import EnrichmentSession
@@ -370,12 +396,15 @@ def scan_directory(
                 epubmeta_config=epubmeta_config,
                 calibre_libraries=calibre_libraries,
             )
+            max_keep_backfill = max((enrich_session.max_files or 4000) * 4, 16000)
             for abspath, _, _, _ in files_to_parse:
                 if enrich_session.is_eligible_for_enrichment(abspath, cached_hash=None, force=force):
                     new_enrich_candidates.append(abspath)
-            for abspath, cached_hash in unchanged_for_enrich:
-                if enrich_session.is_eligible_for_enrichment(abspath, cached_hash=cached_hash, force=False):
-                    backfill_enrich_candidates.append(abspath)
+            for abspath in unchanged_for_enrich:
+                if enrich_session.is_eligible_for_enrichment(abspath, cached_hash=None, force=False):
+                    total_backfill_eligible += 1
+                    if len(backfill_enrich_candidates) < max_keep_backfill:
+                        backfill_enrich_candidates.append(abspath)
         except Exception as em_err:
             print(f"Warning: Could not initialize epubmeta enrichment session: {em_err}", flush=True)
             enrich_session = None
@@ -396,6 +425,7 @@ def scan_directory(
             new_candidates=new_enrich_candidates,
             backfill_candidates=backfill_enrich_candidates,
             scan_root=directory,
+            total_backfill_eligible=total_backfill_eligible,
         )
         enriched_synced_set = enrich_res.get("enriched_synced_paths", set())
         quarantined_paths = enrich_res.get("quarantined_paths", [])
@@ -577,8 +607,22 @@ if __name__ == '__main__':
         with ScannerLock(lock_file):
             print(f"Connecting to central server: {server_url}")
 
-            if not args.dir:
-                process_drop_folders_with_orgperiodicals(epubmeta_config)
+            # Strictly prioritize scan folders: 1. Books (/books) -> 2. Magazines (/periodicals) -> 3. Adult (/xAdult) -> 4. Audiobooks
+            def _folder_priority_key(f_cfg):
+                p_str = str(f_cfg.get('path') or '').lower()
+                f_type = str(f_cfg.get('type') or 'BOOK').upper()
+                if f_type == 'BOOK' and 'adult' not in p_str:
+                    return 0
+                if f_type == 'MAGAZINE' and 'adult' not in p_str and 'xadult' not in p_str:
+                    return 1
+                if 'adult' in p_str or 'xadult' in p_str:
+                    return 2
+                return 3
+
+            folders_to_scan = sorted(folders_to_scan, key=_folder_priority_key)
+            did_tobooks = False
+            did_tomags = False
+            did_xtoadult = False
 
             total_dis = 0
             total_sync = 0
@@ -593,6 +637,19 @@ if __name__ == '__main__':
 
                 if not path:
                     continue
+
+                # Run corresponding incoming drop folder right before scanning its target library tier
+                if not args.dir:
+                    p_low = str(path).lower()
+                    if item_type == 'BOOK' and not did_tobooks:
+                        process_tobooks_drop_folder()
+                        did_tobooks = True
+                    elif item_type == 'MAGAZINE' and 'adult' not in p_low and not did_tomags:
+                        process_periodicals_drop_folder('/toMags', force_adult=False, epubmeta_config=epubmeta_config)
+                        did_tomags = True
+                    elif ('adult' in p_low or 'xadult' in p_low) and not did_xtoadult:
+                        process_periodicals_drop_folder('/xtoAdult', force_adult=True, epubmeta_config=epubmeta_config)
+                        did_xtoadult = True
 
                 if not os.path.exists(path):
                     print(f"Error: Directory path does not exist: {path}. Skipping.")

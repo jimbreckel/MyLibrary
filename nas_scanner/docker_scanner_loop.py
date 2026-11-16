@@ -303,8 +303,12 @@ def main():
                 summary_reports = {}
 
                 # Run unified book/magazine scanner + epubmeta enricher (single os.walk pass)
+                sync_files_crashed = False
                 if os.path.exists("sync_files.py"):
-                    summary_reports["sync_files.py (Unified Sync & Enrichment)"] = run_script("sync_files.py")
+                    sf_lines = run_script("sync_files.py")
+                    summary_reports["sync_files.py (Unified Sync & Enrichment)"] = sf_lines
+                    if any("[ERROR]" in ln for ln in sf_lines):
+                        sync_files_crashed = True
 
                 # Run audiobook scanner
                 if os.path.exists("sync_audiobooks.py"):
@@ -317,6 +321,14 @@ def main():
                 send_status_email(summary_reports)
 
                 finish_dt = datetime.now(tz=_EST_TZ)
+                if sync_files_crashed:
+                    retry_dt = finish_dt + timedelta(seconds=60)
+                    _write_schedule("sleeping", cycle_start_dt, retry_dt, finished_dt=finish_dt)
+                    logger.warning(
+                        "\nsync_files.py exited abnormally; retrying scan cycle in 60s instead of waiting 4 hours..."
+                    )
+                    time.sleep(60.0)
+                    continue
                 elapsed_seconds = time.monotonic() - cycle_start_mono
                 remaining_seconds = interval_seconds - elapsed_seconds
 

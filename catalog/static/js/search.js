@@ -233,7 +233,7 @@ const initCatalogSearch = () => {
         if ((cleanedModalTitle.includes('.') && !cleanedModalTitle.includes(' ')) || cleanedModalTitle.includes('_')) {
             cleanedModalTitle = cleanedModalTitle.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
         }
-        const shortSearchTitle = (cleanedModalTitle && cleanedModalTitle.length > 65 && cleanedModalTitle.includes(':'))
+        const shortSearchTitle = (cleanedModalTitle && cleanedModalTitle.length > 35 && cleanedModalTitle.includes(':') && cleanedModalTitle.split(':')[0].trim().length >= 6)
             ? cleanedModalTitle.split(':')[0].trim()
             : cleanedModalTitle;
         const covInput = document.getElementById('cover-search-input');
@@ -737,12 +737,7 @@ const initCatalogSearch = () => {
                                 btn.style.background = 'rgba(16,185,129,0.15)';
                                 btn.style.borderColor = 'rgba(16,185,129,0.3)';
                                 btn.style.color = '#34d399';
-
-                                alert(data.message);
-                                // Refresh the page to reflect the new file location
-                                setTimeout(() => {
-                                    window.location.reload();
-                                }, 1000);
+                                btn.title = data.message || 'Added to Calibre';
                             } else {
                                 btn.disabled = false;
                                 btn.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> Error`;
@@ -1948,12 +1943,15 @@ const initCatalogSearch = () => {
                             fldLbl.textContent = ser ? `${topFld} › ${ser}` : topFld;
                         }
                         const descEl = card.querySelector('.card-description');
-                        if (descEl && data.message) {
-                            descEl.textContent = data.message;
+                        if (descEl && (data.description || data.message)) {
+                            descEl.textContent = data.description || data.message;
                         }
                         applyCardMetadataUpdate(targetId, {
                             title: data.title,
                             authors: data.authors,
+                            publisher: data.publisher,
+                            pub_date: data.pub_date,
+                            description: data.description || data.message,
                             cover_url: data.cover_url,
                         }, false);
                         return;
@@ -1978,7 +1976,7 @@ const initCatalogSearch = () => {
                         needsEnrichingDelta: (!wasEnriched && !wasInReview) ? -1 : 0,
                     });
                     adjustTomagsCounter(1);
-                    setCardMovedToMagsState(targetId, data.file_id || fileId, data.moved_files || [], data.message);
+                    setCardMovedToMagsState(targetId, data.file_id || fileId, data.moved_files || [], data.message, data);
                 } else {
                     btn.disabled = false;
                     btn.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Move Failed`;
@@ -2093,24 +2091,42 @@ const initCatalogSearch = () => {
         el.textContent = Math.max(0, cur + delta).toLocaleString();
     }
 
-    function setCardMovedToMagsState(targetId, fileId, movedFiles, message) {
+    function setCardMovedToMagsState(targetId, fileId, movedFiles, message, data = null) {
         const card = targetId ? document.getElementById(`card-${targetId}`) : null;
         if (!card) return;
-        card.style.opacity = '0.92';
+        if (data && (data.title || data.authors || data.cover_url || data.pub_date || data.description)) {
+            applyCardMetadataUpdate(targetId, {
+                title: data.title,
+                authors: data.authors,
+                publisher: data.publisher,
+                pub_date: data.pub_date,
+                description: data.description || message,
+                cover_url: data.cover_url,
+            }, false);
+        }
+        card.style.opacity = '0.96';
+        const topFld = (data && data.top_folder) ? data.top_folder : 'Periodicals';
+        card.setAttribute('data-top-folder', topFld);
+        const fldLbl = card.querySelector('.card-folder-label');
+        if (fldLbl && topFld) {
+            const ser = (data && data.periodical_series) ? data.periodical_series : '';
+            fldLbl.textContent = ser ? `${topFld} › ${ser}` : topFld;
+        }
         const typeBadge = card.querySelector('.card-type-badge');
         if (typeBadge) {
+            const newPillType = topFld === 'Archive-X' ? 'ARCHIVE-X' : 'MAGAZINE';
             updateTypePillAfterMove(
                 typeBadge,
-                'MAGAZINE',
+                newPillType,
                 false,
                 fileId || '',
-                'MAGAZINE',
-                'Moved to Magazines — Click to Undo and move directly back to original folder'
+                newPillType,
+                `Enriched & moved to ${topFld} — Click to Undo and move directly back to original folder`
             );
         }
         const descEl = card.querySelector('.card-description');
-        if (descEl && message) {
-            descEl.textContent = message;
+        if (descEl && ((data && data.description) || message)) {
+            descEl.textContent = (data && data.description) || message;
         }
         const reBtn = card.querySelector('.btn-reenrich-card');
         if (reBtn) reBtn.style.display = 'none';
@@ -2613,7 +2629,7 @@ const initCatalogSearch = () => {
         window._activeCoverSearchAbort = ctrl;
         const timeoutId = setTimeout(() => {
             try { ctrl.abort(); } catch (_) {}
-        }, 9000);
+        }, 16000);
 
         const q = (covInput ? covInput.value : '').trim();
         if (statusEl) statusEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Searching Web Images, Goodreads, Apple Books, Google Books &amp; Open Library for covers...`;
@@ -3272,7 +3288,7 @@ const initCatalogSearch = () => {
             if (covInput) {
                 const cleanAuth = (window._activeModalItem.authors && !['unknown', 'unknown author', '..'].includes(window._activeModalItem.authors.toLowerCase().trim()))
                     ? window._activeModalItem.authors : '';
-                const shortT = (window._activeModalItem.title && window._activeModalItem.title.length > 65 && window._activeModalItem.title.includes(':'))
+                const shortT = (window._activeModalItem.title && window._activeModalItem.title.length > 35 && window._activeModalItem.title.includes(':') && window._activeModalItem.title.split(':')[0].trim().length >= 6)
                     ? window._activeModalItem.title.split(':')[0].trim()
                     : (window._activeModalItem.title || '');
                 covInput.value = [shortT, cleanAuth].filter(Boolean).join(' ').trim();
@@ -4162,7 +4178,7 @@ const initCatalogSearch = () => {
         window._activeErCoverSearchAbort = ctrl;
         const timeoutId = setTimeout(() => {
             try { ctrl.abort(); } catch (_) {}
-        }, 9000);
+        }, 16000);
 
         const curTitle = (document.getElementById('er-input-title')?.value || data?.candidate_title || data?.orig_title || '').trim();
         const curAuth = (document.getElementById('er-input-author')?.value || data?.candidate_authors || data?.orig_authors || '').trim();
@@ -4666,7 +4682,7 @@ const initCatalogSearch = () => {
                 if (res.ok && res.moved_to_tomags) {
                     transitionCardEnrichBucket(res.item_id || itemId, 'tomags', 'needs_review');
                     adjustTomagsCounter(1);
-                    setCardMovedToMagsState(res.item_id || itemId, res.file_id || fileId, res.moved_files || [], res.message);
+                    setCardMovedToMagsState(res.item_id || itemId, res.file_id || fileId, res.moved_files || [], res.message, res);
                     window.closeEnrichReviewModal();
                     return;
                 }
@@ -5056,7 +5072,7 @@ const initCatalogSearch = () => {
                 if (res.ok && res.moved_to_tomags) {
                     transitionCardEnrichBucket(res.item_id || itemId, 'tomags', 'needs_review');
                     adjustTomagsCounter(1);
-                    setCardMovedToMagsState(res.item_id || itemId, res.file_id || fileId, res.moved_files || [], res.message);
+                    setCardMovedToMagsState(res.item_id || itemId, res.file_id || fileId, res.moved_files || [], res.message, res);
                     window.closeEnrichReviewModal();
                     return;
                 }
@@ -5534,7 +5550,7 @@ const initCatalogSearch = () => {
                     const targetId = data.item_id || itemId;
                     transitionCardEnrichBucket(targetId, 'tomags', wasInReview ? 'needs_review' : 'needs_enriching');
                     adjustTomagsCounter(1);
-                    setCardMovedToMagsState(targetId, data.file_id || '', data.moved_files || [], data.message);
+                    setCardMovedToMagsState(targetId, data.file_id || '', data.moved_files || [], data.message, data);
                     return;
                 }
                 if (data.ok) {

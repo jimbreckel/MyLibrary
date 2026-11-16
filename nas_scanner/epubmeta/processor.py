@@ -358,6 +358,8 @@ class BookProcessor:
                 "metadata": metadata.to_dict(),
             }
         )
+        if len(self._memory_cache) > 500:
+            del self._memory_cache[:-500]
         if self.state_tracker:
             self.state_tracker.save_cached_metadata(
                 file_path,
@@ -795,14 +797,27 @@ class BookProcessor:
                 if ai_meta and (ai_meta.isbn13 == isbn or fetched_meta == ai_meta or force_ai):
                     target_meta.ai_used = True
 
-                # Preserve subtitle and proper Title Case from clue/filename when catalog title is lowercase or shorter prefix
+                from .filename_parser import clean_book_title
+                if target_meta.title:
+                    target_meta.title = clean_book_title(target_meta.title) or target_meta.title.strip()
+
+                # Preserve subtitle and proper Title Case from clue/filename ONLY when candidate_title has a genuine subtitle separator (':' or ' - ')
                 if target_meta.title and candidate_title:
-                    t_lower = target_meta.title.strip().lower()
-                    c_lower = candidate_title.strip().lower()
-                    if c_lower.startswith(t_lower) and len(candidate_title) > len(target_meta.title):
-                        target_meta.title = candidate_title
-                    elif t_lower == c_lower and sum(1 for ch in candidate_title if ch.isupper()) > sum(1 for ch in target_meta.title if ch.isupper()):
-                        target_meta.title = candidate_title
+                    clean_cand = clean_book_title(candidate_title) or candidate_title.strip()
+                    t_strip = target_meta.title.strip()
+                    t_lower = t_strip.lower()
+                    c_lower = clean_cand.strip().lower()
+                    if c_lower.startswith(t_lower) and len(clean_cand.strip()) > len(t_strip):
+                        rem = clean_cand.strip()[len(t_strip):]
+                        if _re_t.match(r"^\s*(?::| - )\s*[A-Za-z]", rem) and not _re_t.search(
+                            r"(?:97[89]\d{10}|\b\d{9}[\dXx]\b|\b(?:retail|ebook|web|pdf|epub|mobi|azw3|nodrm)\b)",
+                            rem,
+                            _re_t.I,
+                        ):
+                            clean_rem = _re_t.sub(r"^\s*(?::| - )\s*", "", rem).strip()
+                            target_meta.title = f"{t_strip}: {clean_rem}"
+                    elif t_lower == c_lower and sum(1 for ch in clean_cand if ch.isupper()) > sum(1 for ch in t_strip if ch.isupper()):
+                        target_meta.title = clean_cand.strip()
 
                 was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
                 from_front_matter = bool(
@@ -825,13 +840,11 @@ class BookProcessor:
                     self._match_scores[str(file_path)] = match_result.score
 
                 if match_result.is_confident:
-                    # If the confident match (e.g., from a specific edition ISBN) is missing synopsis, publisher, or cover,
-                    # supplement missing fields via a title+author query or the next front-matter ISBN before finishing.
+                    # If the confident match (e.g., from a specific edition ISBN) is missing synopsis or cover,
+                    # supplement missing fields via a title+author query before finishing.
                     if (
                         not best_target_meta.description
-                        or not best_target_meta.publisher
                         or not best_target_meta.cover_url
-                        or not best_target_meta.subjects
                     ):
                         q_title = best_target_meta.title or candidate_title
                         q_author = (best_target_meta.authors[0] if best_target_meta.authors else candidate_author)
@@ -1352,6 +1365,15 @@ class BookProcessor:
                     match_confidence=self._match_scores.get(norm_key),
                 )
             return result
+        finally:
+            norm_key = str(file_path)
+            self._orig_hashes.pop(norm_key, None)
+            self._orig_sha256.pop(norm_key, None)
+            self._orig_sizes.pop(norm_key, None)
+            self._orig_metadata.pop(norm_key, None)
+            self._match_scores.pop(norm_key, None)
+            self._front_texts.pop(norm_key, None)
+            self._front_matter_isbns.clear()
 
     def process_file(self, file_path: Path) -> Dict[str, Any]:
         """Process a single book file automatically."""

@@ -311,7 +311,12 @@ def scan_directory(
             size = 0 if os.path.isdir(abspath) else stat.st_size
 
             cached = cache.pop(abspath, None)
-            is_unchanged = (not force and cached is not None and cached[0] == modified_at and cached[1] == size)
+            is_unchanged = (
+                not force
+                and cached is not None
+                and (cached[0] == modified_at or cached[0] == 'backfilled')
+                and cached[1] == size
+            )
 
             if is_unchanged:
                 skipped_files += 1

@@ -81,6 +81,8 @@ WSGI_APPLICATION = 'core.wsgi.application'
 DATABASES = {
     'default': env.db('DATABASE_URL')
 }
+if 'postgresql' in DATABASES['default'].get('ENGINE', ''):
+    DATABASES['default'].setdefault('OPTIONS', {})['options'] = '-c jit=off'
 
 
 # Password validation

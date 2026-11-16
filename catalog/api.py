@@ -89,6 +89,14 @@ class FileSyncAPIView(APIView):
 
         # Required catalog metadata for fuzzy match
         title = truncate_str(data.get('title') or '', 512)
+        if title:
+            try:
+                from .opds import _clean_book_stem_for_grouping
+                cleaned_t = _clean_book_stem_for_grouping(title)
+                if cleaned_t and len(cleaned_t) >= 2:
+                    title = truncate_str(cleaned_t, 512)
+            except Exception:
+                pass
         if not title:
             title = file_name
         authors = truncate_str(data.get('authors') or '', 512)
@@ -102,12 +110,24 @@ class FileSyncAPIView(APIView):
         publisher = truncate_str(data.get('publisher'), 256)
         description = data.get('description')
         item_type = truncate_str(data.get('item_type', 'BOOK'), 16)
+        fp_norm = str(file_path or '').replace('\\', '/')
+        if (
+            fp_norm.startswith(('/periodicals/', '/toMags/', '/xAdult/', '/xtoAdult/'))
+            or '/Media/Periodicals/' in fp_norm
+            or '/Media/toMags/' in fp_norm
+            or '/Media/xAdult/' in fp_norm
+            or '/Media/xtoAdult/' in fp_norm
+        ):
+            item_type = 'MAGAZINE'
         cover_thumbnail = data.get('cover_thumbnail')
         pub_date = safe_parse_date(data.get('pub_date'))
 
         # 1. Check if this exact file (by hash) is already registered
-        file_loc = FileLocation.objects.filter(file_hash=file_hash).first()
+        file_loc = FileLocation.objects.select_related('catalog_item').filter(file_hash=file_hash).first()
         if file_loc:
+            if item_type == 'MAGAZINE' and file_loc.catalog_item and file_loc.catalog_item.item_type != 'MAGAZINE':
+                file_loc.catalog_item.item_type = 'MAGAZINE'
+                file_loc.catalog_item.save(update_fields=['item_type', 'updated_at'])
             # File is already in database. Check if its location/path or library info has changed
             if file_loc.file_path != file_path or file_loc.library_name != library_name or file_loc.library_path != library_path:
                 file_loc.file_path = file_path
@@ -173,6 +193,9 @@ class FileSyncAPIView(APIView):
             if pub_date and item.pub_date != pub_date:
                 item.pub_date = pub_date
                 updated = True
+            if item_type == 'MAGAZINE' and item.item_type != 'MAGAZINE':
+                item.item_type = 'MAGAZINE'
+                updated = True
             if cover_thumbnail:
                 if not item.cover_thumbnail:
                     item.cover_thumbnail = cover_thumbnail
@@ -198,8 +221,9 @@ class FileSyncAPIView(APIView):
             if updated:
                 item.save()
             try:
-                from .opds import evaluate_and_record_item_cover_status, is_file_enriched
+                from .opds import evaluate_and_record_item_cover_status, is_file_enriched, merge_duplicate_catalog_items_for_item
                 if orig_file_hash or is_file_enriched(file_path):
+                    merge_duplicate_catalog_items_for_item(item)
                     evaluate_and_record_item_cover_status(item)
             except Exception:
                 pass
@@ -207,6 +231,16 @@ class FileSyncAPIView(APIView):
 
         # 3. Completely new file instance. Try to find a matching CatalogItem (fuzzy match)
         item = find_similar_item(title=title, authors=authors, isbn=isbn, asin=asin)
+        if item and item_type == 'MAGAZINE' and item.item_type != 'MAGAZINE':
+            existing_paths = list(item.files.values_list('file_path', flat=True))
+            if not existing_paths or all(
+                str(p or '').startswith(('/periodicals/', '/toMags/', '/xAdult/', '/xtoAdult/'))
+                for p in existing_paths
+            ):
+                item.item_type = 'MAGAZINE'
+                item.save(update_fields=['item_type', 'updated_at'])
+            else:
+                item = None
         
         created_new_item = False
         if not item:
@@ -226,6 +260,9 @@ class FileSyncAPIView(APIView):
         else:
             # Update existing CatalogItem missing details with new data
             updated = False
+            if item_type == 'MAGAZINE' and item.item_type != 'MAGAZINE':
+                item.item_type = 'MAGAZINE'
+                updated = True
             if isbn and not item.isbn:
                 item.isbn = isbn
                 updated = True

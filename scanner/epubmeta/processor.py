@@ -795,14 +795,27 @@ class BookProcessor:
                 if ai_meta and (ai_meta.isbn13 == isbn or fetched_meta == ai_meta or force_ai):
                     target_meta.ai_used = True
 
-                # Preserve subtitle and proper Title Case from clue/filename when catalog title is lowercase or shorter prefix
+                from .filename_parser import clean_book_title
+                if target_meta.title:
+                    target_meta.title = clean_book_title(target_meta.title) or target_meta.title.strip()
+
+                # Preserve subtitle and proper Title Case from clue/filename ONLY when candidate_title has a genuine subtitle separator (':' or ' - ')
                 if target_meta.title and candidate_title:
-                    t_lower = target_meta.title.strip().lower()
-                    c_lower = candidate_title.strip().lower()
-                    if c_lower.startswith(t_lower) and len(candidate_title) > len(target_meta.title):
-                        target_meta.title = candidate_title
-                    elif t_lower == c_lower and sum(1 for ch in candidate_title if ch.isupper()) > sum(1 for ch in target_meta.title if ch.isupper()):
-                        target_meta.title = candidate_title
+                    clean_cand = clean_book_title(candidate_title) or candidate_title.strip()
+                    t_strip = target_meta.title.strip()
+                    t_lower = t_strip.lower()
+                    c_lower = clean_cand.strip().lower()
+                    if c_lower.startswith(t_lower) and len(clean_cand.strip()) > len(t_strip):
+                        rem = clean_cand.strip()[len(t_strip):]
+                        if _re_t.match(r"^\s*(?::| - )\s*[A-Za-z]", rem) and not _re_t.search(
+                            r"(?:97[89]\d{10}|\b\d{9}[\dXx]\b|\b(?:retail|ebook|web|pdf|epub|mobi|azw3|nodrm)\b)",
+                            rem,
+                            _re_t.I,
+                        ):
+                            clean_rem = _re_t.sub(r"^\s*(?::| - )\s*", "", rem).strip()
+                            target_meta.title = f"{t_strip}: {clean_rem}"
+                    elif t_lower == c_lower and sum(1 for ch in clean_cand if ch.isupper()) > sum(1 for ch in t_strip if ch.isupper()):
+                        target_meta.title = clean_cand.strip()
 
                 was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
                 from_front_matter = bool(

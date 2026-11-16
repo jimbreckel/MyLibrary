@@ -375,6 +375,36 @@
             <div class="activity-current-line" id="live-activity-line">
                 {{ dashboard.scanner.current_activity }}
             </div>
+            <div class="activity-cycle-counts-row" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.45rem; margin-top:0.45rem; font-size:0.75rem;">
+                <span style="color:#94a3b8; font-weight:600; margin-right:0.15rem;"><i class="fa-solid fa-chart-simple" style="color:#a855f7;"></i> Current Scan (<span id="cycle-start-time-lbl">{{ dashboard.scanner.cycle_counts.cycle_started_at|default:"Current" }}</span>):</span>
+                <span class="library-pill" style="background:rgba(148,163,184,0.12); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;" title="Directories walked in current scan cycle">
+                    <i class="fa-regular fa-folder-open"></i> Dirs Walked: <strong id="cyc-dirs-walked">{{ dashboard.scanner.cycle_counts.dirs_walked|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(56,189,248,0.13); border:1px solid rgba(56,189,248,0.35); color:#38bdf8;" title="Files added or synced into BookDB in current scan cycle">
+                    <i class="fa-solid fa-plus"></i> Added / Synced: <strong id="cyc-added-synced">{{ dashboard.scanner.cycle_counts.added_synced|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(168,85,247,0.14); border:1px solid rgba(168,85,247,0.35); color:#c084fc;" title="Files inspected by enrichment pipeline in current scan cycle">
+                    <i class="fa-solid fa-magnifying-glass"></i> Inspected: <strong id="cyc-inspected">{{ dashboard.scanner.cycle_counts.inspected|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(74,222,128,0.15); border:1px solid rgba(74,222,128,0.4); color:#4ade80;" title="Items enriched (SUCCESS) in current scan cycle">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Enriched: <strong id="cyc-enriched">{{ dashboard.scanner.cycle_counts.enriched|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(251,191,36,0.14); border:1px solid rgba(251,191,36,0.38); color:#fbbf24;" title="Items placed in Needs Review in current scan cycle">
+                    <i class="fa-solid fa-clipboard-question"></i> In Review: <strong id="cyc-in-review">{{ dashboard.scanner.cycle_counts.in_review|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(249,115,22,0.13); border:1px solid rgba(249,115,22,0.35); color:#fb923c;" title="Items with No ISBN / No Match in current scan cycle">
+                    <i class="fa-solid fa-circle-question"></i> No Match: <strong id="cyc-no-match">{{ dashboard.scanner.cycle_counts.no_match|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(148,163,184,0.12); border:1px solid rgba(148,163,184,0.28); color:#94a3b8;" title="Unchanged files skipped during directory walk">
+                    <i class="fa-solid fa-forward"></i> Skipped: <strong id="cyc-skipped">{{ dashboard.scanner.cycle_counts.skipped|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(248,113,113,0.13); border:1px solid rgba(248,113,113,0.35); color:#f87171;" title="Failed / Quarantined / DRM files in current scan cycle">
+                    <i class="fa-solid fa-triangle-exclamation"></i> Failed/DRM: <strong id="cyc-failed">{{ dashboard.scanner.cycle_counts.failed|default:0|intcomma }}</strong>
+                </span>
+                <span class="library-pill" style="background:rgba(99,102,241,0.13); border:1px solid rgba(99,102,241,0.35); color:#a5b4fc;" title="External network metadata lookups used vs cycle cap">
+                    <i class="fa-solid fa-globe"></i> Net: <strong id="cyc-net-used">{{ dashboard.scanner.cycle_counts.net_used|default:0|intcomma }}</strong>/<span id="cyc-net-cap">{{ dashboard.scanner.cycle_counts.net_cap|default:4000|intcomma }}</span>
+                </span>
+            </div>
         </div>
     </div>
     <div class="activity-meta" style="display:flex; flex-direction:column; align-items:flex-end; gap:0.25rem;">
@@ -504,6 +534,113 @@
             <span><i class="fa-solid fa-barcode"></i> ISBN: <strong>{{ dashboard.catalog.with_isbn|intcomma }}</strong> ({{ dashboard.catalog.with_isbn_pct }}%)</span>
             <span><i class="fa-solid fa-image"></i> Cover: <strong>{{ dashboard.catalog.with_cover|intcomma }}</strong> ({{ dashboard.catalog.with_cover_pct }}%)</span>
         </div>
+    </div>
+</section>
+
+<!-- Enrichment Breakdown by Catalog Type -->
+<section class="dash-panel full-width-panel" id="enrichment-by-type-panel" style="margin-bottom: 1.35rem;">
+    <div class="dash-panel-header">
+        <div>
+            <h3><i class="fa-solid fa-layer-group purple"></i> Enrichment Breakdown by Catalog Type</h3>
+            <p>Live enrichment progress, metadata coverage, cover artwork, review queue, and remaining items across Books, Periodicals, Kindle, and Audible</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+            <span class="panel-pill"><span id="type-bd-total-items">{{ dashboard.catalog.total_items|intcomma }}</span> Catalog Items</span>
+            <span class="panel-pill" style="background:rgba(56,189,248,0.14); border-color:rgba(56,189,248,0.35); color:#38bdf8;"><span id="type-bd-total-files">{{ dashboard.catalog.total_files|intcomma }}</span> Physical Files</span>
+        </div>
+    </div>
+
+    <div class="table-responsive">
+        <table class="dash-table">
+            <thead>
+                <tr>
+                    <th>Catalog Type &amp; Pipeline</th>
+                    <th style="text-align:right;">Catalog Items</th>
+                    <th style="text-align:right;">Physical Files</th>
+                    <th style="min-width:210px;">Enriched / Verified</th>
+                    <th style="min-width:185px;">Cover Artwork</th>
+                    <th style="text-align:right;">ISBN / ASIN</th>
+                    <th style="text-align:right;">Synopsis</th>
+                    <th style="text-align:right;">In Review</th>
+                    <th style="text-align:right;">No Match</th>
+                    <th style="text-align:right;">Remaining to Enrich</th>
+                    <th style="text-align:right;">Browse</th>
+                </tr>
+            </thead>
+            <tbody id="enrichment-by-type-tbody">
+                {% for row in dashboard.enrichment_by_type %}
+                <tr data-item-type="{{ row.item_type }}">
+                    <td>
+                        <div style="display:flex; align-items:center; gap:0.6rem;">
+                            <span class="kpi-icon {{ row.accent }}" style="width:32px; height:32px; font-size:0.85rem; border-radius:8px; flex-shrink:0;">
+                                <i class="fa-solid {{ row.icon }}"></i>
+                            </span>
+                            <div>
+                                <a href="{{ row.catalog_url }}" style="color:#f8fafc; font-weight:700; text-decoration:none; font-size:0.88rem;">{{ row.label }}</a>
+                                <div style="font-size:0.72rem; color:#94a3b8;">{{ row.pipeline }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="td-mono" style="text-align:right; font-weight:700; color:#f8fafc;" id="tbd-items-{{ row.item_type }}">{{ row.total_items|intcomma }}</td>
+                    <td class="td-mono" style="text-align:right; color:#cbd5e1;" id="tbd-files-{{ row.item_type }}">{{ row.total_files|intcomma }}</td>
+                    <td>
+                        <div style="display:flex; justify-content:space-between; font-size:0.78rem; margin-bottom:4px;">
+                            <a href="{{ row.enriched_url }}" style="color:#4ade80; font-weight:700; text-decoration:none;">
+                                <i class="fa-solid fa-check-double"></i> <span id="tbd-enr-{{ row.item_type }}">{{ row.enriched_items|intcomma }}</span>
+                            </a>
+                            <span class="td-mono" style="color:#94a3b8;" id="tbd-enr-pct-{{ row.item_type }}">{{ row.enriched_pct }}%</span>
+                        </div>
+                        <div class="progress-track" style="height:6px;">
+                            <div class="progress-fill fill-green" id="tbd-enr-bar-{{ row.item_type }}" style="width: {{ row.enriched_pct }}%;"></div>
+                        </div>
+                    </td>
+                    <td>
+                        <div style="display:flex; justify-content:space-between; font-size:0.78rem; margin-bottom:4px;">
+                            <span style="color:#fbbf24; font-weight:600;"><i class="fa-solid fa-image"></i> <span id="tbd-cov-{{ row.item_type }}">{{ row.with_cover|intcomma }}</span></span>
+                            <span class="td-mono" style="color:#94a3b8;" id="tbd-cov-pct-{{ row.item_type }}">{{ row.with_cover_pct }}%</span>
+                        </div>
+                        <div class="progress-track" style="height:6px;">
+                            <div class="progress-fill fill-amber" id="tbd-cov-bar-{{ row.item_type }}" style="width: {{ row.with_cover_pct }}%;"></div>
+                        </div>
+                    </td>
+                    <td class="td-mono" style="text-align:right; color:#cbd5e1;">
+                        <span id="tbd-id-{{ row.item_type }}">{{ row.with_id|intcomma }}</span>
+                        <small class="text-muted">({{ row.with_id_pct }}%)</small>
+                    </td>
+                    <td class="td-mono" style="text-align:right; color:#cbd5e1;">
+                        <span id="tbd-desc-{{ row.item_type }}">{{ row.with_description|intcomma }}</span>
+                        <small class="text-muted">({{ row.with_description_pct }}%)</small>
+                    </td>
+                    <td class="td-mono" style="text-align:right;">
+                        {% if row.in_review > 0 %}
+                            <a href="/mylibrary/?type={{ row.item_type }}&enrich_status=in_review" style="color:#fbbf24; font-weight:700; text-decoration:none;" id="tbd-rev-{{ row.item_type }}">{{ row.in_review|intcomma }}</a>
+                        {% else %}
+                            <span class="text-muted" id="tbd-rev-{{ row.item_type }}">0</span>
+                        {% endif %}
+                    </td>
+                    <td class="td-mono" style="text-align:right;">
+                        {% if row.no_match > 0 %}
+                            <a href="/mylibrary/?type={{ row.item_type }}&enrich_status=no_match" style="color:#94a3b8; text-decoration:none;" id="tbd-nomatch-{{ row.item_type }}">{{ row.no_match|intcomma }}</a>
+                        {% else %}
+                            <span class="text-muted" id="tbd-nomatch-{{ row.item_type }}">0</span>
+                        {% endif %}
+                    </td>
+                    <td class="td-mono" style="text-align:right;">
+                        {% if row.remaining_to_enrich > 0 %}
+                            <a href="{{ row.remaining_url }}" style="color:#38bdf8; font-weight:700; text-decoration:none;" id="tbd-rem-{{ row.item_type }}">{{ row.remaining_to_enrich|intcomma }}</a>
+                        {% else %}
+                            <span style="color:#4ade80; font-weight:600;" id="tbd-rem-{{ row.item_type }}">0</span>
+                        {% endif %}
+                    </td>
+                    <td style="text-align:right; white-space:nowrap;">
+                        <a href="{{ row.catalog_url }}" class="btn-mini-action" style="text-decoration:none;" title="Open {{ row.label }} in Catalog Search">
+                            <i class="fa-solid fa-magnifying-glass"></i> View
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
 </section>
 
@@ -2787,6 +2924,20 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                 if (data.scanner) {
                     setTxt('live-activity-line', data.scanner.current_activity);
                     setTxt('last-log-update-label', data.scanner.last_log_update);
+                    if (data.scanner.cycle_counts) {
+                        const cc = data.scanner.cycle_counts;
+                        setTxt('cycle-start-time-lbl', cc.cycle_started_at || 'Current');
+                        setNum('cyc-dirs-walked', cc.dirs_walked);
+                        setNum('cyc-added-synced', cc.added_synced);
+                        setNum('cyc-inspected', cc.inspected);
+                        setNum('cyc-enriched', cc.enriched);
+                        setNum('cyc-in-review', cc.in_review);
+                        setNum('cyc-no-match', cc.no_match);
+                        setNum('cyc-skipped', cc.skipped);
+                        setNum('cyc-failed', cc.failed);
+                        setNum('cyc-net-used', cc.net_used);
+                        setNum('cyc-net-cap', cc.net_cap);
+                    }
                     const pill = document.getElementById('next-scan-pill');
                     if (pill) {
                         pill.setAttribute('data-next-iso', data.scanner.next_scan_iso || '');
@@ -2837,6 +2988,8 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                 if (data.catalog) {
                     setNum('kpi-total-items', data.catalog.total_items);
                     setNum('kpi-total-files', data.catalog.total_files);
+                    setNum('type-bd-total-items', data.catalog.total_items);
+                    setNum('type-bd-total-files', data.catalog.total_files);
                     setNum('kpi-sub-books', data.catalog.books_count);
                     setNum('kpi-sub-mags', data.catalog.magazines_count);
                     setNum('kpi-sub-kindle', data.catalog.kindle_count);
@@ -2844,6 +2997,28 @@ python calibre_moon_sync.py pass2 --apply       # Pass 2: Replace Calibre books 
                     setNum('kpi-sub-valid', data.catalog.valid_files);
                     setNum('kpi-sub-drm', data.catalog.drm_files);
                     setNum('kpi-sub-invalid', data.catalog.invalid_files);
+                }
+                const typeBreakdown = data.enrichment_by_type || (data.catalog && data.catalog.enrichment_by_type) || [];
+                if (Array.isArray(typeBreakdown)) {
+                    typeBreakdown.forEach(row => {
+                        const t = row.item_type;
+                        if (!t) return;
+                        setNum(`tbd-items-${t}`, row.total_items);
+                        setNum(`tbd-files-${t}`, row.total_files);
+                        setNum(`tbd-enr-${t}`, row.enriched_items);
+                        setTxt(`tbd-enr-pct-${t}`, `${row.enriched_pct}%`);
+                        const enrBar = document.getElementById(`tbd-enr-bar-${t}`);
+                        if (enrBar) enrBar.style.width = `${row.enriched_pct}%`;
+                        setNum(`tbd-cov-${t}`, row.with_cover);
+                        setTxt(`tbd-cov-pct-${t}`, `${row.with_cover_pct}%`);
+                        const covBar = document.getElementById(`tbd-cov-bar-${t}`);
+                        if (covBar) covBar.style.width = `${row.with_cover_pct}%`;
+                        setNum(`tbd-id-${t}`, row.with_id);
+                        setNum(`tbd-desc-${t}`, row.with_description);
+                        setNum(`tbd-rev-${t}`, row.in_review);
+                        setNum(`tbd-nomatch-${t}`, row.no_match);
+                        setNum(`tbd-rem-${t}`, row.remaining_to_enrich);
+                    });
                 }
                 if (data.conversion) {
                     setNum('kpi-tracked-files', data.conversion.tracked_files_count);

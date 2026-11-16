@@ -202,10 +202,13 @@ def _get_scanner_cycle_metrics(
                 new_changed_in_walk = new_walk
                 skipped_complete_bookdb = new_skip_comp
 
+            start_matches = list(re.finditer(r'Starting sync_files\.py at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', tail_text))
+            last_start_pos = start_matches[-1].start() if start_matches else 0
+
             prog_matches = list(
                 re.finditer(r'\[(\d+)/(\d+)\s*\|\s*net:(\d+)/(\d+|all)\]\s*Inspecting', tail_text)
             )
-            if prog_matches and prog_matches[-1].start() > last_elig_pos:
+            if prog_matches and prog_matches[-1].start() > max(last_elig_pos, last_start_pos):
                 m_pr = prog_matches[-1]
                 new_inspected = int(m_pr.group(1))
                 new_elig_pr = int(m_pr.group(2))
@@ -218,7 +221,7 @@ def _get_scanner_cycle_metrics(
                 if m_pr.group(4).isdigit() and is_scanning:
                     logged_cap = int(m_pr.group(4))
                     cycle_net_cap = 4000 if logged_cap == 2500 else logged_cap
-            elif elig_matches:
+            elif elig_matches or start_matches:
                 cycle_inspected = 0
                 cycle_net_used = 0
 
@@ -240,8 +243,26 @@ def _get_scanner_cycle_metrics(
                     discovered_files_total = max(discovered_files_total, disc_val)
                     break
 
+            cycle_slice = tail_text[last_start_pos:]
+            dw_matches = list(re.finditer(r'\[dirs_walked=(\d+)\]', cycle_slice))
+            dirs_walked = int(dw_matches[-1].group(1)) if dw_matches else cycle_slice.count('Walking directory:')
+            cycle_synced_log = 0
+            cycle_skipped_log = 0
+            cycle_failed_log = 0
+
             last_parse_pos = parse_matches[-1].start() if parse_matches else -1
             last_fin_pos = fin_matches[-1].start() if fin_matches else -1
+
+            if fin_matches and fin_matches[-1].start() >= last_start_pos:
+                fm_cur = fin_matches[-1]
+                cycle_synced_log = int(fm_cur.group(2))
+                cycle_skipped_log = int(fm_cur.group(3))
+                cycle_failed_log = int(fm_cur.group(4))
+            elif parse_matches and parse_matches[-1].start() >= last_start_pos:
+                new_changed_in_walk = max(new_changed_in_walk, int(parse_matches[-1].group(1)))
+                if chunk_matches and chunk_matches[-1].start() > last_parse_pos:
+                    c_idx = int(chunk_matches[-1].group(1))
+                    cycle_synced_log = max(0, (c_idx - 1) * 250 + int(chunk_matches[-1].group(3)))
 
             if last_parse_pos > last_fin_pos and is_scanning:
                 total_to_parse = int(parse_matches[-1].group(1))
@@ -255,7 +276,15 @@ def _get_scanner_cycle_metrics(
             elif is_scanning and last_elig_pos > last_fin_pos:
                 remaining_to_catalog = new_changed_in_walk
         except Exception:
-            pass
+            dirs_walked = 0
+            cycle_synced_log = 0
+            cycle_skipped_log = 0
+            cycle_failed_log = 0
+    else:
+        dirs_walked = 0
+        cycle_synced_log = 0
+        cycle_skipped_log = 0
+        cycle_failed_log = 0
 
     if eligible_to_enrich_initial > 0:
         remaining_to_enrich = max(0, eligible_to_enrich_initial - cycle_inspected)
@@ -270,6 +299,10 @@ def _get_scanner_cycle_metrics(
         'eligible_to_enrich_initial': eligible_to_enrich_initial,
         'skipped_complete_bookdb': skipped_complete_bookdb,
         'new_changed_in_walk': new_changed_in_walk,
+        'dirs_walked': dirs_walked,
+        'cycle_synced_log': cycle_synced_log,
+        'cycle_skipped_log': cycle_skipped_log,
+        'cycle_failed_log': cycle_failed_log,
         'cycle_inspected': cycle_inspected,
         'cycle_net_used': cycle_net_used,
         'cycle_net_cap': cycle_net_cap,
@@ -477,29 +510,79 @@ class _PrecomputedCountPaginator(Paginator):
         self._fast_exclude_ids_set = getattr(object_list, '_fast_exclude_ids_set', None)
         self._fast_exclude_cache_key = getattr(object_list, '_fast_exclude_cache_key', None)
 
+    def _fill_fast_exclude_window(self, min_needed: int = 48) -> tuple[list, dict, int, str, bool]:
+        excl_set = self._fast_exclude_ids_set or set()
+        cache_key = self._fast_exclude_cache_key or 'default'
+        win = _load_fast_exclude_window(cache_key)
+        matched_ids = [
+            cid for cid in (win.get('candidate_ids') or ())
+            if cid not in excl_set and str(cid) not in excl_set
+        ]
+        seen_matched = set(matched_ids)
+        cursor = int(win.get('next_cursor') or 0)
+        last_title = str(win.get('last_title') or '')
+        initial_cursor = cursor
+        initial_last_title = last_title
+        key_parts = cache_key.split('|')
+        sort_part = key_parts[3] if len(key_parts) > 3 else ''
+        use_title_keyset = sort_part in ('', 'title_asc')
+        target_fill = max(min_needed + 24, 96)
+        batch_sz = max(min_needed + 200, 800)
+        window_dirty = len(matched_ids) != len(win.get('candidate_ids') or ())
+
+        for pass_idx in range(2):
+            while len(matched_ids) < target_fill:
+                if use_title_keyset:
+                    scan_qs = self.object_list.filter(title__gt=last_title) if last_title else self.object_list
+                    cand_rows = list(scan_qs.values_list('id', 'title')[:batch_sz])
+                    if not cand_rows:
+                        break
+                    last_title = str(cand_rows[-1][1] or last_title)
+                    cursor += len(cand_rows)
+                    window_dirty = True
+                    for cid, _ctitle in cand_rows:
+                        if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
+                            matched_ids.append(cid)
+                            seen_matched.add(cid)
+                    if len(cand_rows) < batch_sz:
+                        break
+                else:
+                    cand_batch = list(self.object_list.values_list('id', flat=True)[cursor:cursor + batch_sz])
+                    if not cand_batch:
+                        break
+                    cursor += len(cand_batch)
+                    window_dirty = True
+                    for cid in cand_batch:
+                        if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
+                            matched_ids.append(cid)
+                            seen_matched.add(cid)
+                    if len(cand_batch) < batch_sz:
+                        break
+                    batch_sz = min(batch_sz * 2, 2000)
+            if len(matched_ids) >= min_needed or (initial_cursor == 0 and not initial_last_title) or pass_idx == 1:
+                break
+            cursor = 0
+            last_title = ''
+            initial_cursor = 0
+            initial_last_title = ''
+
+        if window_dirty:
+            win['candidate_ids'] = matched_ids[:2500]
+            win['next_cursor'] = cursor
+            win['last_title'] = last_title
+            _save_fast_exclude_window(cache_key, win)
+        return matched_ids, win, cursor, last_title, window_dirty
+
     @cached_property
     def count(self):
         if self._precomputed_count is not None:
             return self._precomputed_count
         try:
-            excl_set = self._fast_exclude_ids_set
-            if excl_set:
-                cache_key = self._fast_exclude_cache_key or 'default'
-                win = _load_fast_exclude_window(cache_key)
-                cands = [
-                    cid for cid in win.get('candidate_ids', [])
-                    if cid not in excl_set and str(cid) not in excl_set
-                ]
-                if len(cands) >= 24:
-                    return max(len(cands), 1200)
-                start_cur = int(win.get('next_cursor') or 0)
-                raw_cands = list(self.object_list.values_list('id', flat=True)[start_cur:start_cur + 2500])
-                filtered = [cid for cid in raw_cands if cid not in excl_set and str(cid) not in excl_set]
-                if filtered:
-                    win['candidate_ids'] = (cands + filtered)[:2500]
-                    win['next_cursor'] = start_cur + len(raw_cands)
-                    _save_fast_exclude_window(cache_key, win)
-                return len((cands + filtered)[:1200])
+            if self._fast_exclude_ids_set:
+                matched_ids, _win, cursor, _lt, _dirty = self._fill_fast_exclude_window(min_needed=48)
+                if len(matched_ids) >= 72 and cursor >= 800:
+                    return max(len(matched_ids), 1200)
+                return len(matched_ids[:1200])
             return len(list(self.object_list.values_list('id', flat=True)[:1200]))
         except Exception:
             return super().count
@@ -517,67 +600,10 @@ class _PrecomputedCountPaginator(Paginator):
         from .opds import get_file_enrich_diagnostic, is_file_enriched
 
         cache_key = self._fast_exclude_cache_key or 'default'
-        win = _load_fast_exclude_window(cache_key)
-        matched_ids = [
-            cid for cid in (win.get('candidate_ids') or ())
-            if cid not in excl_set and str(cid) not in excl_set
-        ]
-        seen_matched = set(matched_ids)
-        cursor = int(win.get('next_cursor') or 0)
-        last_title = str(win.get('last_title') or '')
-        initial_cursor = cursor
-        initial_last_title = last_title
-        key_parts = cache_key.split('|')
-        sort_part = key_parts[3] if len(key_parts) > 3 else ''
-        use_title_keyset = sort_part in ('', 'title_asc')
-        target_fill = max(top + 48, 600)
-        batch_sz = max(top + 400, 2500)
-        window_dirty = len(matched_ids) != len(win.get('candidate_ids') or ())
-
         try:
-            for pass_idx in range(2):
-                while len(matched_ids) < target_fill:
-                    if use_title_keyset:
-                        scan_qs = self.object_list.filter(title__gt=last_title) if last_title else self.object_list
-                        cand_rows = list(scan_qs.values_list('id', 'title')[:batch_sz])
-                        if not cand_rows:
-                            break
-                        last_title = str(cand_rows[-1][1] or last_title)
-                        cursor += len(cand_rows)
-                        window_dirty = True
-                        for cid, _ctitle in cand_rows:
-                            if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
-                                matched_ids.append(cid)
-                                seen_matched.add(cid)
-                        if len(cand_rows) < batch_sz:
-                            break
-                    else:
-                        cand_batch = list(self.object_list.values_list('id', flat=True)[cursor:cursor + batch_sz])
-                        if not cand_batch:
-                            break
-                        cursor += len(cand_batch)
-                        window_dirty = True
-                        for cid in cand_batch:
-                            if cid not in excl_set and str(cid) not in excl_set and cid not in seen_matched:
-                                matched_ids.append(cid)
-                                seen_matched.add(cid)
-                        if len(cand_batch) < batch_sz:
-                            break
-                        batch_sz = min(batch_sz * 2, 3000)
-                if len(matched_ids) >= top or (initial_cursor == 0 and not initial_last_title) or pass_idx == 1:
-                    break
-                cursor = 0
-                last_title = ''
-                initial_cursor = 0
-                initial_last_title = ''
-
+            matched_ids, win, cursor, last_title, window_dirty = self._fill_fast_exclude_window(min_needed=top + 24)
             cand_slice = matched_ids[bottom:top + 24]
             if not cand_slice:
-                if window_dirty:
-                    win['candidate_ids'] = matched_ids[:2500]
-                    win['next_cursor'] = cursor
-                    win['last_title'] = last_title
-                    _save_fast_exclude_window(cache_key, win)
                 return self._get_page([], number, self)
 
             items_by_id = {
@@ -607,9 +633,6 @@ class _PrecomputedCountPaginator(Paginator):
 
             if stale_ids:
                 matched_ids = [cid for cid in matched_ids if cid not in stale_ids]
-                window_dirty = True
-
-            if window_dirty:
                 win['candidate_ids'] = matched_ids[:2500]
                 win['next_cursor'] = cursor
                 win['last_title'] = last_title
@@ -1159,7 +1182,7 @@ class DashboardView(ListView):
                     }
                     if all(t in type_key_map for t in item_types):
                         precomputed_count = sum(stats[type_key_map[t]] for t in set(item_types))
-            elif (shelf == 'needs_enriching' or (not shelf and enrich_status == 'needs_enriching')) and not item_types:
+            elif (shelf == 'needs_enriching' or (not shelf and enrich_status == 'needs_enriching')) and (not item_types or item_types == ['BOOK']):
                 stats, _ = _get_cached_dashboard_meta()
                 enr_idx = get_enriched_item_ids_index()
                 excl_cnt = len(enr_idx.get('excluded_from_needs_enriching_ids') or enr_idx.get('enriched_ids') or [])
@@ -1395,6 +1418,16 @@ class DashboardView(ListView):
             amz_info = lookup_amazon_info_for_item(it)
             it.amazon_ownership_info = amz_info if amz_info else None
             f_list = list(it.files.all())
+            if (
+                it.item_type == 'BOOK'
+                and f_list
+                and all(
+                    str(f.file_path or '').startswith(('/periodicals/', '/toMags/', '/xAdult/', '/xtoAdult/'))
+                    for f in f_list
+                )
+            ):
+                it.item_type = 'MAGAZINE'
+                CatalogItem.objects.filter(id=it.id).update(item_type='MAGAZINE')
             it.has_tomags_file = any(str(f.file_path or '').startswith('/toMags/') for f in f_list)
             it.is_enriched = any(is_file_enriched(f.file_path) for f in f_list if f.file_path)
             it.cover_issue = nc_issue_map.get(str(it.id), '')
@@ -1944,6 +1977,17 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
 
     def _compute_and_save_status_heavy_cache():
         try:
+            _has_cov_q = (
+                (Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
+                | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url=''))
+            )
+            _has_id_q = (
+                (Q(isbn__isnull=False) & ~Q(isbn=''))
+                | (Q(asin__isnull=False) & ~Q(asin=''))
+            )
+            _has_desc_q = Q(description__isnull=False) & ~Q(description='')
+            _has_auth_q = Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author')
+
             _cat_agg = CatalogItem.objects.aggregate(
                 total_items=Count('id'),
                 books_count=Count('id', filter=Q(item_type='BOOK')),
@@ -1953,38 +1997,39 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
                 audiobook_count=Count('id', filter=Q(item_type='AUDIOBOOK')),
                 with_isbn=Count('id', filter=Q(isbn__isnull=False) & ~Q(isbn='')),
                 with_asin=Count('id', filter=Q(asin__isnull=False) & ~Q(asin='')),
-                with_description=Count('id', filter=Q(description__isnull=False) & ~Q(description='')),
+                with_description=Count('id', filter=_has_desc_q),
                 with_publisher=Count('id', filter=Q(publisher__isnull=False) & ~Q(publisher='')),
-                with_cover=Count(
-                    'id',
-                    filter=(Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
-                    | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url='')),
-                ),
-                known_author=Count(
-                    'id',
-                    filter=Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author'),
-                ),
+                with_cover=Count('id', filter=_has_cov_q),
+                known_author=Count('id', filter=_has_auth_q),
                 complete_metadata=Count(
                     'id',
                     filter=Q(isbn__isnull=False)
                     & ~Q(isbn='')
-                    & Q(description__isnull=False)
-                    & ~Q(description='')
-                    & ~Q(authors='Unknown Author')
-                    & ~Q(authors=''),
+                    & _has_desc_q
+                    & _has_auth_q,
                 ),
+                books_with_cover=Count('id', filter=Q(item_type='BOOK') & _has_cov_q),
+                books_with_id=Count('id', filter=Q(item_type='BOOK') & _has_id_q),
+                books_with_desc=Count('id', filter=Q(item_type='BOOK') & _has_desc_q),
+                books_known_author=Count('id', filter=Q(item_type='BOOK') & _has_auth_q),
+                books_complete=Count('id', filter=Q(item_type='BOOK') & _has_id_q & _has_desc_q & _has_auth_q),
+                mags_with_cover=Count('id', filter=Q(item_type='MAGAZINE') & _has_cov_q),
+                mags_with_id=Count('id', filter=Q(item_type='MAGAZINE') & _has_id_q),
+                mags_with_desc=Count('id', filter=Q(item_type='MAGAZINE') & _has_desc_q),
+                mags_organized=Count('id', filter=Q(item_type='MAGAZINE') & _has_auth_q & ~Q(authors='Unorganized')),
+                kindle_with_cover=Count('id', filter=Q(item_type='KINDLE') & _has_cov_q),
+                kindle_with_id=Count('id', filter=Q(item_type='KINDLE') & _has_id_q),
+                kindle_with_desc=Count('id', filter=Q(item_type='KINDLE') & _has_desc_q),
+                audio_with_cover=Count('id', filter=Q(item_type__in=['AUDIBLE', 'AUDIOBOOK']) & _has_cov_q),
+                audio_with_id=Count('id', filter=Q(item_type__in=['AUDIBLE', 'AUDIOBOOK']) & _has_id_q),
+                audio_with_desc=Count('id', filter=Q(item_type__in=['AUDIBLE', 'AUDIOBOOK']) & _has_desc_q),
             )
             _vx_item_agg = CatalogItem.objects.filter(files__library_name='Archive-X').aggregate(
                 vx_items=Count('id', distinct=True),
-                vx_with_cover=Count(
-                    'id',
-                    distinct=True,
-                    filter=(Q(cover_thumbnail__isnull=False) & ~Q(cover_thumbnail=''))
-                    | (Q(cover_image_url__isnull=False) & ~Q(cover_image_url='')),
-                ),
-                vx_with_description=Count('id', distinct=True, filter=Q(description__isnull=False) & ~Q(description='')),
+                vx_with_cover=Count('id', distinct=True, filter=_has_cov_q),
+                vx_with_description=Count('id', distinct=True, filter=_has_desc_q),
                 vx_with_publisher=Count('id', distinct=True, filter=Q(publisher__isnull=False) & ~Q(publisher='')),
-                vx_known_author=Count('id', distinct=True, filter=Q(authors__isnull=False) & ~Q(authors='') & ~Q(authors='Unknown Author')),
+                vx_known_author=Count('id', distinct=True, filter=_has_auth_q),
             )
             _cat_agg.update(_vx_item_agg)
             _tot_files_agg = FileLocation.objects.aggregate(
@@ -1992,9 +2037,11 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
                 valid_files=Count('id', filter=Q(is_invalid=False, has_drm=False)),
                 drm_files=Count('id', filter=Q(has_drm=True)),
                 invalid_files=Count('id', filter=Q(is_invalid=True)),
-                periodicals_files=Count('id', filter=Q(library_name='Periodicals')),
+                periodicals_files=Count('id', filter=Q(library_name__in=['Periodicals', 'NAS Periodicals'])),
                 vx_files=Count('id', filter=Q(library_name='Archive-X')),
                 vx_valid_files=Count('id', filter=Q(library_name='Archive-X', is_invalid=False, has_drm=False)),
+                kindle_files=Count('id', filter=Q(catalog_item__item_type='KINDLE')),
+                audio_files=Count('id', filter=Q(catalog_item__item_type__in=['AUDIBLE', 'AUDIOBOOK'])),
             )
             _tf = _tot_files_agg['total_files'] or 0
             _fmt_rows = list(
@@ -2338,14 +2385,41 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
     log_dt = None
     now_dt = datetime.now(tz=_EST_TZ)
     seconds_since_log = None
-    if scanner_log_path.exists():
+    latest_mtime = None
+    for _lp in (scanner_log_path, epubmeta_log_path):
+        if _lp.exists():
+            try:
+                _mt = _lp.stat().st_mtime
+                if latest_mtime is None or _mt > latest_mtime:
+                    latest_mtime = _mt
+            except Exception:
+                pass
+    if latest_mtime is not None:
         try:
-            mtime = scanner_log_path.stat().st_mtime
-            log_dt = datetime.fromtimestamp(mtime, tz=_EST_TZ)
+            log_dt = datetime.fromtimestamp(latest_mtime, tz=_EST_TZ)
             seconds_since_log = max(0, int((now_dt - log_dt).total_seconds()))
             log_mtime_str = log_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         except Exception:
             pass
+
+    # If a lockfile exists on disk but neither scanner.log nor epubmeta.log has been modified in >30 minutes,
+    # the scanner process died or wedged — clear the stale lockfile so automatic self-healing can recover.
+    stale_lock = bool(lock_exists and seconds_since_log is not None and seconds_since_log > 1800)
+    if stale_lock:
+        lock_exists = False
+        loop_lock_exists = False
+        for _stale_p in (
+            scanner_dir / 'logs' / 'nas_scanner.lock',
+            scanner_dir / 'nas_scanner.lock',
+            scanner_dir / 'scanner.lock',
+            scanner_dir / 'logs' / 'nas_scanner_loop.lock',
+            scanner_dir / 'nas_scanner_loop.lock',
+        ):
+            try:
+                if _stale_p.exists():
+                    _stale_p.unlink()
+            except Exception:
+                pass
 
     current_activity = 'Idle — Waiting for next scan cycle'
     current_library = ''
@@ -2367,7 +2441,7 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             is_scanning = False
             is_sleeping = True
             current_activity = last_line
-        elif lock_exists or (seconds_since_log is not None and seconds_since_log < 600):
+        elif (lock_exists and not stale_lock) or (seconds_since_log is not None and seconds_since_log < 600):
             is_scanning = True
             meaningful_line = last_line
             for cand_line in reversed(scanner_lines):
@@ -2489,6 +2563,7 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             is_scanning = True
             is_sleeping = False
             daemon_active = True
+            cycle_start_dt = now_dt
             current_activity = scanner_lines[-1] if scanner_lines else 'Starting MyLibrary Scanner Loop...'
             new_next_dt = now_dt + timedelta(hours=scan_interval_hours)
             next_scan_at = new_next_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -2571,6 +2646,73 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
     enrich_total_scope = remaining_to_enrich + sqlite_stats['total_processed']
     enrich_progress_pct = _pct(sqlite_stats['total_processed'], enrich_total_scope) if enrich_total_scope > 0 else 0.0
 
+    # Compute live scan cycle counts (# Added/Synced, # Enriched, # In Review, # No Match, # Skipped, # Failed)
+    cycle_start_eff = cycle_start_dt or (now_dt - timedelta(hours=scan_interval_hours))
+    cycle_start_utc_str = cycle_start_eff.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+    _cyc_db_cache = _DASHBOARD_HEAVY_CACHE.get('cycle_db_counts')
+    if not isinstance(_cyc_db_cache, dict) or now_mono >= _DASHBOARD_HEAVY_CACHE.get('cycle_db_expires_at', 0.0) or _cyc_db_cache.get('since') != cycle_start_utc_str:
+        _c_added_db = 0
+        _c_enr_db = 0
+        _c_rev_db = 0
+        _c_nomatch_db = 0
+        _c_fail_db = 0
+        try:
+            _c_added_db = FileLocation.objects.filter(scanned_at__gte=cycle_start_eff).count()
+        except Exception:
+            pass
+        try:
+            _c_conn = connect_scanner_db(db_path, timeout=3.0)
+            _c_conn.row_factory = sqlite3.Row
+            _c_cur = _c_conn.cursor()
+            for _cr in _c_cur.execute(
+                "SELECT status, COUNT(*) AS cnt FROM processed_files WHERE REPLACE(updated_at, ' ', 'T') >= ? GROUP BY status",
+                (cycle_start_utc_str,),
+            ).fetchall():
+                _cst = (_cr['status'] or '').upper()
+                _ccnt = int(_cr['cnt'] or 0)
+                if _cst == 'SUCCESS':
+                    _c_enr_db += _ccnt
+                elif _cst == 'NEEDS_REVIEW':
+                    _c_rev_db += _ccnt
+                elif _cst in ('NO_ISBN', 'NOT_FOUND'):
+                    _c_nomatch_db += _ccnt
+                elif _cst in ('QUARANTINED', 'HAS_DRM', 'FAILED'):
+                    _c_fail_db += _ccnt
+            _c_conn.close()
+        except Exception:
+            pass
+        _cyc_db_cache = {
+            'since': cycle_start_utc_str,
+            'added_db': _c_added_db,
+            'enriched_db': _c_enr_db,
+            'in_review_db': _c_rev_db,
+            'no_match_db': _c_nomatch_db,
+            'failed_db': _c_fail_db,
+        }
+        _DASHBOARD_HEAVY_CACHE['cycle_db_counts'] = _cyc_db_cache
+        _DASHBOARD_HEAVY_CACHE['cycle_db_expires_at'] = now_mono + 10.0
+
+    _tot_db_proc = (
+        int(_cyc_db_cache.get('enriched_db') or 0)
+        + int(_cyc_db_cache.get('in_review_db') or 0)
+        + int(_cyc_db_cache.get('no_match_db') or 0)
+        + int(_cyc_db_cache.get('failed_db') or 0)
+    )
+    cycle_counts = {
+        'cycle_started_at': cycle_start_eff.strftime('%H:%M:%S %Z') if cycle_start_dt else 'Current Window',
+        'dirs_walked': int(cyc_metrics.get('dirs_walked') or 0),
+        'new_changed': int(cyc_metrics.get('new_changed_in_walk') or 0),
+        'added_synced': max(int(cyc_metrics.get('cycle_synced_log') or 0), int(_cyc_db_cache.get('added_db') or 0)),
+        'inspected': max(int(cycle_inspected or 0), _tot_db_proc),
+        'enriched': int(_cyc_db_cache.get('enriched_db') or 0),
+        'in_review': int(_cyc_db_cache.get('in_review_db') or 0),
+        'no_match': int(_cyc_db_cache.get('no_match_db') or 0),
+        'skipped': int(cyc_metrics.get('cycle_skipped_log') or 0),
+        'failed': max(int(cyc_metrics.get('cycle_failed_log') or 0), int(_cyc_db_cache.get('failed_db') or 0)),
+        'net_used': int(cycle_net_used or 0),
+        'net_cap': int(cycle_net_cap or 4000),
+    }
+
     sqlite_stats['tracked_books_count'] = raw_tracked_books
     sqlite_stats['tracked_mags_count'] = periodicals_files_cnt
     sqlite_stats['tracked_archive_x_count'] = vx_files_cnt if vx_unlocked else 0
@@ -2608,6 +2750,183 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
         if _ri.get('scanned_at'):
             _ri['scanned_at'] = _format_est_timestamp(_ri['scanned_at'], include_tz=True)
 
+    # 5. Enrichment Breakdown by Catalog Type (Books, Periodicals, Archive-X, Kindle, Audible/Audiobooks)
+    books_items_cnt = int(catalog_agg.get('books_count') or 0)
+    books_enr_cnt = int(sqlite_stats.get('status_counts', {}).get('SUCCESS') or 0)
+    books_enr_files_cnt = int(sqlite_stats.get('enriched_files_count') or books_enr_cnt)
+    books_complete_cnt = int(catalog_agg.get('books_complete') or catalog_agg.get('complete_metadata') or 0)
+    books_cover_cnt = int(catalog_agg.get('books_with_cover') or 0)
+    books_id_cnt = int(catalog_agg.get('books_with_id') or catalog_agg.get('with_isbn') or 0)
+    books_desc_cnt = int(catalog_agg.get('books_with_desc') or 0)
+    books_review_cnt = int(sqlite_stats.get('status_counts', {}).get('NEEDS_REVIEW') or 0)
+    books_no_isbn_cnt = int(sqlite_stats.get('status_counts', {}).get('NO_ISBN') or 0)
+    books_quar_drm_cnt = (
+        int(sqlite_stats.get('status_counts', {}).get('QUARANTINED') or 0)
+        + int(sqlite_stats.get('status_counts', {}).get('HAS_DRM') or 0)
+    )
+
+    raw_mags_cover = int(catalog_agg.get('mags_with_cover') or 0)
+    raw_mags_desc = int(catalog_agg.get('mags_with_desc') or 0)
+    raw_mags_org = int(catalog_agg.get('mags_organized') or raw_mags_desc)
+    vx_cov_cnt = int(catalog_agg.get('vx_with_cover') or 0)
+    vx_dsc_cnt = int(catalog_agg.get('vx_with_description') or 0)
+    pure_mags_cover = max(0, raw_mags_cover - vx_cov_cnt)
+    pure_mags_desc = max(0, raw_mags_desc - vx_dsc_cnt)
+    pure_mags_org = max(0, raw_mags_org - vx_items_cnt)
+
+    kindle_items_cnt = int(catalog_agg.get('kindle_count') or 0)
+    kindle_files_cnt = int(file_agg.get('kindle_files') or 0)
+    kindle_cover_cnt = int(catalog_agg.get('kindle_with_cover') or kindle_items_cnt)
+    kindle_id_cnt = int(catalog_agg.get('kindle_with_id') or kindle_items_cnt)
+    kindle_desc_cnt = int(catalog_agg.get('kindle_with_desc') or 0)
+
+    audio_items_cnt = int(catalog_agg.get('audible_count') or 0) + int(catalog_agg.get('audiobook_count') or 0)
+    audio_files_cnt = int(file_agg.get('audio_files') or 0)
+    audio_cover_cnt = int(catalog_agg.get('audio_with_cover') or audio_items_cnt)
+    audio_id_cnt = int(catalog_agg.get('audio_with_id') or audio_items_cnt)
+    audio_desc_cnt = int(catalog_agg.get('audio_with_desc') or 0)
+
+    enrichment_by_type = [
+        {
+            'item_type': 'BOOK',
+            'label': 'Books',
+            'icon': 'fa-book',
+            'accent': 'purple',
+            'pipeline': 'epubmeta + ISBN / Cover / AI',
+            'total_items': books_items_cnt,
+            'total_files': books_files_cnt,
+            'enriched_items': books_enr_cnt,
+            'enriched_files': books_enr_files_cnt,
+            'enriched_pct': _pct(books_enr_cnt, books_items_cnt),
+            'complete_metadata': books_complete_cnt,
+            'complete_pct': _pct(books_complete_cnt, books_items_cnt),
+            'with_cover': books_cover_cnt,
+            'with_cover_pct': _pct(books_cover_cnt, books_items_cnt),
+            'with_id': books_id_cnt,
+            'with_id_pct': _pct(books_id_cnt, books_items_cnt),
+            'with_description': books_desc_cnt,
+            'with_description_pct': _pct(books_desc_cnt, books_items_cnt),
+            'in_review': books_review_cnt,
+            'no_match': books_no_isbn_cnt,
+            'quarantined_or_drm': books_quar_drm_cnt,
+            'remaining_to_enrich': remaining_to_enrich,
+            'catalog_url': '/mylibrary/?type=BOOK',
+            'enriched_url': '/mylibrary/?type=BOOK&enrich_status=enriched',
+            'remaining_url': '/mylibrary/?type=BOOK&enrich_status=needs_enriching',
+        },
+        {
+            'item_type': 'MAGAZINE',
+            'label': 'Periodicals / Magazines',
+            'icon': 'fa-newspaper',
+            'accent': 'cyan',
+            'pipeline': 'OrgPeriodicals + Page-1 Cover',
+            'total_items': pure_mags_items,
+            'total_files': periodicals_files_cnt,
+            'enriched_items': pure_mags_cover,
+            'enriched_files': pure_mags_cover,
+            'enriched_pct': _pct(pure_mags_cover, pure_mags_items),
+            'complete_metadata': pure_mags_org,
+            'complete_pct': _pct(pure_mags_org, pure_mags_items),
+            'with_cover': pure_mags_cover,
+            'with_cover_pct': _pct(pure_mags_cover, pure_mags_items),
+            'with_id': int(catalog_agg.get('mags_with_id') or 0),
+            'with_id_pct': _pct(int(catalog_agg.get('mags_with_id') or 0), pure_mags_items),
+            'with_description': pure_mags_desc,
+            'with_description_pct': _pct(pure_mags_desc, pure_mags_items),
+            'in_review': 0,
+            'no_match': max(0, pure_mags_items - pure_mags_org),
+            'quarantined_or_drm': 0,
+            'remaining_to_enrich': max(0, pure_mags_items - pure_mags_cover),
+            'catalog_url': '/mylibrary/?type=MAGAZINE',
+            'enriched_url': '/mylibrary/?type=MAGAZINE&enrich_status=enriched',
+            'remaining_url': '/mylibrary/?type=MAGAZINE&enrich_status=needs_enriching',
+        },
+    ]
+    if vx_unlocked and vx_items_cnt > 0:
+        enrichment_by_type.append({
+            'item_type': 'ARCHIVE_X',
+            'label': 'Archive-X Periodicals',
+            'icon': 'fa-box-archive',
+            'accent': 'pink',
+            'pipeline': 'OrgPeriodicals (Archive-X)',
+            'total_items': vx_items_cnt,
+            'total_files': vx_files_cnt,
+            'enriched_items': vx_cov_cnt,
+            'enriched_files': vx_cov_cnt,
+            'enriched_pct': _pct(vx_cov_cnt, vx_items_cnt),
+            'complete_metadata': vx_dsc_cnt,
+            'complete_pct': _pct(vx_dsc_cnt, vx_items_cnt),
+            'with_cover': vx_cov_cnt,
+            'with_cover_pct': _pct(vx_cov_cnt, vx_items_cnt),
+            'with_id': 0,
+            'with_id_pct': 0.0,
+            'with_description': vx_dsc_cnt,
+            'with_description_pct': _pct(vx_dsc_cnt, vx_items_cnt),
+            'in_review': 0,
+            'no_match': 0,
+            'quarantined_or_drm': 0,
+            'remaining_to_enrich': max(0, vx_items_cnt - vx_cov_cnt),
+            'catalog_url': '/mylibrary/?folder=Archive-X',
+            'enriched_url': '/mylibrary/?folder=Archive-X&enrich_status=enriched',
+            'remaining_url': '/mylibrary/?folder=Archive-X&enrich_status=needs_enriching',
+        })
+    enrichment_by_type.extend([
+        {
+            'item_type': 'KINDLE',
+            'label': 'Amazon Kindle',
+            'icon': 'fa-tablet-screen-button',
+            'accent': 'amber',
+            'pipeline': 'Amazon Sync + ASIN / Cover',
+            'total_items': kindle_items_cnt,
+            'total_files': kindle_files_cnt,
+            'enriched_items': kindle_cover_cnt,
+            'enriched_files': kindle_files_cnt,
+            'enriched_pct': _pct(kindle_cover_cnt, kindle_items_cnt),
+            'complete_metadata': kindle_desc_cnt,
+            'complete_pct': _pct(kindle_desc_cnt, kindle_items_cnt),
+            'with_cover': kindle_cover_cnt,
+            'with_cover_pct': _pct(kindle_cover_cnt, kindle_items_cnt),
+            'with_id': kindle_id_cnt,
+            'with_id_pct': _pct(kindle_id_cnt, kindle_items_cnt),
+            'with_description': kindle_desc_cnt,
+            'with_description_pct': _pct(kindle_desc_cnt, kindle_items_cnt),
+            'in_review': 0,
+            'no_match': 0,
+            'quarantined_or_drm': 0,
+            'remaining_to_enrich': max(0, kindle_items_cnt - kindle_desc_cnt),
+            'catalog_url': '/mylibrary/?type=KINDLE',
+            'enriched_url': '/mylibrary/?type=KINDLE',
+            'remaining_url': '/mylibrary/?type=KINDLE',
+        },
+        {
+            'item_type': 'AUDIBLE',
+            'label': 'Audible & Audiobooks',
+            'icon': 'fa-headphones',
+            'accent': 'green',
+            'pipeline': 'Audible / Audiobook Sync',
+            'total_items': audio_items_cnt,
+            'total_files': audio_files_cnt,
+            'enriched_items': audio_cover_cnt,
+            'enriched_files': audio_files_cnt,
+            'enriched_pct': _pct(audio_cover_cnt, audio_items_cnt),
+            'complete_metadata': audio_desc_cnt,
+            'complete_pct': _pct(audio_desc_cnt, audio_items_cnt),
+            'with_cover': audio_cover_cnt,
+            'with_cover_pct': _pct(audio_cover_cnt, audio_items_cnt),
+            'with_id': audio_id_cnt,
+            'with_id_pct': _pct(audio_id_cnt, audio_items_cnt),
+            'with_description': audio_desc_cnt,
+            'with_description_pct': _pct(audio_desc_cnt, audio_items_cnt),
+            'in_review': 0,
+            'no_match': 0,
+            'quarantined_or_drm': 0,
+            'remaining_to_enrich': max(0, audio_items_cnt - audio_desc_cnt),
+            'catalog_url': '/mylibrary/?type=AUDIBLE',
+            'enriched_url': '/mylibrary/?type=AUDIBLE',
+            'remaining_url': '/mylibrary/?type=AUDIBLE',
+        },
+    ])
+
     return {
         'generated_at': now_dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
         'vx_unlocked': bool(vx_unlocked),
@@ -2623,6 +2942,7 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             'next_scan_iso': next_scan_iso,
             'next_scan_in_seconds': next_scan_in_seconds,
             'next_scan_countdown': next_scan_countdown,
+            'cycle_counts': cycle_counts,
             'scanner_log_lines': scanner_lines,
             'epubmeta_log_lines': epubmeta_lines,
         },
@@ -2657,7 +2977,9 @@ def get_conversion_and_import_status(vx_unlocked: bool = False) -> dict:
             'formats': format_rows,
             'libraries': eff_libraries,
             'recent_imports': eff_recent_imports,
+            'enrichment_by_type': enrichment_by_type,
         },
+        'enrichment_by_type': enrichment_by_type,
         'conversion': sqlite_stats,
     }
 

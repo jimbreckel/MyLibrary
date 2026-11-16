@@ -35,10 +35,11 @@
             title="Books Enriched by epubmeta (Click to view Enriched Books shelf)"
             style="text-decoration:none; color:inherit; border-color:rgba(74,222,128,0.35);">
             <i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i>
-            <span>Enriched Books: <strong id="header-enriched-count" style="color:#4ade80;">{{ enrich_status_counts.enriched|default:0|intcomma }}</strong></span>
+            <span>Enriched Books: <strong id="header-enriched-count" style="color:#4ade80;">{{
+                    enrich_status_counts.enriched|default:0|intcomma }}</strong></span>
         </a>
-        <a href="{% url 'catalog:dashboard' %}?folder=Periodicals" class="stat-badge" title="Magazines &amp; Periodicals"
-            style="text-decoration:none; color:inherit;">
+        <a href="{% url 'catalog:dashboard' %}?folder=Periodicals" class="stat-badge"
+            title="Magazines &amp; Periodicals" style="text-decoration:none; color:inherit;">
             <i class="fa-solid fa-newspaper green"></i>
             <span>Magazines: <strong>{{ stats.magazines_count|intcomma }}</strong></span>
         </a>
@@ -205,7 +206,8 @@
                     style="background:rgba(30,41,59,0.6); border:1px solid rgba(255,255,255,0.07); border-radius:8px; padding:0.65rem 0.75rem;">
                     <div
                         style="color:#f8fafc; font-weight:700; font-size:0.76rem; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.45rem;">
-                        <i class="fa-solid {{ group.icon }}" style="color:#38bdf8; margin-right:0.3rem;"></i> {{ group.group }}
+                        <i class="fa-solid {{ group.icon }}" style="color:#38bdf8; margin-right:0.3rem;"></i> {{
+                        group.group }}
                     </div>
                     <div style="display:flex; flex-direction:column; gap:0.35rem;">
                         {% for item in group.items %}
@@ -214,7 +216,8 @@
                             <button type="button"
                                 onclick="window.insertSearchKeyword('{{ item.insert|escapejs }}', {% if item.insert|slice:'-1:' == ':' or item.insert == '-' %}true{% else %}false{% endif %})"
                                 title="Click to insert {{ item.insert }}"
-                                style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.3); color:#38bdf8; border-radius:4px; padding:0.08rem 0.38rem; font-family:monospace; font-size:0.71rem; cursor:pointer; white-space:nowrap; flex-shrink:0;">{{ item.example }}</button>
+                                style="background:rgba(56,189,248,0.12); border:1px solid rgba(56,189,248,0.3); color:#38bdf8; border-radius:4px; padding:0.08rem 0.38rem; font-family:monospace; font-size:0.71rem; cursor:pointer; white-space:nowrap; flex-shrink:0;">{{
+                                item.example }}</button>
                             <span style="color:#94a3b8; text-align:right; font-size:0.71rem;">{{ item.desc }}</span>
                         </div>
                         {% endfor %}
@@ -311,13 +314,15 @@
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'interesting' %}#facc15{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'interesting' %}rgba(250,204,21,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'interesting' %}rgba(250,204,21,0.45){% else %}transparent{% endif %};"
                         title="Books marked as Interesting to read/download next (automatically resets when downloaded)">
                         <span><i class="fa-solid fa-star" style="color:#facc15;"></i> Interesting Books</span>
-                        <small id="sidebar-interesting-count" style="color:#facc15; font-weight:700;">{{ interesting_count|default:0|intcomma }}</small>
+                        <small id="sidebar-interesting-count" style="color:#facc15; font-weight:700;">{{
+                            interesting_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=bad_metadata"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'bad_metadata' %}#fb7185{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'bad_metadata' %}rgba(244,63,94,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'bad_metadata' %}rgba(244,63,94,0.45){% else %}transparent{% endif %};"
                         title="Books flagged as having Bad Metadata from Moon+ Reader or the web catalog (auto-clears when enriched or approved)">
                         <span><i class="fa-solid fa-flag" style="color:#fb7185;"></i> Bad Metadata</span>
-                        <small id="sidebar-bad-meta-count" style="color:#fb7185; font-weight:700;">{{ bad_metadata_count|default:0|intcomma }}</small>
+                        <small id="sidebar-bad-meta-count" style="color:#fb7185; font-weight:700;">{{
+                            bad_metadata_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=bookmarked"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'bookmarked' %}#f472b6{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'bookmarked' %}rgba(244,114,182,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'bookmarked' %}rgba(244,114,182,0.38){% else %}transparent{% endif %};"
@@ -331,18 +336,21 @@
                         <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=read{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}"
                             style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'read' %}rgba(74,222,128,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'read' %}#4ade80{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'read' %}rgba(74,222,128,0.55){% else %}rgba(255,255,255,0.1){% endif %};"
                             title="Bookmarked books completed (100% read)">
-                            <i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> 100% Read ({{ bookmark_progress_counts.read|intcomma }})
+                            <i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> 100% Read ({{
+                            bookmark_progress_counts.read|intcomma }})
                         </a>
                         <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=unread{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}"
                             style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'unread' %}rgba(244,114,182,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'unread' %}#f472b6{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'unread' %}rgba(244,114,182,0.55){% else %}rgba(255,255,255,0.1){% endif %};"
                             title="Bookmarked books not yet finished (< 100% read)">
-                            <i class="fa-regular fa-bookmark" style="color:#f472b6;"></i> Unread &lt;100% ({{ bookmark_progress_counts.unread|intcomma }})
+                            <i class="fa-regular fa-bookmark" style="color:#f472b6;"></i> Unread &lt;100% ({{
+                            bookmark_progress_counts.unread|intcomma }})
                         </a>
                         {% if bookmark_progress_counts.reading > 0 %}
                         <a href="{% url 'catalog:dashboard' %}?{% if selected_shelf %}shelf={{ selected_shelf }}&amp;{% else %}shelf=bookmarked&amp;{% endif %}read_status=reading{% if selected_sort %}&amp;sort={{ selected_sort }}{% endif %}"
                             style="text-decoration:none; font-size:0.72rem; padding:0.15rem 0.48rem; border-radius:999px; font-weight:600; background:{% if selected_read_status == 'reading' %}rgba(56,189,248,0.25){% else %}rgba(15,23,42,0.75){% endif %}; color:{% if selected_read_status == 'reading' %}#38bdf8{% else %}#94a3b8{% endif %}; border:1px solid {% if selected_read_status == 'reading' %}rgba(56,189,248,0.55){% else %}rgba(255,255,255,0.1){% endif %};"
                             title="Bookmarked books currently in progress (1% – 99% read)">
-                            <i class="fa-solid fa-book-open-reader" style="color:#38bdf8;"></i> Reading 1–99% ({{ bookmark_progress_counts.reading|intcomma }})
+                            <i class="fa-solid fa-book-open-reader" style="color:#38bdf8;"></i> Reading 1–99% ({{
+                            bookmark_progress_counts.reading|intcomma }})
                         </a>
                         {% endif %}
                     </div>
@@ -358,13 +366,15 @@
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'enriched' %}#4ade80{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'enriched' %}rgba(74,222,128,0.15){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'enriched' %}rgba(74,222,128,0.35){% else %}transparent{% endif %};">
                         <span><i class="fa-solid fa-wand-magic-sparkles" style="color:#4ade80;"></i> Enriched
                             Books</span>
-                        <small id="sidebar-enriched-count" style="color:#4ade80; font-weight:700;">{{ enrich_status_counts.enriched|default:0|intcomma }}</small>
+                        <small id="sidebar-enriched-count" style="color:#4ade80; font-weight:700;">{{
+                            enrich_status_counts.enriched|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}#f59e0b{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}rgba(245,158,11,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}rgba(245,158,11,0.42){% else %}transparent{% endif %};"
                         title="Enriched books where the cover is missing or is just a text-only title page (click Find Cover on any book to replace or Keep Cover to dismiss)">
                         <span><i class="fa-regular fa-image" style="color:#f59e0b;"></i> Missing / Text Cover</span>
-                        <small id="sidebar-missing-cover-count" style="color:#f59e0b; font-weight:700;">{{ missing_cover_count|default:0|intcomma }}</small>
+                        <small id="sidebar-missing-cover-count" style="color:#f59e0b; font-weight:700;">{{
+                            missing_cover_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:duplicates_dashboard' %}"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:#38bdf8; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25);"
@@ -377,80 +387,93 @@
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}#c084fc{% else %}#cbd5e1{% endif %}; background:{% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}rgba(192,132,252,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}rgba(192,132,252,0.38){% else %}transparent{% endif %};"
                         title="Books that have not yet been enriched by epubmeta">
                         <span><i class="fa-solid fa-hourglass-half" style="color:#c084fc;"></i> Needs Enriching</span>
-                        <small id="sidebar-needs-enriching-count" style="color:#c084fc; font-weight:700;">{{ enrich_status_counts.needs_enriching|default:0|intcomma }}</small>
+                        <small id="sidebar-needs-enriching-count" style="color:#c084fc; font-weight:700;">{{
+                            enrich_status_counts.needs_enriching|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=needs_review"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}#fbbf24{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'needs_review' %}rgba(251,191,36,0.38){% else %}transparent{% endif %};"
                         title="Books with low-confidence candidate matches needing review/approval">
                         <span><i class="fa-solid fa-clipboard-question" style="color:#fbbf24;"></i> In Review</span>
-                        <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{ enrich_status_counts.needs_review|default:0|intcomma }}</small>
+                        <small id="sidebar-needs-review-count" style="color:#fbbf24; font-weight:700;">{{
+                            enrich_status_counts.needs_review|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=no_match"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}#f97316{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}rgba(249,115,22,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}rgba(249,115,22,0.38){% else %}transparent{% endif %};"
                         title="Books where enrichment found no catalog match (NOT_FOUND / NO_ISBN), ordered by most recently checked first">
                         <span><i class="fa-solid fa-magnifying-glass-minus" style="color:#f97316;"></i> No Match</span>
-                        <small id="sidebar-no-match-count" style="color:#f97316; font-weight:700;">{{ enrich_status_counts.no_match|default:0|intcomma }}</small>
+                        <small id="sidebar-no-match-count" style="color:#f97316; font-weight:700;">{{
+                            enrich_status_counts.no_match|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=removed_protection"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}#10b981{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.38){% else %}transparent{% endif %};"
                         title="Books with 'nodrm' in the filename, sorted newest first">
                         <span><i class="fa-solid fa-lock-open" style="color:#10b981;"></i> Removed Protection</span>
-                        <small id="sidebar-removed-protection-count" style="color:#10b981; font-weight:700;">{{ removed_protection_count|default:0|intcomma }}</small>
+                        <small id="sidebar-removed-protection-count" style="color:#10b981; font-weight:700;">{{
+                            removed_protection_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=packt"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}#f97316{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}rgba(249,115,22,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'packt' or selected_shelf == 'packt_books' %}rgba(249,115,22,0.38){% else %}transparent{% endif %};"
                         title="Books in Computer Mags &amp; FAQ/978 (978* ISBN computer books), sorted by most recent file modification date first">
                         <span><i class="fa-solid fa-laptop-code" style="color:#f97316;"></i> Packt Books</span>
-                        <small id="sidebar-packt-books-count" style="color:#f97316; font-weight:700;">{{ packt_books_count|default:0|intcomma }}</small>
+                        <small id="sidebar-packt-books-count" style="color:#f97316; font-weight:700;">{{
+                            packt_books_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=tomags"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'tomags' or selected_enrich_status == 'tomags' %}rgba(56,189,248,0.45){% else %}transparent{% endif %};"
                         title="Files currently in /toMags (verifies files are still in /toMags on disk before listing; click to review, peek inside, or Undo &amp; Enrich as Book)">
                         <span><i class="fa-solid fa-newspaper" style="color:#38bdf8;"></i> Moved to toMags</span>
-                        <small id="sidebar-tomags-count" style="color:#38bdf8; font-weight:700;">{{ tomags_count|default:0|intcomma }}</small>
+                        <small id="sidebar-tomags-count" style="color:#38bdf8; font-weight:700;">{{
+                            tomags_count|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=recent_pub"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'recent_pub' %}#34d399{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'recent_pub' %}rgba(52,211,153,0.38){% else %}transparent{% endif %};"
                         title="Books published within the past 1 year, ordered newest publication date first">
                         <span><i class="fa-solid fa-calendar-days" style="color:#34d399;"></i> Recently Published (1
                             Yr)</span>
-                        <small style="color:#34d399; font-weight:700;">{{ stats.recent_pub_count|default:0|intcomma }}</small>
+                        <small style="color:#34d399; font-weight:700;">{{ stats.recent_pub_count|default:0|intcomma
+                            }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=amazon"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon' %}#fb923c{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon' %}rgba(251,146,60,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon' %}rgba(251,146,60,0.38){% else %}transparent{% endif %};"
                         title="Books purchased on Amazon Kindle (prefer reading in Amazon Kindle App)">
                         <span><i class="fa-brands fa-amazon" style="color:#fb923c;"></i> Purchased on Amazon</span>
-                        <small style="color:#fb923c; font-weight:700;">{{ amazon_counts.kindle_purchased|default:0|intcomma }}</small>
+                        <small style="color:#fb923c; font-weight:700;">{{
+                            amazon_counts.kindle_purchased|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=kindle_plus"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'kindle_plus' %}#2dd4bf{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'kindle_plus' %}rgba(45,212,191,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'kindle_plus' %}rgba(45,212,191,0.38){% else %}transparent{% endif %};"
                         title="Kindle+ books (Kindle Unlimited, Prime Reading, ComiXology)">
                         <span><i class="fa-solid fa-bolt" style="color:#2dd4bf;"></i> Kindle+ (KU / Prime)</span>
-                        <small style="color:#2dd4bf; font-weight:700;">{{ amazon_counts.kindle_plus|default:0|intcomma }}</small>
+                        <small style="color:#2dd4bf; font-weight:700;">{{ amazon_counts.kindle_plus|default:0|intcomma
+                            }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=amazon_bookmarked"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_bookmarked' %}#f59e0b{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_bookmarked' %}rgba(245,158,11,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_bookmarked' %}rgba(245,158,11,0.38){% else %}transparent{% endif %};"
                         title="Amazon Kindle books with reading progress, bookmarks, or highlights/notes">
                         <span><i class="fa-solid fa-book-bookmark" style="color:#f59e0b;"></i> Amazon Bookmarked</span>
-                        <small style="color:#f59e0b; font-weight:700;">{{ amazon_counts.kindle_bookmarked|default:0|intcomma }}</small>
+                        <small style="color:#f59e0b; font-weight:700;">{{
+                            amazon_counts.kindle_bookmarked|default:0|intcomma }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=audible"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'audible' %}#c084fc{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'audible' %}rgba(192,132,252,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'audible' %}rgba(192,132,252,0.38){% else %}transparent{% endif %};"
                         title="Purchased Audible Audiobooks &amp; Audible+ titles">
                         <span><i class="fa-solid fa-headphones" style="color:#c084fc;"></i> Purchased on Audible</span>
-                        <small style="color:#c084fc; font-weight:700;">{{ amazon_counts.audible|default:0|intcomma }}</small>
+                        <small style="color:#c084fc; font-weight:700;">{{ amazon_counts.audible|default:0|intcomma
+                            }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=amazon_only"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_only' %}#f87171{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_only' %}rgba(248,113,113,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_only' %}rgba(248,113,113,0.38){% else %}transparent{% endif %};"
                         title="Amazon Kindle, Kindle+, and Audible books that do NOT match any local NAS file">
                         <span><i class="fa-solid fa-cloud" style="color:#f87171;"></i> Amazon Only (Not on NAS)</span>
-                        <small style="color:#f87171; font-weight:700;">{{ amazon_counts.amazon_only|default:0|intcomma }}</small>
+                        <small style="color:#f87171; font-weight:700;">{{ amazon_counts.amazon_only|default:0|intcomma
+                            }}</small>
                     </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=amazon_matched"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'amazon_matched' %}#60a5fa{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'amazon_matched' %}rgba(96,165,250,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_matched' %}rgba(96,165,250,0.38){% else %}transparent{% endif %};"
                         title="Amazon books that also have a local EPUB/PDF/Audiobook copy on your NAS">
                         <span><i class="fa-solid fa-link" style="color:#60a5fa;"></i> Matched to NAS Books</span>
-                        <small style="color:#60a5fa; font-weight:700;">{{ amazon_counts.amazon_matched|default:0|intcomma }}</small>
+                        <small style="color:#60a5fa; font-weight:700;">{{
+                            amazon_counts.amazon_matched|default:0|intcomma }}</small>
                     </a>
                 </div>
             </div>
@@ -494,7 +517,8 @@
                             {% endif %}
                             <span style="overflow:hidden; text-overflow:ellipsis;">{{ fld_name }}</span>
                         </span>
-                        <small style="opacity:0.75; font-weight:600; margin-left:0.35rem;">{{ fld_cnt|intcomma }}</small>
+                        <small style="opacity:0.75; font-weight:600; margin-left:0.35rem;">{{ fld_cnt|intcomma
+                            }}</small>
                     </a>
                     {% endfor %}
                 </div>
@@ -552,7 +576,8 @@
                 <div class="filter-options">
                     {% for val, label in available_types %}
                     <label class="filter-label">
-                        <input type="checkbox" name="type" value="{{ val }}" {% if val in selected_types %}checked{% endif %} onchange="this.form.submit()">
+                        <input type="checkbox" name="type" value="{{ val }}" {% if val in selected_types %}checked{%
+                            endif %} onchange="this.form.submit()">
                         <span>
                             {% if val == 'BOOK' %}<i class="fa-solid fa-book"></i>
                             {% elif val == 'MAGAZINE' %}<i class="fa-solid fa-newspaper"></i>
@@ -572,7 +597,8 @@
                 <div class="filter-options">
                     {% for format in available_formats %}
                     <label class="filter-label">
-                        <input type="checkbox" name="format" value="{{ format }}" {% if format in selected_formats %}checked{% endif %} onchange="this.form.submit()">
+                        <input type="checkbox" name="format" value="{{ format }}" {% if format in selected_formats
+                            %}checked{% endif %} onchange="this.form.submit()">
                         <span>{{ format }}</span>
                     </label>
                     {% endfor %}
@@ -618,7 +644,8 @@
                             class="fa-solid fa-font"></i> Text-Only ({{ text_only_cover_count|default:0|intcomma }})</a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover&amp;cover_issue=missing"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_cover_issue == 'missing' %}background:rgba(244,63,94,0.28); border:1px solid rgba(244,63,94,0.7); color:#ffe4e6;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fda4af;{% endif %}"><i
-                            class="fa-regular fa-image"></i> Missing ({{ missing_cover_only_count|default:0|intcomma }})</a>
+                            class="fa-regular fa-image"></i> Missing ({{ missing_cover_only_count|default:0|intcomma
+                        }})</a>
                 </span>
                 {% elif selected_shelf == 'recent_pub' %}
                 &mdash; <span style="color:#34d399; font-weight:600;"><i class="fa-solid fa-calendar-days"></i> Recently
@@ -668,9 +695,12 @@
                 {% elif selected_enrich_status == 'enriched' %}
                 &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles"></i>
                     Enriched</span>
-                {% elif selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' or selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}
+                {% elif selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf
+                == 'in_review' or selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf
+                == 'no_isbn' or selected_shelf == 'not_found' %}
                 &mdash;
-                {% if selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}
+                {% if selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf ==
+                'no_isbn' or selected_shelf == 'not_found' %}
                 <span style="color:#f97316; font-weight:600;"><i class="fa-solid fa-magnifying-glass-minus"></i> No
                     Match (Most Recently Checked First):</span>
                 {% else %}
@@ -680,10 +710,12 @@
                 <span style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem;">
                     <a href="{% url 'catalog:dashboard' %}?shelf=needs_review"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_review_type != 'all' and selected_shelf == 'needs_review' or selected_review_type != 'all' and selected_shelf == 'in_review' or selected_review_type != 'all' and selected_enrich_status == 'needs_review' %}background:rgba(251,191,36,0.28); border:1px solid rgba(251,191,36,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fcd34d;{% endif %}"><i
-                            class="fa-solid fa-clipboard-question"></i> In Review ({{ strict_in_review_count|default:0|intcomma }})</a>
+                            class="fa-solid fa-clipboard-question"></i> In Review ({{
+                        strict_in_review_count|default:0|intcomma }})</a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=no_match"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' or selected_enrich_status == 'no_match' %}background:rgba(249,115,22,0.28); border:1px solid rgba(249,115,22,0.7); color:#ffedd5;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fdba74;{% endif %}"><i
-                            class="fa-solid fa-magnifying-glass-minus"></i> No Match ({{ no_match_count|default:0|intcomma }})</a>
+                            class="fa-solid fa-magnifying-glass-minus"></i> No Match ({{
+                        no_match_count|default:0|intcomma }})</a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=needs_review&amp;review_type=all"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_review_type == 'all' %}background:rgba(56,189,248,0.28); border:1px solid rgba(56,189,248,0.7); color:#e0f2fe;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">All
                         ({{ all_review_and_no_match_count|default:0|intcomma }})</a>
@@ -693,7 +725,8 @@
                 &mdash;
                 <span style="display:inline-flex; flex-wrap:wrap; gap:0.3rem; align-items:center;">
                     <span style="color:#38bdf8; font-weight:600; font-size:0.78rem;"><i
-                            class="fa-regular fa-folder-open"></i> Folder{% if selected_folders|length > 1 %}s{% endif %}:</span>
+                            class="fa-regular fa-folder-open"></i> Folder{% if selected_folders|length > 1 %}s{% endif
+                        %}:</span>
                     {% for fld in selected_folders %}
                     <span
                         style="display:inline-flex; align-items:center; gap:0.25rem; background:{% if fld == 'Archive-X' %}rgba(244,63,94,0.22){% else %}rgba(56,189,248,0.18){% endif %}; border:1px solid {% if fld == 'Archive-X' %}rgba(244,63,94,0.55){% else %}rgba(56,189,248,0.48){% endif %}; color:{% if fld == 'Archive-X' %}#fda4af{% else %}#7dd3fc{% endif %}; border-radius:999px; padding:0.12rem 0.5rem; font-size:0.74rem; font-weight:700;">
@@ -738,7 +771,8 @@
                 </span>
                 {% endif %}
                 {% if selected_author %}
-                &mdash; <span class="author-active-pill"><i class="fa-solid fa-user-pen"></i> Author: <strong>{{ selected_author }}</strong> <a
+                &mdash; <span class="author-active-pill"><i class="fa-solid fa-user-pen"></i> Author: <strong>{{
+                        selected_author }}</strong> <a
                         href="?{% if selected_types %}type={{ selected_types.0 }}&amp;{% endif %}{% if selected_enrich_status %}enrich_status={{ selected_enrich_status }}{% endif %}"
                         class="author-clear-link" title="Clear author filter">&times;</a></span>
                 {% endif %}
@@ -751,7 +785,8 @@
                     <select id="top-type-select" class="control-select" aria-label="Filter by Type">
                         <option value="" {% if not selected_types %}selected{% endif %}>All Types</option>
                         {% for val, label in available_types %}
-                        <option value="{{ val }}" {% if selected_types|length == 1 and val in selected_types %}selected{% endif %}>{{ label }}</option>
+                        <option value="{{ val }}" {% if selected_types|length==1 and val in selected_types %}selected{%
+                            endif %}>{{ label }}</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -761,14 +796,24 @@
                     <i class="fa-solid fa-wand-magic-sparkles control-icon" style="color:#c084fc;"></i>
                     <select id="top-enrich-status-select" class="control-select"
                         aria-label="Filter by Enrichment Status">
-                        <option value="" {% if not selected_enrich_status and selected_shelf != 'needs_enriching' and selected_shelf != 'needs_review' and selected_shelf != 'in_review' and selected_shelf != 'no_match' and selected_shelf != 'no_isbn' and selected_shelf != 'not_found' and selected_shelf != 'missing_cover' %}selected{% endif %}>Enrich: All</option>
-                        <option value="needs_enriching" {% if selected_enrich_status == 'needs_enriching' or selected_shelf == 'needs_enriching' %}selected{% endif %}>⏳ Needs Enriching ({{ enrich_status_counts.needs_enriching|default:0|intcomma }})</option>
-                        <option value="enriched" {% if selected_enrich_status == 'enriched' or selected_shelf == 'enriched' %}selected{% endif %}>✨ Enriched ({{ enrich_status_counts.enriched|default:0|intcomma }})
+                        <option value="" {% if not selected_enrich_status and selected_shelf !='needs_enriching' and
+                            selected_shelf !='needs_review' and selected_shelf !='in_review' and selected_shelf
+                            !='no_match' and selected_shelf !='no_isbn' and selected_shelf !='not_found' and
+                            selected_shelf !='missing_cover' %}selected{% endif %}>Enrich: All</option>
+                        <option value="needs_enriching" {% if selected_enrich_status=='needs_enriching' or
+                            selected_shelf=='needs_enriching' %}selected{% endif %}>⏳ Needs Enriching ({{
+                            enrich_status_counts.needs_enriching|default:0|intcomma }})</option>
+                        <option value="enriched" {% if selected_enrich_status=='enriched' or selected_shelf=='enriched'
+                            %}selected{% endif %}>✨ Enriched ({{ enrich_status_counts.enriched|default:0|intcomma }})
                         </option>
-                        <option value="missing_cover" {% if selected_enrich_status == 'missing_cover' or selected_shelf == 'missing_cover' %}selected{% endif %}>🖼️ Missing / Text Cover ({{ missing_cover_count|default:0|intcomma }})</option>
-                        <option value="needs_review" {% if selected_enrich_status == 'needs_review' or selected_shelf == 'needs_review' or selected_shelf == 'in_review' %}selected{% endif %}>📋 In
+                        <option value="missing_cover" {% if selected_enrich_status=='missing_cover' or
+                            selected_shelf=='missing_cover' %}selected{% endif %}>🖼️ Missing / Text Cover ({{
+                            missing_cover_count|default:0|intcomma }})</option>
+                        <option value="needs_review" {% if selected_enrich_status=='needs_review' or
+                            selected_shelf=='needs_review' or selected_shelf=='in_review' %}selected{% endif %}>📋 In
                             Review ({{ enrich_status_counts.needs_review|default:0|intcomma }})</option>
-                        <option value="no_match" {% if selected_enrich_status == 'no_match' or selected_shelf == 'no_match' or selected_shelf == 'no_isbn' or selected_shelf == 'not_found' %}selected{% endif %}>🔍 No
+                        <option value="no_match" {% if selected_enrich_status=='no_match' or selected_shelf=='no_match'
+                            or selected_shelf=='no_isbn' or selected_shelf=='not_found' %}selected{% endif %}>🔍 No
                             Match ({{ enrich_status_counts.no_match|default:0|intcomma }})</option>
                     </select>
                 </div>
@@ -795,14 +840,16 @@
                     <select id="top-read-status-select" class="control-select"
                         aria-label="Filter by Read / Unread Bookmark Status">
                         <option value="" {% if not selected_read_status %}selected{% endif %}>
-                            {% if selected_shelf in 'bookmarked,annotations,amazon_bookmarked' %}All Bookmarked ({{ bookmark_progress_counts.all|intcomma }}){% else %}Read Status: All{% endif %}
+                            {% if selected_shelf in 'bookmarked,annotations,amazon_bookmarked' %}All Bookmarked ({{
+                            bookmark_progress_counts.all|intcomma }}){% else %}Read Status: All{% endif %}
                         </option>
-                        <option value="read" {% if selected_read_status == 'read' %}selected{% endif %}>✓ Read (100%) ({{ bookmark_progress_counts.read|intcomma }})</option>
-                        <option value="unread" {% if selected_read_status == 'unread' %}selected{% endif %}>🔖 Unread
+                        <option value="read" {% if selected_read_status=='read' %}selected{% endif %}>✓ Read (100%) ({{
+                            bookmark_progress_counts.read|intcomma }})</option>
+                        <option value="unread" {% if selected_read_status=='unread' %}selected{% endif %}>🔖 Unread
                             (&lt; 100%) ({{ bookmark_progress_counts.unread|intcomma }})</option>
-                        <option value="reading" {% if selected_read_status == 'reading' %}selected{% endif %}>📖 In
+                        <option value="reading" {% if selected_read_status=='reading' %}selected{% endif %}>📖 In
                             Progress (1–99%) ({{ bookmark_progress_counts.reading|intcomma }})</option>
-                        <option value="unstarted" {% if selected_read_status == 'unstarted' %}selected{% endif %}>○
+                        <option value="unstarted" {% if selected_read_status=='unstarted' %}selected{% endif %}>○
                             Unstarted (0%) ({{ bookmark_progress_counts.unstarted|intcomma }})</option>
                     </select>
                 </div>
@@ -813,27 +860,29 @@
                     <i class="fa-solid fa-arrow-up-wide-short control-icon"></i>
                     <select id="top-sort-select" class="control-select" aria-label="Sort Books By">
                         <option value="" {% if not selected_sort %}selected{% endif %}>Sort: Default</option>
-                        <option value="filedate_desc" {% if selected_sort == 'filedate_desc' or selected_sort == 'added_desc' %}selected{% endif %}>File Date / Added (Newest)</option>
-                        <option value="filedate_asc" {% if selected_sort == 'filedate_asc' or selected_sort == 'added_asc' %}selected{% endif %}>File Date / Added (Oldest)</option>
-                        <option value="pubdate_desc" {% if selected_sort == 'pubdate_desc' %}selected{% endif %}>Pub Date
+                        <option value="filedate_desc" {% if selected_sort=='filedate_desc' or
+                            selected_sort=='added_desc' %}selected{% endif %}>File Date / Added (Newest)</option>
+                        <option value="filedate_asc" {% if selected_sort=='filedate_asc' or selected_sort=='added_asc'
+                            %}selected{% endif %}>File Date / Added (Oldest)</option>
+                        <option value="pubdate_desc" {% if selected_sort=='pubdate_desc' %}selected{% endif %}>Pub Date
                             (Newest First)</option>
-                        <option value="pubdate_asc" {% if selected_sort == 'pubdate_asc' %}selected{% endif %}>Pub Date
+                        <option value="pubdate_asc" {% if selected_sort=='pubdate_asc' %}selected{% endif %}>Pub Date
                             (Oldest First)</option>
-                        <option value="title_asc" {% if selected_sort == 'title_asc' %}selected{% endif %}>Title (A &rarr;
+                        <option value="title_asc" {% if selected_sort=='title_asc' %}selected{% endif %}>Title (A &rarr;
                             Z)</option>
-                        <option value="title_desc" {% if selected_sort == 'title_desc' %}selected{% endif %}>Title (Z
+                        <option value="title_desc" {% if selected_sort=='title_desc' %}selected{% endif %}>Title (Z
                             &rarr; A)</option>
-                        <option value="author_asc" {% if selected_sort == 'author_asc' %}selected{% endif %}>Author (A
+                        <option value="author_asc" {% if selected_sort=='author_asc' %}selected{% endif %}>Author (A
                             &rarr; Z)</option>
-                        <option value="author_desc" {% if selected_sort == 'author_desc' %}selected{% endif %}>Author (Z
+                        <option value="author_desc" {% if selected_sort=='author_desc' %}selected{% endif %}>Author (Z
                             &rarr; A)</option>
                         {% if bookmark_progress_counts.all > 0 %}
-                        <option value="progress_desc" {% if selected_sort == 'progress_desc' %}selected{% endif %}>Read %
+                        <option value="progress_desc" {% if selected_sort=='progress_desc' %}selected{% endif %}>Read %
                             (High &rarr; Low)</option>
-                        <option value="progress_asc" {% if selected_sort == 'progress_asc' %}selected{% endif %}>Read %
+                        <option value="progress_asc" {% if selected_sort=='progress_asc' %}selected{% endif %}>Read %
                             (Low &rarr; High)</option>
                         {% endif %}
-                        <option value="updated_desc" {% if selected_sort == 'updated_desc' %}selected{% endif %}>Recently
+                        <option value="updated_desc" {% if selected_sort=='updated_desc' %}selected{% endif %}>Recently
                             Updated</option>
                     </select>
                 </div>
@@ -874,32 +923,46 @@
                     {% endif %}
 
                     {% if item.has_tomags_file %}
-                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}" data-current-type="MAGAZINE" data-can-undo="true"
+                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}"
+                        data-current-type="MAGAZINE" data-can-undo="true"
                         onclick="event.stopPropagation(); if(window.onTypePillClick) window.onTypePillClick(this, event);"
                         style="cursor:pointer; background:rgba(56,189,248,0.88);"
                         title="Moved to Magazines — Click to Undo and move directly back to original folder">
-                        MAGAZINE <i class="fa-solid fa-rotate-left pill-undo-icon" style="font-size:0.55rem; opacity:0.95; margin-left:2px;"></i>{% if vx_unlocked %}<i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% endif %}
+                        MAGAZINE <i class="fa-solid fa-rotate-left pill-undo-icon"
+                            style="font-size:0.55rem; opacity:0.95; margin-left:2px;"></i>{% if vx_unlocked %}<i
+                            class="fa-solid fa-caret-down"
+                            style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% endif %}
                     </span>
                     {% elif vx_unlocked and item.top_folder == 'Archive-X' %}
-                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}" data-current-type="ARCHIVE-X" data-can-undo="false"
+                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}"
+                        data-current-type="ARCHIVE-X" data-can-undo="false"
                         onclick="event.stopPropagation(); if(window.onTypePillClick) window.onTypePillClick(this, event);"
                         style="cursor:pointer; background:rgba(244,63,94,0.88);"
                         title="Click to move to Books or Magazines">
-                        ARCHIVE-X <i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.9; margin-left:3px;"></i>
+                        ARCHIVE-X <i class="fa-solid fa-caret-down"
+                            style="font-size:0.58rem; opacity:0.9; margin-left:3px;"></i>
                     </span>
                     {% elif item.item_type == 'BOOK' %}
-                    <span class="card-type-badge type-book" data-item-id="{{ item.id }}" data-current-type="BOOK" data-can-undo="false"
+                    <span class="card-type-badge type-book" data-item-id="{{ item.id }}" data-current-type="BOOK"
+                        data-can-undo="false"
                         onclick="event.stopPropagation(); if(window.onTypePillClick) window.onTypePillClick(this, event);"
                         style="cursor:pointer;"
                         title="{% if vx_unlocked %}Click to choose target type (Magazines or Archive-X){% else %}Click to switch type to MAGAZINE (click again to Undo directly back to origin){% endif %}">
-                        BOOK {% if vx_unlocked %}<i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% else %}<i class="fa-solid fa-repeat" style="font-size:0.55rem; opacity:0.8; margin-left:2px;"></i>{% endif %}
+                        BOOK {% if vx_unlocked %}<i class="fa-solid fa-caret-down"
+                            style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% else %}<i
+                            class="fa-solid fa-repeat" style="font-size:0.55rem; opacity:0.8; margin-left:2px;"></i>{%
+                        endif %}
                     </span>
                     {% elif item.item_type == 'MAGAZINE' %}
-                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}" data-current-type="MAGAZINE" data-can-undo="false"
+                    <span class="card-type-badge type-magazine" data-item-id="{{ item.id }}"
+                        data-current-type="MAGAZINE" data-can-undo="false"
                         onclick="event.stopPropagation(); if(window.onTypePillClick) window.onTypePillClick(this, event);"
                         style="cursor:pointer;"
                         title="{% if vx_unlocked %}Click to choose target type (Books or Archive-X){% else %}Click to switch type to BOOK (click again to Undo directly back to origin){% endif %}">
-                        MAGAZINE {% if vx_unlocked %}<i class="fa-solid fa-caret-down" style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% else %}<i class="fa-solid fa-repeat" style="font-size:0.55rem; opacity:0.8; margin-left:2px;"></i>{% endif %}
+                        MAGAZINE {% if vx_unlocked %}<i class="fa-solid fa-caret-down"
+                            style="font-size:0.58rem; opacity:0.85; margin-left:3px;"></i>{% else %}<i
+                            class="fa-solid fa-repeat" style="font-size:0.55rem; opacity:0.8; margin-left:2px;"></i>{%
+                        endif %}
                     </span>
                     {% else %}
                     <span
@@ -940,7 +1003,8 @@
                         title="{{ item.amazon_ownership_info.badge_label }} — Read in Amazon Kindle App">
                         <i class="fa-solid fa-bolt"></i> {{ item.amazon_ownership_info.short_badge }}
                         {% if item.amazon_ownership_info.percentage_read %}<span
-                            style="color:#f8fafc; margin-left:3px;">&middot; {{ item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
+                            style="color:#f8fafc; margin-left:3px;">&middot; {{
+                            item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
                     </span>
                     {% else %}
                     <span
@@ -948,7 +1012,8 @@
                         title="Purchased on Amazon (ASIN: {{ item.amazon_ownership_info.asin }}) — Prefer Reading in Amazon Kindle App">
                         <i class="fa-brands fa-amazon"></i> Purchased on Amazon
                         {% if item.amazon_ownership_info.percentage_read %}<span
-                            style="color:#f8fafc; margin-left:3px;">&middot; {{ item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
+                            style="color:#f8fafc; margin-left:3px;">&middot; {{
+                            item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
                     </span>
                     {% endif %}
                     {% endif %}
@@ -959,7 +1024,8 @@
                         {% if item.moon_bookmark_info.pct_val >= 99 %}<i class="fa-solid fa-circle-check"></i> 100%
                         Read{% else %}<i class="fa-solid fa-bookmark"></i> {{ item.moon_bookmark_info.pct }}{% endif %}
                         {% if item.moon_bookmark_info.date_short %}<span
-                            style="color:#cbd5e1; font-weight:500; margin-left:3px;">&middot; {{ item.moon_bookmark_info.date_short }}</span>{% endif %}
+                            style="color:#cbd5e1; font-weight:500; margin-left:3px;">&middot; {{
+                            item.moon_bookmark_info.date_short }}</span>{% endif %}
                         {% if item.moon_bookmark_info.has_an %}<i class="fa-solid fa-highlighter"
                             style="color:#fbbf24; margin-left:3px;" title="Has Highlights/Notes (.an)"></i>{% endif %}
                     </span>
@@ -971,16 +1037,19 @@
                     <h2 class="card-title" title="{{ item.title }}">{{ item.title }}</h2>
                     <p class="card-author" title="by {{ item.author_list|join:', ' }}">
                         by
-                        {% if item.item_type == 'MAGAZINE' or item.top_folder == 'Periodicals' or item.top_folder == 'Archive-X' %}
+                        {% if item.item_type == 'MAGAZINE' or item.top_folder == 'Periodicals' or item.top_folder ==
+                        'Archive-X' %}
                         {% for author_name in item.author_list %}
                         <a href="?folder={{ item.top_folder|default:'Periodicals'|urlencode }}&amp;series={{ item.periodical_series|default:author_name|urlencode }}&amp;sort=pubdate_desc"
                             class="author-filter-link"
-                            title="Filter by publication: {{ item.periodical_series|default:author_name }} (Sorted by Most Recent Issue First)">{{ author_name }}</a>{% if not forloop.last %}, {% endif %}
+                            title="Filter by publication: {{ item.periodical_series|default:author_name }} (Sorted by Most Recent Issue First)">{{
+                            author_name }}</a>{% if not forloop.last %}, {% endif %}
                         {% endfor %}
                         {% else %}
                         {% for author_name in item.author_list %}
                         <a href="?author={{ author_name|urlencode }}&amp;sort=pubdate_desc" class="author-filter-link"
-                            title="Filter by author: {{ author_name }} (Sorted by Newest First)">{{ author_name }}</a>{% if not forloop.last %}, {% endif %}
+                            title="Filter by author: {{ author_name }} (Sorted by Newest First)">{{ author_name }}</a>{%
+                        if not forloop.last %}, {% endif %}
                         {% endfor %}
                         {% endif %}
                     </p>
@@ -1004,7 +1073,8 @@
                                 <a href="?folder={{ item.top_folder|urlencode }}&amp;series={{ item.periodical_series|urlencode }}&amp;sort=pubdate_desc"
                                     onclick="event.stopPropagation();" class="card-folder-label"
                                     style="color:inherit; text-decoration:none; overflow:hidden; text-overflow:ellipsis;"
-                                    title="Filter by {{ item.periodical_series }} issues (Sorted by Most Recent Issue First)">{{ item.top_folder }} &rsaquo; {{ item.periodical_series }}</a>
+                                    title="Filter by {{ item.periodical_series }} issues (Sorted by Most Recent Issue First)">{{
+                                    item.top_folder }} &rsaquo; {{ item.periodical_series }}</a>
                                 <span
                                     onclick="event.stopPropagation(); window.openRetagModalForItem('{{ item.id }}', '{{ item.title|escapejs }}', '{{ item.top_folder|escapejs }}', '{{ item.periodical_series|default:''|escapejs }}');"
                                     style="cursor:pointer; padding-left:2px;"
@@ -1017,12 +1087,14 @@
                                 onclick="event.stopPropagation(); window.openRetagModalForItem('{{ item.id }}', '{{ item.title|escapejs }}', '{{ item.top_folder|escapejs }}', '');"
                                 style="cursor:pointer; color:{% if item.top_folder == 'Archive-X' %}#fda4af{% else %}#38bdf8{% endif %}; border-color:{% if item.top_folder == 'Archive-X' %}rgba(244,63,94,0.45){% else %}rgba(56,189,248,0.35){% endif %}; background:{% if item.top_folder == 'Archive-X' %}rgba(244,63,94,0.14){% else %}rgba(56,189,248,0.1){% endif %}; max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                                 title="Virtual Folder: {{ item.top_folder }} — Click to Retag / Move to another folder">
-                                <i class="fa-regular fa-folder-open"></i> <span class="card-folder-label">{{ item.top_folder }}</span> <i class="fa-solid fa-pen"
+                                <i class="fa-regular fa-folder-open"></i> <span class="card-folder-label">{{
+                                    item.top_folder }}</span> <i class="fa-solid fa-pen"
                                     style="font-size:0.58rem; opacity:0.75; margin-left:2px;"></i>
                             </button>
                             {% endif %}
                             {% endif %}
-                            {% if item.file_date and selected_sort in 'filedate_desc,filedate_asc,added_desc,added_asc' %}
+                            {% if item.file_date and selected_sort in 'filedate_desc,filedate_asc,added_desc,added_asc'
+                            %}
                             <span class="pubdate-pill has-date"
                                 style="color:#38bdf8; border-color:rgba(56,189,248,0.35); background:rgba(56,189,248,0.12);"
                                 title="File Date (Date Added): {{ item.file_date|date:'Y-m-d' }}">
@@ -1130,14 +1202,16 @@
                                         data-filedate="{{ item.file_date|date:'Y-m-d'|default:'' }}"
                                         data-isbn="{{ item.isbn|default:'' }}"
                                         data-enrich-status="{{ item.enrich_diag.status|default:'' }}"
-                                        data-enrich-error="{{ item.enrich_diag.error|default:'' }}" {% if item.amazon_ownership_info %}
+                                        data-enrich-error="{{ item.enrich_diag.error|default:'' }}" {% if
+                                        item.amazon_ownership_info %}
                                         data-asin="{{ item.asin|default:item.amazon_ownership_info.asin|default:'' }}"
                                         data-amazon-badge="{{ item.amazon_ownership_info.badge_label|default:'' }}"
                                         data-amazon-plus="{{ item.amazon_ownership_info.is_kindle_plus|yesno:'true,false' }}"
                                         data-amazon-type="{{ item.amazon_ownership_info.item_type|default:'' }}"
                                         data-amazon-pct="{{ item.amazon_ownership_info.percentage_read|default:0 }}"
                                         data-amazon-date="{{ item.amazon_ownership_info.last_annotated_date|default:'' }}"
-                                        data-amazon-url="{{ item.amazon_ownership_info.web_reader_url|default:'' }}" {% else %} data-asin="{{ item.asin|default:'' }}" {% endif %}
+                                        data-amazon-url="{{ item.amazon_ownership_info.web_reader_url|default:'' }}" {%
+                                        else %} data-asin="{{ item.asin|default:'' }}" {% endif %}
                                         data-files="{{ item.files_json }}">
                                         View Details
                                     </button>
@@ -1253,7 +1327,8 @@
             {% endif %}
 
             <span class="page-info">
-                Page <strong>{{ page_obj.number|intcomma }}</strong> of <strong>{{ paginator.num_pages|intcomma }}</strong>
+                Page <strong>{{ page_obj.number|intcomma }}</strong> of <strong>{{ paginator.num_pages|intcomma
+                    }}</strong>
             </span>
 
             <button type="button" id="btn-enrich-page-bottom" class="btn-enrich-page" onclick="window.enrichAllOnPage()"
@@ -2188,8 +2263,9 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
 {% endblock %}
 
 {% block extra_js %}
-<script>window.VX_UNLOCKED = {% if vx_unlocked %}true{% else %}false{% endif %};</script>
+<script>window.VX_UNLOCKED = {% if vx_unlocked %}true{% else %} false{% endif %};</script>
 <script src="{% static 'js/search.js' %}?v=20261114c"></script>
+<script src="{% static 'js/search.js' %}?v=20261115a"></script>
 <script>
     (function () {
         const BASE_PREFIX = window.location.pathname.startsWith('/mylibrary') ? '/mylibrary' : '';
@@ -2414,6 +2490,57 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
                         }
                         return;
                     }
+                    const finalFolder = data.target_folder || targetFolder;
+                    const finalSeries = serIn ? serIn.value.trim() : '';
+                    if (sel && finalFolder && !Array.from(sel.options).some(o => o.value === finalFolder)) {
+                        const newOpt = document.createElement('option');
+                        newOpt.value = finalFolder;
+                        newOpt.textContent = finalFolder;
+                        const newMarker = Array.from(sel.options).find(o => o.value === '__NEW__');
+                        if (newMarker) sel.insertBefore(newOpt, newMarker);
+                        else sel.appendChild(newOpt);
+                        sel.value = finalFolder;
+                        window.onRetagFolderSelectChange();
+                    }
+                    const movedByItem = {};
+                    if (Array.isArray(data.moved)) {
+                        data.moved.forEach(m => {
+                            if (m && m.item_id) movedByItem[m.item_id] = m;
+                        });
+                    }
+                    checkedIds.forEach(itemId => {
+                        const mInfo = movedByItem[itemId] || {};
+                        const newTop = mInfo.top_folder || finalFolder;
+                        const newSer = mInfo.periodical_series || finalSeries;
+                        const card = document.getElementById(`card-${itemId}`) || document.querySelector(`article.media-card[data-item-id="${itemId}"]`);
+                        if (!card) return;
+                        card.setAttribute('data-top-folder', newTop);
+                        const isArchX = (newTop === 'Archive-X');
+                        const isPer = (newTop === 'Periodicals' || isArchX);
+                        const lblText = (isPer && newSer) ? `${newTop} › ${newSer}` : newTop;
+                        const lblEl = card.querySelector('.card-folder-label');
+                        if (lblEl) lblEl.textContent = lblText;
+                        const badgeEl = card.querySelector('.card-folder-badge');
+                        if (badgeEl) {
+                            badgeEl.style.color = '#4ade80';
+                            badgeEl.style.borderColor = 'rgba(74,222,128,0.55)';
+                            badgeEl.style.background = 'rgba(74,222,128,0.16)';
+                            badgeEl.title = `Moved to ${lblText} — Click to Retag / Move to another folder`;
+                            const cardTitle = card.getAttribute('data-title') || '';
+                            badgeEl.onclick = function (ev) {
+                                ev.stopPropagation();
+                                window.openRetagModalForItem(itemId, cardTitle, newTop, newSer || '');
+                            };
+                        }
+                        const folderBtns = card.querySelectorAll('button[title*="Retag / Move"]');
+                        folderBtns.forEach(fb => {
+                            const cardTitle = card.getAttribute('data-title') || '';
+                            fb.onclick = function (ev) {
+                                ev.stopPropagation();
+                                window.openRetagModalForItem(itemId, cardTitle, newTop, newSer || '');
+                            };
+                        });
+                    });
                     if (st) {
                         const filesCnt = data.moved_files ?? data.moved_count ?? (data.moved ? data.moved.length : 0);
                         const itemsCnt = data.moved_items ?? filesCnt;
@@ -2421,58 +2548,61 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
                         st.style.background = 'rgba(74,222,128,0.18)';
                         st.style.color = '#4ade80';
                         st.textContent = `Moved ${filesCnt} file(s) across ${itemsCnt} item(s) to "${data.target_folder}". Reloading...`;
+                        st.textContent = `✓ Moved ${filesCnt} file(s) across ${itemsCnt} item(s) to "${finalFolder}".`;
                     }
                     setTimeout(() => {
                         window.location.reload();
                     }, 550);
-                })
-                .catch(err => {
-                    if (btn) btn.disabled = false;
-                    if (st) {
-                        st.style.display = 'block';
-                        st.style.background = 'rgba(239,68,68,0.18)';
-                        st.style.color = '#fca5a5';
-                        st.textContent = 'Network error: ' + err;
-                    }
-                });
-        };
-
-        window.quickRetagItem = function (itemId, targetFolder, btnEl) {
-            if (!itemId || !targetFolder) return;
-            if (btnEl) {
-                btnEl.disabled = true;
-                btnEl.textContent = '...';
+                    window.closeRetagModal();
+                }, 350);
+        })
+                .catch (err => {
+            if (btn) btn.disabled = false;
+            if (st) {
+                st.style.display = 'block';
+                st.style.background = 'rgba(239,68,68,0.18)';
+                st.style.color = '#fca5a5';
+                st.textContent = 'Network error: ' + err;
             }
-            fetch(`${BASE_PREFIX}/api/retag-folder/`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    item_ids: [itemId],
-                    target_folder: targetFolder
-                })
+        });
+    };
+
+    window.quickRetagItem = function (itemId, targetFolder, btnEl) {
+        if (!itemId || !targetFolder) return;
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.textContent = '...';
+        }
+        fetch(`${BASE_PREFIX}/api/retag-folder/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                item_ids: [itemId],
+                target_folder: targetFolder
             })
-                .then(r => r.json())
-                .then(data => {
-                    if (data && data.ok) {
-                        const card = document.getElementById(`card-${itemId}`);
-                        if (card) {
-                            card.style.opacity = '0.45';
-                            const lbl = card.querySelector('.card-folder-label');
-                            if (lbl) lbl.textContent = targetFolder;
-                        }
-                        if (btnEl) btnEl.textContent = '✓';
-                    } else if (btnEl) {
-                        btnEl.disabled = false;
-                        btnEl.textContent = 'Err';
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.ok) {
+                    const card = document.getElementById(`card-${itemId}`);
+                    if (card) {
+                        card.style.opacity = '0.45';
+                        const lbl = card.querySelector('.card-folder-label');
+                        if (lbl) lbl.textContent = targetFolder;
                     }
-                })
-                .catch(() => {
-                    if (btnEl) {
-                        btnEl.disabled = false;
-                        btnEl.textContent = 'Err';
-                    }
-                });
-        };
-    })();
+                    if (btnEl) btnEl.textContent = '✓';
+                } else if (btnEl) {
+                    btnEl.disabled = false;
+                    btnEl.textContent = 'Err';
+                }
+            })
+            .catch(() => {
+                if (btnEl) {
+                    btnEl.disabled = false;
+                    btnEl.textContent = 'Err';
+                }
+            });
+    };
+    }) ();
 </script>
 {% endblock %}

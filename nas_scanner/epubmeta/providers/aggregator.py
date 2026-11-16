@@ -55,14 +55,13 @@ class MetadataAggregator:
                     else:
                         merged = merged.merge_with(meta, combine_lists=True)
 
-                    # If we already have title, author, description, subjects, publisher, and cover, we're complete
+                    # If we already have title, author, description, cover, and publisher/subjects, we're complete
                     if (
                         merged.title
                         and merged.authors
                         and merged.description
-                        and merged.subjects
-                        and merged.publisher
                         and merged.cover_url
+                        and (merged.publisher or merged.subjects)
                     ):
                         break
             except Exception as e:

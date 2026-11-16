@@ -24,8 +24,8 @@ services:
       - DEBUG=True
       - TZ=America/New_York
       - TIME_ZONE=America/New_York
-    mem_limit: 2560m
-    memswap_limit: 2560m
+    mem_limit: 6144m
+    memswap_limit: 6144m
     networks:
       - default
     restart: always

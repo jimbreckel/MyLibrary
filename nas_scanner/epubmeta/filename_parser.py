@@ -24,10 +24,11 @@ JUNK_SUFFIXES = [
 ]
 
 
-# Internal DTP / Acrobat / Word production artifact titles (InDesign, Quark, PageMaker, FrameMaker, Word, Amazon image slugs)
+# Internal DTP / Acrobat / Word production artifact titles (InDesign, Quark, PageMaker, FrameMaker, Word, Amazon image slugs, ISBN-only slugs)
 _GARBAGE_EMBEDDED_TITLE_RE = re.compile(
     r"^(?:"
     r"untitled\b|"
+    r"[\s\-_]*(?:isbn[:\s\-]*)?(?:97[89][-\s\d]{10,16}|\d{9}[\dXx])(?:[\s\-_.]*(?:web|ebook|retail|book|print|pdf|epub|mobi|azw3|chm|cov\w*))*[\s\-_]*$|"
     r".*\.(?:indd|qxd|qxp|pmd|pm6|p65|fm|mif|doc|docx|pdf|ps|eps|dvi|tex|rtf|tmp|jpg|jpeg|png|gif|bmp|tif|tiff|webp)$|"
     r".*(?:_SCLZZZZ|_SS\d{2,4}_|_SY\d{2,4}_|_SX\d{2,4}_).*|"
     r"\d{2,4}[_\-\s].*(?:ffirs|ftoc|fbetw|flast|fpref|c01|ch01|cover|front|final|title)|"
@@ -39,6 +40,36 @@ _GARBAGE_EMBEDDED_TITLE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _strip_inline_release_and_isbn_junk(text: str) -> str:
+    """Strip inline/trailing (retail), (pdf), (epub), (v5.0), trailing ISBNs (-9780823430086_WEB, (978...)), and double extensions."""
+    if not text:
+        return ""
+    s = text.strip()
+    while re.search(r"\.(?:epub|pdf|mobi|azw3?|chm|djvu|fb2|lit|prc|pdb)$", s, flags=re.IGNORECASE):
+        s = re.sub(r"\.(?:epub|pdf|mobi|azw3?|chm|djvu|fb2|lit|prc|pdb)$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(
+        r"\s*[\(\[]\s*(?:retail|ebook|e-book|pdf|epub|mobi|azw3?|chm|djvu|nodrm|no\s*drm|z-lib(?:rary)?(?:\.org)?|v\d+(?:\.\d+)*|\d{1,2})\s*[\)\]]",
+        " ",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"\s*[\(\[]\s*(?:isbn[:\s\-]*)?(?:97[89][-\s]?(?:\d[-\s]?){9}\d|\d{9}[\dXx])\s*[\)\]]",
+        " ",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # Strip trailing ISBN + optional WEB/ebook/format suffix (when preceded by at least a 2-char title)
+    s = re.sub(
+        r"(?<=[\w\)\]])(?:\s*[-–—_]+\s*|\s+)(?:isbn[:\s\-]*)?(?:97[89][-\s]?(?:\d[-\s]?){9}\d|\d{9}[\dXx])(?:[\s_\-]*(?:web|ebook|retail|book|print|pdf|epub|mobi|azw3?|chm))*\s*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"(?:[-_]+|\s+-\s*)WEB\s*$", "", s, flags=re.IGNORECASE)
+    return s.strip()
 
 
 def is_garbage_embedded_title(raw_title: Optional[str]) -> bool:
@@ -62,8 +93,10 @@ def is_garbage_embedded_author(raw_author: Optional[str]) -> bool:
     if low in (
         "", "unknown", "unknown author", "..", ".", "admin", "administrator",
         "user", "owner", "default", "root", "guest", "author", "yyepg", "asura01",
-        "fk", "jess", "bartdevries", "ncargill", "jturner", "ldilk",
+        "fk", "jess", "bartdevries", "ncargill", "jturner", "ldilk", "asaul", "usuario",
     ):
+        return True
+    if re.search(r"\b(?:retail|epub|pdf|mobi|azw3|nodrm|z-lib)\b", low):
         return True
     # Single lowercase token with no spaces (e.g. 'fk', 'ncargill', 'jturner', 'ldilk', 'jsmith1')
     if " " not in s and re.match(r"^[a-z][a-z0-9_.-]{0,14}$", s):
@@ -72,7 +105,7 @@ def is_garbage_embedded_author(raw_author: Optional[str]) -> bool:
 
 
 def clean_book_title(raw_title: Optional[str]) -> Optional[str]:
-    """Strip release suffixes (_nodrm, nodrm, etc.) and normalize underscores in a book title."""
+    """Strip release suffixes (_nodrm, nodrm, (retail), (epub), -978... WEB, etc.) and normalize underscores in a book title."""
     if not raw_title:
         return None
     cleaned = raw_title.strip()
@@ -81,9 +114,13 @@ def clean_book_title(raw_title: Optional[str]) -> Optional[str]:
         return None
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = _strip_inline_release_and_isbn_junk(cleaned)
     cleaned = re.sub(r"_\s+", ": ", cleaned)
     cleaned = re.sub(r"\s*_\s*", " ", cleaned)
+    cleaned = _strip_inline_release_and_isbn_junk(cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or is_garbage_embedded_title(cleaned):
+        return None
     return cleaned or None
 
 
@@ -109,6 +146,7 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     cleaned = stem
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = _strip_inline_release_and_isbn_junk(cleaned)
     if "." in cleaned and " " not in cleaned and cleaned.count(".") >= 2:
         cleaned = cleaned.replace(".", " ").strip()
 
@@ -165,8 +203,22 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
             title_candidate = f"{first_seg}: {' - '.join(parts[1:]).strip()}"
             author_candidate = None
         else:
-            author_candidate = first_seg
-            title_candidate = " - ".join(parts[1:]).strip()
+            rest_seg = " - ".join(parts[1:]).strip()
+            # Check if " - " is separating <Publication/Series> - <Issue/Date> (e.g. "Computer Idee 2013 - 01", "PC Games Hardware - 06 2012", "Science - 08 January 2010")
+            rest_is_issue_or_date = bool(
+                re.match(
+                    r"^(?:\d{1,3}|(?:\d{1,2}\s+)?(?:19\d\d|20\d\d)(?:\s+[A-Za-z\-]+.*)?|(?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[\s,\-]+\d{1,4})+|(?:issue|iss|no|nr|vol|volume|heft|ausgabe)\.?\s*#?\d+.*)$",
+                    rest_seg,
+                    re.I,
+                )
+            )
+            first_has_year = bool(re.search(r"\b(19\d{2}|20\d{2})\b", first_seg))
+            if rest_is_issue_or_date or first_has_year:
+                title_candidate = cleaned
+                author_candidate = re.sub(r"\s+\b(?:19\d{2}|20\d{2})\b\s*$", "", first_seg).strip() or None
+            else:
+                author_candidate = first_seg
+                title_candidate = rest_seg
     elif "-" in cleaned and "(" not in cleaned and "," in cleaned.split("-", 1)[0]:
         # Only split on a tight hyphen when the left side is "Last, First-Title" (e.g., "Dunne, J. W.-An Experiment with Time")
         parts = cleaned.split("-", 1)
@@ -184,12 +236,16 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     if title_candidate:
         title_candidate = re.sub(r"\s*\([^)]*?\b(?:19\d{2}|20\d{2})\b[^)]*\)\s*(?:WW|YYePG|BLG|TLRG)?$", "", title_candidate, flags=re.I).strip()
         title_candidate = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG)$", "", title_candidate).strip()
+        title_candidate = _strip_inline_release_and_isbn_junk(title_candidate)
         # Restore version decimal points where Anna's Archive replaced '.' with '_ ' between digits (e.g. 'JDK 1_ 4' -> 'JDK 1.4')
         title_candidate = re.sub(r"(?<=\d)_\s*(?=\d)", ".", title_candidate)
         # e.g. "Unabridged_ The Thrill of..." -> "Unabridged: The Thrill of..."
         title_candidate = re.sub(r"_\s+", ": ", title_candidate)
         title_candidate = re.sub(r"\s*_\s*", " ", title_candidate)
+        title_candidate = _strip_inline_release_and_isbn_junk(title_candidate)
         title_candidate = re.sub(r"\s+", " ", title_candidate).strip()
+        if is_garbage_embedded_title(title_candidate):
+            title_candidate = None
 
     # Clean authors candidate
     parsed_authors: List[str] = []

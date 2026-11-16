@@ -79,10 +79,10 @@ class EnrichmentSession:
         if raw_max_files == 2500:
             raw_max_files = 4000
         self.max_files: Optional[int] = raw_max_files
-        self.delay = float(self.cfg.get("delay", 0.5))
-        self.ai_delay = float(self.cfg.get("ai_delay", 2.0))
-        self.batch_size = int(self.cfg.get("batch_size", 20))
-        self.batch_pause = float(self.cfg.get("batch_pause", 5.0))
+        self.delay = float(self.cfg.get("delay", 0.15))
+        self.ai_delay = float(self.cfg.get("ai_delay", 1.5))
+        self.batch_size = int(self.cfg.get("batch_size", 50))
+        self.batch_pause = float(self.cfg.get("batch_pause", 1.0))
         self.ai_batch_mode = bool(self.cfg.get("ai_batch_mode", True))
         self.ai_describe_no_match = bool(self.cfg.get("ai_describe_no_match", False))
 
@@ -231,10 +231,11 @@ class EnrichmentSession:
         new_candidates: List[str],
         backfill_candidates: List[str],
         scan_root: str | Path,
+        total_backfill_eligible: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Run throttled metadata enrichment on new/modified files first, then backfill candidates
-        up to `max_files`.
+        up to `max_files`, prioritizing pure Books ahead of magazine-like subfolders.
         Returns a summary dictionary with:
           - `enriched_synced_paths`: set of abspaths already enriched and synced to BookDB & file_states
           - `quarantined_paths`: list of abspaths moved to quarantine (to be pruned from BookDB)
@@ -262,19 +263,30 @@ class EnrichmentSession:
                 "fail_count": 0,
             }
 
-        # Sort EPUBs before PDFs within each priority tier (new files first, then backfill)
-        sort_key = lambda p: (0 if p.lower().endswith(".epub") else 1, p.lower())
-        sorted_new = sorted(new_candidates, key=sort_key)
-        sorted_backfill = sorted(backfill_candidates, key=sort_key)
-        combined = [Path(p) for p in (sorted_new + sorted_backfill)]
+        # Sort pure Books first, magazine-like subfolders inside /books (e.g. Computer Mags & FAQ) second,
+        # and EPUBs before PDFs within each tier.
+        def _sort_key(p: str) -> Tuple[int, int, str]:
+            p_low = p.lower()
+            is_mag_sub = 1 if ("computer mags" in p_low or "/periodicals/" in p_low or "/tomags/" in p_low) else 0
+            is_pdf = 1 if p_low.endswith(".pdf") else 0
+            return (is_mag_sub, is_pdf, p_low)
 
-        total_eligible = len(combined)
+        sorted_new = sorted(new_candidates, key=_sort_key)
+        sorted_backfill = sorted(backfill_candidates, key=_sort_key)
+        eff_backfill_total = max(len(sorted_backfill), int(total_backfill_eligible or 0))
+        total_eligible = len(sorted_new) + eff_backfill_total
+        max_slice = max((self.max_files or 4000) * 3, 12000) if (self.max_files and self.max_files > 0) else len(sorted_new) + len(sorted_backfill)
+        combined_strs = (sorted_new + sorted_backfill)[:max_slice]
+        new_cnt = len(sorted_new)
+        del sorted_new
+        del sorted_backfill
+
         cap_desc = f"up to {self.max_files} external lookups (+ unlimited cache hits)" if (self.max_files and self.max_files > 0) else f"{total_eligible}"
 
         print(
             f"\n--- Running Unified epubmeta Enrichment Pass ---\n"
             f"Files to process: {cap_desc} (out of {total_eligible} eligible: "
-            f"{len(sorted_new)} new/changed, {len(sorted_backfill)} backfill; "
+            f"{new_cnt} new/changed, {eff_backfill_total} backfill; "
             f"skipped {self.skipped_by_state_count} previously processed, "
             f"{self.skipped_by_mylibrary_count} complete/DRM/invalid in MyLibrary).",
             flush=True,
@@ -414,12 +426,23 @@ class EnrichmentSession:
                         fail_count += 1
                         print(f"    -> FAILED: {res.get('message')}", flush=True)
                     throttler.wait_for_next(
-                        is_last=(h_idx == len(harvested_items) - 1 and not combined),
+                        is_last=(h_idx == len(harvested_items) - 1 and not combined_strs),
                         ai_used=False,
                         catalog_called=True,
                     )
 
-        for idx, file_path in enumerate(combined):
+        def _clear_proc_file(fp: Path) -> None:
+            k = str(fp.resolve())
+            processor._orig_hashes.pop(k, None)
+            processor._orig_sha256.pop(k, None)
+            processor._orig_sizes.pop(k, None)
+            processor._orig_metadata.pop(k, None)
+            processor._match_scores.pop(k, None)
+            processor._front_texts.pop(k, None)
+            processor._front_matter_isbns.clear()
+
+        for idx, raw_file_path in enumerate(combined_strs):
+            file_path = Path(raw_file_path)
             if self.max_files and self.max_files > 0 and network_lookups_count >= self.max_files:
                 print(
                     f"[BATCH CAP REACHED] Completed {network_lookups_count} external lookups "
@@ -428,11 +451,12 @@ class EnrichmentSession:
                 )
                 break
 
-            orig_abspath = str(file_path)
+            orig_abspath = raw_file_path
             print(f"[{idx + 1}/{total_eligible} | net:{network_lookups_count}/{self.max_files or 'all'}] Inspecting {file_path.name}...", flush=True)
             try:
                 reader, embedded_meta, target_meta, isbn, match_result, err = processor.prepare_metadata(file_path)
             except RateLimitExceededError as rle:
+                _clear_proc_file(file_path)
                 print(
                     f"[LIMIT REACHED] {rle.provider} quota/rate limit hit ({rle}). "
                     f"Stopping enrichment pass cleanly for this cycle.",
@@ -441,6 +465,7 @@ class EnrichmentSession:
                 break
 
             if not target_meta or not reader:
+                _clear_proc_file(file_path)
                 msg = err or f"No ISBN or catalog metadata found for {file_path.name} — keeping original file as-is."
                 if err and "gemini batch api" in err.lower():
                     ai_batch_queued_count += 1
@@ -448,7 +473,7 @@ class EnrichmentSession:
                     catalog_calls_count += 1
                     print(f"  -> PENDING_AI_BATCH: {msg}", flush=True)
                     throttler.wait_for_next(
-                        is_last=(idx == total_eligible - 1),
+                        is_last=(idx == len(combined_strs) - 1),
                         ai_used=False,
                         catalog_called=True,
                     )
@@ -474,7 +499,7 @@ class EnrichmentSession:
                     )
                 if fail_status == "NO_ISBN" and not (err and "skipped pdf" in err.lower()):
                     throttler.wait_for_next(
-                        is_last=(idx == total_eligible - 1),
+                        is_last=(idx == len(combined_strs) - 1),
                         ai_used=False,
                         catalog_called=True,
                     )
@@ -483,6 +508,7 @@ class EnrichmentSession:
             was_cached = bool(target_meta.source and target_meta.source.startswith("local-cache"))
 
             if match_result and not match_result.is_confident:
+                _clear_proc_file(file_path)
                 cand_isbn = isbn or target_meta.isbn13 or target_meta.isbn10
                 has_plausible_candidate = bool(
                     cand_isbn
@@ -520,7 +546,7 @@ class EnrichmentSession:
                     )
                 if not was_cached:
                     throttler.wait_for_next(
-                        is_last=(idx == total_eligible - 1),
+                        is_last=(idx == len(combined_strs) - 1),
                         ai_used=bool(target_meta.ai_used),
                         catalog_called=True,
                     )
@@ -554,7 +580,7 @@ class EnrichmentSession:
             else:
                 local_resolved_count += 1
 
-            is_last = idx == total_eligible - 1 or (
+            is_last = idx == len(combined_strs) - 1 or (
                 bool(self.max_files and self.max_files > 0 and network_lookups_count >= self.max_files)
             )
             throttler.wait_for_next(

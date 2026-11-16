@@ -307,11 +307,19 @@ _TOKEN_RE = re.compile(
 
 
 def normalize_title(title):
-    """Normalize a title by removing subtitles, parentheticals, and bracketed notes."""
+    """Normalize a title by removing subtitles, parentheticals, bracketed notes, and trailing ISBN/release junk."""
     if not title:
         return ""
+    title = re.sub(r'\.(?:epub|pdf|mobi|azw3?|chm|djvu)$', '', str(title), flags=re.I)
     title = re.sub(r'\(.*?\)', '', title)
     title = re.sub(r'\[.*?\]', '', title)
+    title = re.sub(
+        r'(?<=[\w\)\]])(?:\s*[-–—_]+\s*|\s+)(?:isbn[:\s\-]*)?(?:97[89][-\s]?(?:\d[-\s]?){9}\d|\d{9}[\dXx])(?:[\s_\-]*(?:web|ebook|retail|book|print|pdf|epub|mobi|azw3?|chm))*\s*$',
+        '',
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r'(?:[-_]+|\s+-\s*)WEB\s*$', '', title, flags=re.I)
 
     for sep in (':', ' - '):
         if sep in title:
@@ -887,15 +895,19 @@ def perform_search(query_string, filters=None):
     without expensive unindexed cross-table tsvector/trigram joins.
     """
     vx_unlocked = bool((filters or {}).get('vx_unlocked', False))
+    explicit_folders = list((filters or {}).get('folders') or [])
+    has_non_vx_folder_filter = bool(
+        explicit_folders
+        and all(str(f).strip().lower() != 'archive-x' for f in explicit_folders if str(f or '').strip())
+    )
     queryset = exclude_vx_restricted_queryset(
         CatalogItem.objects.prefetch_related('files'),
-        vx_unlocked=vx_unlocked,
+        vx_unlocked=(vx_unlocked or has_non_vx_folder_filter),
     )
 
     # Apply explicit form/API type, format, folder & series filters
     item_types = list((filters or {}).get('item_type') or [])
     file_formats = list((filters or {}).get('file_format') or [])
-    explicit_folders = list((filters or {}).get('folders') or [])
     explicit_series = list((filters or {}).get('series') or [])
     neg_file_formats: List[str] = []
 

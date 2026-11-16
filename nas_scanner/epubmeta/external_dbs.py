@@ -480,7 +480,8 @@ class MyLibraryClient:
         skip_complete: bool = False,
     ) -> Tuple[int, int]:
         """
-        Fetch known catalog items and invalid/DRM file flags from `GET /api/sync/cache/`.
+        Fetch known catalog items and invalid/DRM/complete file flags directly from PostgreSQL BookDB
+        (or fallback to `GET /api/sync/cache/`).
         Returns `(seeded_items_count, skipped_files_registered_count)`.
         """
         already_seeded = False
@@ -492,6 +493,58 @@ class MyLibraryClient:
                         already_seeded = True
             except Exception:
                 pass
+
+        # Fast & low-memory path: query PostgreSQL BookDB directly without a 60 MB HTTP JSON round-trip
+        try:
+            from .pg_scanner_db import connect_scanner_db, is_postgres_scanner_enabled
+            if is_postgres_scanner_enabled():
+                conn_pg = connect_scanner_db(Path("scanner_state.db"), timeout=30.0)
+                try:
+                    cur = conn_pg.cursor()
+                    cur.execute(
+                        "SELECT file_path FROM catalog_filelocation WHERE is_invalid = TRUE OR has_drm = TRUE"
+                    )
+                    while True:
+                        rows = cur.fetchmany(25000)
+                        if not rows:
+                            break
+                        for r in rows:
+                            p = r[0]
+                            if not p:
+                                continue
+                            rel = extract_relative_book_subpath(p)
+                            self.skip_rel_paths.add(rel.lower() if rel else p.replace("\\", "/").lower())
+
+                    if skip_complete:
+                        cur.execute(
+                            """
+                            SELECT fl.file_path
+                            FROM catalog_filelocation fl
+                            JOIN catalog_catalogitem ci ON fl.catalog_item_id = ci.id
+                            WHERE fl.is_invalid = FALSE AND fl.has_drm = FALSE
+                              AND ((ci.isbn IS NOT NULL AND ci.isbn != '') OR (ci.asin IS NOT NULL AND ci.asin != ''))
+                              AND ci.description IS NOT NULL AND ci.description != ''
+                              AND ci.authors IS NOT NULL AND ci.authors != '' AND ci.authors != 'Unknown Author'
+                            """
+                        )
+                        while True:
+                            rows = cur.fetchmany(25000)
+                            if not rows:
+                                break
+                            for r in rows:
+                                p = r[0]
+                                if not p:
+                                    continue
+                                rel = extract_relative_book_subpath(p)
+                                self.complete_rel_paths.add(rel.lower() if rel else p.replace("\\", "/").lower())
+                    cur.close()
+                finally:
+                    conn_pg.close()
+                if already_seeded:
+                    return 0, len(self.skip_rel_paths) + len(self.complete_rel_paths)
+        except Exception as pg_err:
+            logger.debug("Direct PostgreSQL cache pull skipped (%s); falling back to HTTP.", pg_err)
+
         url = f"{self.server_url}/api/sync/cache/"
         if already_seeded:
             url += "?skip_items=1"
@@ -511,19 +564,12 @@ class MyLibraryClient:
                     self.skip_hashes.add(h)
             for p in data.get("invalid_or_drm_paths", []):
                 rel = extract_relative_book_subpath(p)
-                if rel:
-                    self.skip_rel_paths.add(rel.lower())
-                self.skip_rel_paths.add(p.replace("\\", "/").lower())
+                self.skip_rel_paths.add(rel.lower() if rel else p.replace("\\", "/").lower())
 
             if skip_complete:
-                for h in data.get("complete_hashes", []):
-                    if h:
-                        self.complete_hashes.add(h)
                 for p in data.get("complete_paths", []):
                     rel = extract_relative_book_subpath(p)
-                    if rel:
-                        self.complete_rel_paths.add(rel.lower())
-                    self.complete_rel_paths.add(p.replace("\\", "/").lower())
+                    self.complete_rel_paths.add(rel.lower() if rel else p.replace("\\", "/").lower())
 
             if tracker:
                 now = datetime.now(timezone.utc).isoformat()
@@ -582,10 +628,10 @@ class MyLibraryClient:
                         )
                         seeded = len(batch_rows)
 
-            return seeded, len(self.skip_hashes) + len(self.complete_hashes)
+            return seeded, len(self.skip_rel_paths) + len(self.complete_rel_paths)
         except Exception as e:
             logger.warning("Could not pull catalog cache from MyLibrary (%s): %s", url, e)
-            return 0, 0
+            return 0, len(self.skip_rel_paths) + len(self.complete_rel_paths)
 
     def should_skip_file(
         self,

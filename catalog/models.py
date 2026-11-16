@@ -325,11 +325,12 @@ def exclude_vx_restricted_queryset(qs, vx_unlocked: bool = False):
     """Strictly exclude restricted Archive-X items from a CatalogItem queryset unless session is unlocked."""
     if vx_unlocked:
         return qs
+    from django.db.models.expressions import RawSQL
     return qs.exclude(
-        Q(files__file_path__startswith='/xAdult/')
-        | Q(files__file_path__startswith='/xtoAdult/')
-        | Q(files__file_path__startswith='/volume1/jims_documents/Media/xAdult/')
-        | Q(files__file_path__startswith='/volume1/jims_documents/Media/xtoAdult/')
+        id__in=RawSQL(
+            "SELECT catalog_item_id FROM catalog_filelocation WHERE LOWER(catalog_top_folder(file_path)) = %s",
+            ['archive-x'],
+        )
     )
 
 

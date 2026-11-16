@@ -140,7 +140,25 @@ def identify_and_organize_periodical(
             idx = parts.index(root_marker)
             rem = parts[idx + 1:]
             if len(rem) >= 2 and rem[0] not in ("Unorganized", "Unknown"):
-                folder_series = rem[0]
+                cand_fs = rem[0].strip()
+                # Ignore contaminated or overly generic folder_series names so they get re-evaluated cleanly
+                is_bad_fs = (
+                    cand_fs.lower() in {
+                        'computer', 'computers', 'pc', 'mac', 'linux', 'windows', 'games', 'game',
+                        'science', 'history', 'home', 'music', 'art', 'photo', 'cars', 'sport', 'info',
+                    }
+                    or cand_fs.isdigit()
+                    or bool(
+                        re.search(
+                            r'(?:\b(?:no|nr|issue|iss|vol|volume|heft|ausgabe)\b|#\d|\b(?:19\d\d|20\d\d)\b|\s+(?:0[1-9]|1[0-2])$)',
+                            cand_fs,
+                            re.IGNORECASE,
+                        )
+                        and cand_fs.upper() != "INFO 64"
+                    )
+                )
+                if not is_bad_fs:
+                    folder_series = cand_fs
             if len(rem) >= 3 and re.match(r"^(19\d{2}|20\d{2})$", rem[1]):
                 folder_year = int(rem[1])
             break
@@ -151,6 +169,8 @@ def identify_and_organize_periodical(
     method: str = ""
     cover_bytes: Optional[bytes] = None
 
+    parsed_title, parsed_year = parse_filename(file_path.name)
+
     # 1. Match against magazines.json
     matched = clf.match_filename(file_path.name)
     if not matched and folder_series:
@@ -158,11 +178,18 @@ def identify_and_organize_periodical(
 
     if matched and not force_cover:
         bucket_name, matched_pattern, pub_year_avail = matched
-        title = folder_series or matched_pattern
+        # Prefer parsed_title if matched_pattern is a shorter prefix/substring of parsed_title (e.g. 'PC Games' vs 'PC Games Hardware')
+        if (
+            parsed_title
+            and len(parsed_title) > len(matched_pattern)
+            and matched_pattern.lower() in parsed_title.lower()
+        ):
+            title = parsed_title
+        else:
+            title = folder_series or matched_pattern
         method = "magazines.json pattern match"
         if pub_year_avail:
-            _, extracted_year = parse_filename(file_path.name)
-            extracted_year = extracted_year or folder_year
+            extracted_year = parsed_year or folder_year
             if not extracted_year:
                 ext = file_path.suffix.lower()
                 if ext == ".pdf":
@@ -178,7 +205,7 @@ def identify_and_organize_periodical(
     else:
         detected_title, detected_year = None, None
         if not force_cover:
-            detected_title, detected_year = parse_filename(file_path.name)
+            detected_title, detected_year = parsed_title, parsed_year
             if folder_series and (not detected_title or len(detected_title) < 3):
                 detected_title = folder_series
             if folder_year and not detected_year:

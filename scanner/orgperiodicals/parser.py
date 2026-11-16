@@ -20,24 +20,48 @@ DATE_PATTERNS = [
     (re.compile(r'(?<![a-zA-Z0-9])(19\d\d|20\d\d)[-_\.]?(0[1-9]|1[0-2])[-_\.]?(0[1-9]|[12]\d|3[01])(?![0-9])', re.IGNORECASE), "yyyy-mm-dd"),
     # DD-MM-YYYY or DD_MM_YYYY or DD.MM.YYYY
     (re.compile(r'(?<![a-zA-Z0-9])(0[1-9]|[12]\d|3[01])[-_\.](0[1-9]|1[0-2])[-_\.](19\d\d|20\d\d)(?![a-zA-Z0-9])', re.IGNORECASE), "dd-mm-yyyy"),
-    # YYYY-MM or YYYY_MM or YYYY.MM
-    (re.compile(r'(?<![a-zA-Z0-9])(19\d\d|20\d\d)[-_\.](0[1-9]|1[0-2])(?![a-zA-Z0-9])', re.IGNORECASE), "yyyy-mm"),
-    # MM-YYYY or MM_YYYY or MM.YYYY
-    (re.compile(r'(?<![a-zA-Z0-9])(0[1-9]|1[0-2])[-_\.](19\d\d|20\d\d)(?![a-zA-Z0-9])', re.IGNORECASE), "mm-yyyy"),
+    # YYYY-MM or YYYY_MM or YYYY.MM or YYYY - MM or YYYY MM
+    (re.compile(r'(?<![a-zA-Z0-9])(19\d\d|20\d\d)(?:\s*[-_\.]\s*|\s+)(0?[1-9]|1[0-2])(?![a-zA-Z0-9])', re.IGNORECASE), "yyyy-mm"),
+    # MM-YYYY or MM_YYYY or MM.YYYY or MM YYYY or - MM YYYY
+    (re.compile(r'(?<![a-zA-Z0-9])(0?[1-9]|1[0-2])(?:\s*[-_\.]\s*|\s+)(19\d\d|20\d\d)(?![a-zA-Z0-9])', re.IGNORECASE), "mm-yyyy"),
     # Month YYYY or Month_YYYY or Month.YYYY
     (re.compile(rf'(?<![a-zA-Z0-9])({MONTHS_PATTERN})[-_\s\.]+(19\d\d|20\d\d)(?![a-zA-Z0-9])', re.IGNORECASE), "month-yyyy"),
     # YYYY Month or YYYY_Month or YYYY.Month
     (re.compile(rf'(?<![a-zA-Z0-9])(19\d\d|20\d\d)[-_\s\.]+({MONTHS_PATTERN})(?![a-zA-Z0-9])', re.IGNORECASE), "yyyy-month"),
+    # Month YY (2-digit year after month name, e.g. Dec_06, Feb-07)
+    (re.compile(rf'(?<![a-zA-Z0-9])({MONTHS_PATTERN})[-_\s\.]+(\d{{2}})(?![a-zA-Z0-9])', re.IGNORECASE), "month-yy"),
     # YYYY (Single Year)
     (re.compile(r'(?<![a-zA-Z0-9])(19\d\d|20\d\d)(?![a-zA-Z0-9])', re.IGNORECASE), "yyyy")
 ]
 
+
+def _expand_2digit_year(yy: int) -> int:
+    if yy < 100:
+        return (2000 + yy) if yy <= 35 else (1900 + yy)
+    return yy
+
+
 def clean_title(title: str) -> str:
-    """Sanitize the extracted title by removing special characters, generic suffixes, and extra spaces."""
+    """Sanitize the extracted title by removing special characters, generic suffixes, issue numbers, and extra spaces."""
     if not title:
         return ""
+    raw = str(title).strip()
+    if re.match(r'^\.?info(?:\s*[-_]\s*\d+|\s+\d+)?$', raw, re.IGNORECASE):
+        return "INFO 64"
+
+    # Strip leading issue counter prefix like '01_Games_for_Windows' -> 'Games_for_Windows'
+    raw = re.sub(r'^\d{1,3}[_\-\s]+(?=[A-Za-z]{2,})', '', raw)
+
+    # Strip trailing issue designators before collapsing punctuation (e.g. ' - 06', ' No 05', ' Issue 12', ' #03', '_001')
+    raw = re.sub(
+        r'(?:[\s\-_]+(?:no|nr|issue|iss|vol|volume|heft|ausgabe)\.?\s*#?\s*\d*|\s+#\s*\d+|\s*[-_]\s*\d{1,4}|\s+\d{3})\s*$',
+        '',
+        raw,
+        flags=re.IGNORECASE,
+    )
+
     # Replace dots, underscores, hyphens, and multiple spaces with a single space
-    title = re.sub(r'[-_\.\s]+', ' ', title)
+    title = re.sub(r'[-_\.\s]+', ' ', raw)
     
     # Strip off known metadata tags and site names case-insensitively
     junk_patterns = [
@@ -48,15 +72,23 @@ def clean_title(title: str) -> str:
         r'\bdownmagaz\b',
         r'\bmagazines\b',
         r'\bmagazine\b',
+        r'\bmagazin\b',
     ]
     for jp in junk_patterns:
         title = re.sub(jp, '', title, flags=re.IGNORECASE)
+
+    # Strip trailing standalone issue words or 2-digit issue numbers (except known titles like INFO 64 / Commodore 64 / 2600)
+    title = re.sub(r'\s+\b(?:no|nr|issue|iss|vol|volume|heft|ausgabe)\b\s*#?\d*\s*$', '', title, flags=re.IGNORECASE)
+    if not re.search(r'\b(?:info|commodore|atari|amiga|nintendo)\s+64$', title, re.IGNORECASE):
+        title = re.sub(r'\s+(?:0[1-9]|1[0-2]|#\d+|\d{3})\s*$', '', title)
         
     # Remove leading/trailing non-alphanumeric chars except brackets
     title = re.sub(r'^[^a-zA-Z0-9\(]+|[^a-zA-Z0-9\)]+$', '', title)
     # Replace multiple spaces
-    title = re.sub(r'\s+', ' ', title)
-    return title.strip()
+    title = re.sub(r'\s+', ' ', title).strip()
+    if title.lower() == 'info':
+        return 'INFO 64'
+    return title
 
 def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     """
@@ -67,6 +99,9 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     """
     # Remove extension
     stem = Path(filename).stem
+    if re.match(r'^\.info\b', stem, re.IGNORECASE):
+        yr_m = re.search(r'\b(19\d\d|20\d\d)\b', stem)
+        return "INFO 64", (int(yr_m.group(1)) if yr_m else None)
     
     for pattern, pat_type in DATE_PATTERNS:
         match = pattern.search(stem)
@@ -78,6 +113,8 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
                 year_val = int(match.group(3))
             elif pat_type in ("mm-yyyy", "month-yyyy"):
                 year_val = int(match.group(2))
+            elif pat_type == "month-yy":
+                year_val = _expand_2digit_year(int(match.group(2)))
             else:
                 continue
                 
@@ -89,13 +126,11 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
             before = stem[:start].strip()
             after = stem[end:].strip()
             
-            # Decide which part represents the title
-            title_candidate = before if len(before) > len(after) else after
-            if not title_candidate and (before or after):
-                title_candidate = before or after
+            # Decide which part represents the title (prefer 'before' unless empty)
+            title_candidate = before if before else after
                 
             cleaned = clean_title(title_candidate)
-            if cleaned:
+            if cleaned and not cleaned.isdigit():
                 return cleaned, year_val
                 
     return None, None

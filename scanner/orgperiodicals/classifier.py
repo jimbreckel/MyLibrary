@@ -36,17 +36,35 @@ class PeriodicalClassifier:
         Returns list of (bucket_name, pattern_str, pub_year_avail, compiled_regex)
         """
         generic_skip = {
-            'issue', 'vol', 'volume', 'no', 'magazine', 'truepdf', 'pdf', 'extract', 'calendar', 'special', 'edition',
-            'spring', 'summer', 'autumn', 'fall', 'winter', 'annual', 'book', 'series', 'guide', 'manual',
-            'new', 'the', 'old', 'big', 'top', 'hot', 'all', 'one', 'now', 'best', 'free', 'world', 'daily', 'weekly', 'monthly'
+            'issue', 'vol', 'volume', 'no', 'nr', 'heft', 'ausgabe', 'magazine', 'magazin', 'truepdf', 'pdf',
+            'extract', 'calendar', 'special', 'edition', 'spring', 'summer', 'autumn', 'fall', 'winter',
+            'annual', 'book', 'series', 'guide', 'manual', 'new', 'the', 'old', 'big', 'top', 'hot', 'all',
+            'one', 'now', 'best', 'free', 'world', 'daily', 'weekly', 'monthly',
+            'computer', 'computers', 'pc', 'mac', 'linux', 'windows', 'games', 'game', 'gaming',
+            'science', 'history', 'home', 'music', 'art', 'arts', 'photo', 'photography', 'cars', 'car',
+            'auto', 'sport', 'sports', 'tech', 'technology', 'health', 'food', 'travel', 'nature',
+            'garden', 'gardening', 'fishing', 'hunting', 'aviation', 'military', 'guitar', 'audio',
+            'video', 'film', 'movie', 'movies', 'design', 'fashion', 'style', 'fitness', 'running',
+            'cycling', 'bike', 'yacht', 'boating', 'craft', 'wood', 'trains', 'rail', 'model', 'radio',
+            'electronics', 'coding', 'python', 'java', 'web', 'digital', 'modern', 'american', 'british',
+            'australian', 'international', 'national', 'popular', 'practical', 'classic', 'retro', 'future',
+            'info',
         }
+        bad_pattern_re = re.compile(
+            r'(?:\b(?:no|nr|issue|iss|vol|volume|heft|ausgabe)\b|#\d|\b(?:19\d\d|20\d\d)\b|\s+(?:0[1-9]|1[0-2]|\d{3})$)',
+            re.IGNORECASE,
+        )
         raw_patterns = []
         for entry in self.config:
             bucket = entry.get("bucket", "Unorganized")
             pub_year = entry.get("publication_year_available", True)
             for pat in entry.get("patterns", []):
-                if pat and pat.strip().lower() not in generic_skip:
-                    raw_patterns.append((bucket, pat, pub_year))
+                p_clean = (pat or "").strip()
+                if not p_clean or p_clean.lower() in generic_skip:
+                    continue
+                if bad_pattern_re.search(p_clean) and p_clean.upper() != "INFO 64":
+                    continue
+                raw_patterns.append((bucket, p_clean, pub_year))
         
         # Sort patterns by length descending
         raw_patterns.sort(key=lambda x: len(x[1]), reverse=True)
