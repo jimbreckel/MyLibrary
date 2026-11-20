@@ -987,6 +987,17 @@ class DashboardView(ListView):
             qs = qs.filter(pub_date__gte=cutoff_1yr, pub_date__lte=today_dt)
             if not sort_by:
                 qs = qs.order_by('-pub_date', 'title')
+        elif shelf in ('recent_added', 'recently_added'):
+            from .opds import get_recently_added_books_shelf_ids
+            ra_ids = get_recently_added_books_shelf_ids(limit=1200)
+            qs = qs.filter(id__in=ra_ids)
+            if ra_ids and not query and (not sort_by or sort_by in ('filedate_desc', 'added_desc')):
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(ra_ids)],
+                    default=len(ra_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_ra_order=order_expr).order_by('_ra_order')
 
         # Apply Enrichment Status filter (Needs Enriching / Enriched / Needs Review / Moved to toMags / Missing Cover)
         if enrich_status in ('tomags', 'to_mags'):
@@ -1237,6 +1248,9 @@ class DashboardView(ListView):
             elif shelf == 'recent_pub' and not item_types and not enrich_status:
                 stats, _ = _get_cached_dashboard_meta()
                 precomputed_count = stats.get('recent_pub_count')
+            elif shelf in ('recent_added', 'recently_added') and not item_types and not enrich_status:
+                from .opds import get_recently_added_books_shelf_ids
+                precomputed_count = len(get_recently_added_books_shelf_ids(limit=1200))
 
         return _PrecomputedCountPaginator(
             queryset,
