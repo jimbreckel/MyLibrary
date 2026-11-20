@@ -1231,12 +1231,16 @@ class BookProcessor:
                 from .external_dbs import compute_full_sha256, generate_cover_thumbnail
                 from .file_utils import resolve_mirrored_destination
                 from .readers.epub import EpubReader
+                from .readers.pdf import PdfReader
                 norm_key = str(file_path)
                 needs_db_sync = bool(self.state_tracker or self.scanner_bridge or self.mylibrary_client)
+                is_pdf_reader = isinstance(reader, PdfReader) or file_path.suffix.lower() == ".pdf"
                 try:
-                    is_large_file = file_path.stat().st_size > 20 * 1024 * 1024
+                    f_size_bytes = file_path.stat().st_size
+                    is_large_file = is_pdf_reader or (f_size_bytes > 4 * 1024 * 1024)
                 except Exception:
-                    is_large_file = False
+                    f_size_bytes = 0
+                    is_large_file = is_pdf_reader
                 _hash_fn = compute_file_quick_hash if is_large_file else compute_full_sha256
                 orig_sha256 = (
                     (self._orig_sha256.get(norm_key) or _hash_fn(file_path))
@@ -1257,11 +1261,23 @@ class BookProcessor:
                     and (orig_meta.subjects or []) == (target_meta.subjects or [])
                 )
 
-                if unchanged:
+                if is_pdf_reader:
+                    new_sha256 = orig_sha256
+                    result["status"] = "SUCCESS"
+                    result["unchanged"] = True
+                    result["message"] = f"Successfully enriched metadata for {file_path.name} in BookDB"
+                    logger.info(result["message"])
+                elif unchanged:
                     new_sha256 = orig_sha256
                     result["status"] = "SUCCESS"
                     result["unchanged"] = True
                     result["message"] = f"Metadata already up-to-date for {file_path.name} (no disk write needed)"
+                    logger.info(result["message"])
+                elif f_size_bytes > 15 * 1024 * 1024:
+                    new_sha256 = orig_sha256
+                    result["status"] = "SUCCESS"
+                    result["unchanged"] = True
+                    result["message"] = f"Successfully enriched metadata for {file_path.name} in BookDB (large archive disk write skipped)"
                     logger.info(result["message"])
                 else:
                     backup_dest = (
@@ -1303,7 +1319,7 @@ class BookProcessor:
                         )
 
                 cover_thumbnail = None
-                if needs_db_sync:
+                if self.mylibrary_client:
                     orig_cover_bytes = None
                     try:
                         orig_cover_bytes = reader.extract_cover_bytes()

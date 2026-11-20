@@ -181,6 +181,80 @@
     return mEd ? mEd[0].trim() : '';
   }
 
+  function extractAnnasAuthorFromContainer(bookCol, titleEl) {
+    if (!bookCol) return { rawAuthor: '', authorEl: null };
+
+    // 1. Current Anna's Archive layout uses an Iconify user-edit span inside the author div, or .italic in older layouts
+    const userIcon = bookCol.querySelector(
+      '[class*="user-edit"], [class*="mdi--user"], [class*="mdi--account"], [class*="icon-"][class*="user"]'
+    );
+    let authorEl = (userIcon && userIcon.parentElement) || bookCol.querySelector('div.italic, a.italic');
+
+    // 2. Fallback: walk sibling elements right after titleEl (skipping our widget, publisher row, and format/metadata row)
+    if (!authorEl && titleEl && titleEl.parentElement === bookCol) {
+      let sib = titleEl.nextElementSibling;
+      while (sib) {
+        if (sib.id !== 'mylibrary-annas-md5-widget') {
+          const hasCompanyIcon = Boolean(sib.querySelector('[class*="company"], [class*="building"], [class*="publisher"]'));
+          const sibTxt = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+          if (sibTxt.includes('👤')) {
+            authorEl = sib;
+            break;
+          }
+          if (
+            !hasCompanyIcon &&
+            !sibTxt.includes('🏢') &&
+            sibTxt.length >= 3 &&
+            sibTxt.length <= 140 &&
+            !/\b(?:EPUB|PDF|MOBI|AZW3|DJVU|CBR|CBZ|\d+(?:\.\d+)?\s*(?:MB|KB|GB)|English\s*\[|Book\s*\(|DESCRIPTION|Save)\b/i.test(sibTxt)
+          ) {
+            authorEl = sib;
+            break;
+          }
+          if (/\b(?:EPUB|PDF|MOBI|AZW3|DJVU|\d+(?:\.\d+)?\s*(?:MB|KB|GB)|DESCRIPTION)\b/i.test(sibTxt)) {
+            break;
+          }
+        }
+        sib = sib.nextElementSibling;
+      }
+    }
+
+    let rawAuthor = '';
+    if (authorEl) {
+      const cloneAuth = authorEl.cloneNode(true);
+      cloneAuth.querySelectorAll('a[href^="/search"], #mylibrary-annas-md5-widget').forEach((a) => {
+        if (a.id === 'mylibrary-annas-md5-widget' || (a.textContent || '').trim().length <= 3) {
+          a.remove();
+        }
+      });
+      const parts = stripEmojiAndIcons(cloneAuth.textContent || '')
+        .split(/\s*,\s*/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+      rawAuthor = Array.from(new Set(parts)).join(', ');
+    }
+
+    // 3. Fallback: check the top archive filepath line (e.g. "zlib/no-category/Beverly Gage/This Land is Your Land...epub")
+    if (!rawAuthor && titleEl && titleEl.previousElementSibling) {
+      const prevTxt = (titleEl.previousElementSibling.textContent || '').trim();
+      if (prevTxt.includes('/') && /\.(?:epub|pdf|mobi|azw3|djvu|fb2|cbr|cbz)\b/i.test(prevTxt)) {
+        const segs = prevTxt.split('/').map((s) => s.trim()).filter(Boolean);
+        if (segs.length >= 3) {
+          const candFolder = segs[segs.length - 2];
+          if (
+            candFolder &&
+            !/^(?:no-category|books?|zlib|lgli|libgen|sci-hub|upload|\d+)$/i.test(candFolder) &&
+            /^[A-Za-z][A-Za-z\s.,'-]{2,60}$/.test(candFolder)
+          ) {
+            rawAuthor = candFolder;
+          }
+        }
+      }
+    }
+
+    return { rawAuthor, authorEl };
+  }
+
   // ===========================================================================
   // A. Single Book Detail Page (/md5/<32-hex>)
   // ===========================================================================
@@ -209,31 +283,18 @@
     const colText = bookCol.innerText || bookCol.textContent || '';
     const fullMainText = mainEl.innerText || mainEl.textContent || '';
 
-    let rawAuthor = '';
-    const italicEl = bookCol.querySelector('div.italic, a.italic');
-    if (italicEl) {
-      const cloneAuth = italicEl.cloneNode(true);
-      cloneAuth.querySelectorAll('a[href^="/search"]').forEach((a) => {
-        if ((a.textContent || '').trim().length <= 3) a.remove();
-      });
-      // Deduplicate repeated author names like "Jon Erickson, Jon Erickson"
-      const parts = stripEmojiAndIcons(cloneAuth.textContent || '')
-        .split(/\s*,\s*/)
-        .map((p) => p.trim())
-        .filter(Boolean);
-      rawAuthor = Array.from(new Set(parts)).join(', ');
-    }
+    const { rawAuthor, authorEl } = extractAnnasAuthorFromContainer(bookCol, titleEl);
 
     const isbn = extractIsbnFromText(colText) || extractIsbnFromText(fullMainText);
     const pub_year = extractPubYearFromCardText(colText);
     const edition = extractEditionFromText(`${rawTitle} ${colText.slice(0, 600)}`);
 
-    // Insert the compact bar right below the title (inside the left column, not as a sibling in the outer flex row!)
+    // Insert the compact bar right below the author (or title if no author element)
     return {
       key: `annas_md5_${md5}`,
       md5,
       titleEl,
-      anchorEl: italicEl || titleEl,
+      anchorEl: authorEl || titleEl,
       title: rawTitle,
       author: rawAuthor,
       isbn,
@@ -283,7 +344,7 @@
         const enrTag = lib.is_enriched ? ' · ✨ Enriched' : '';
         const matchViaLabel = (lib.match_type === 'isbn' || lib.match_type === 'asin')
           ? `Exact ${lib.match_type.toUpperCase()}`
-          : 'Title/Author';
+          : (lib.match_type === 'title_author' ? 'Title/Author' : 'Title Only');
 
         badgeHtml = `
           <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-in-lib">
@@ -333,6 +394,7 @@
     container.innerHTML = `
       <div class="mylib-badges-row">
         ${badgeHtml}
+        ${book.author ? `<span class="mylib-bp-meta-pill" title="Detected Author">👤 ${escapeHtml(book.author)}</span>` : ''}
         ${book.isbn ? `<span class="mylib-bp-meta-pill">ISBN: ${escapeHtml(book.isbn)}</span>` : ''}
         ${book.pub_year ? `<span class="mylib-bp-meta-pill">📅 ${escapeHtml(book.pub_year)}</span>` : ''}
         ${book.edition ? `<span class="mylib-bp-meta-pill">${escapeHtml(book.edition)}</span>` : ''}
@@ -383,8 +445,8 @@
       const rawTitle = stripEmojiAndIcons(h3 ? h3.textContent : cardText.slice(0, 140));
       if (!rawTitle) return;
 
-      const italicEl = a.querySelector('.italic') || (a.parentElement && a.parentElement.querySelector('.italic'));
-      const rawAuthor = italicEl ? stripEmojiAndIcons(italicEl.textContent) : '';
+      const cardRoot = a.parentElement || a;
+      const { rawAuthor } = extractAnnasAuthorFromContainer(cardRoot, h3);
 
       const fullSnippet = (a.parentElement ? a.parentElement.textContent : cardText) || '';
       const isbn = extractIsbnFromText(fullSnippet);

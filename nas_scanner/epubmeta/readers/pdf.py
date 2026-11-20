@@ -264,6 +264,11 @@ class PdfReader(BaseReader):
 
     def __init__(self, file_path: Path):
         super().__init__(file_path)
+        self._cached_metadata: Optional[BookMetadata] = None
+        self._cached_front_text: Optional[str] = None
+        self._cached_front_text_pages: int = 0
+        self._cached_cover_bytes: Optional[bytes] = None
+        self._cover_extracted: bool = False
         from ..exceptions import DrmProtectedError, InvalidDocumentError
         try:
             doc = pymupdf.open(self.file_path)
@@ -273,68 +278,80 @@ class PdfReader(BaseReader):
             if len(doc) == 0:
                 doc.close()
                 raise InvalidDocumentError(f"PDF has 0 pages / is empty: {self.file_path.name}")
+            try:
+                self._cached_metadata = self._extract_metadata_from_doc(doc)
+            except Exception:
+                self._cached_metadata = None
             doc.close()
         except Exception as e:
             if isinstance(e, (InvalidDocumentError, DrmProtectedError)):
                 raise
             raise InvalidDocumentError(f"Corrupt or invalid PDF document: {e}")
 
+    def _extract_metadata_from_doc(self, doc) -> BookMetadata:
+        from ..filename_parser import is_garbage_embedded_title, is_garbage_embedded_author, parse_filename
+        meta = doc.metadata or {}
+        raw_title = (meta.get("title") or "").strip()
+        title = raw_title if (raw_title and not is_garbage_embedded_title(raw_title)) else None
+        if title and len(title.split()) == 1 and len(title) <= 6:
+            fn_clues = parse_filename(self.file_path.name)
+            fn_title = (fn_clues.get("title") or "").strip()
+            if len(fn_title.split()) >= 3 and title.lower() not in fn_title.lower():
+                title = None
+        author_str = meta.get("author") or ""
+        authors = [
+            a.strip()
+            for a in re.split(r"[,;&]\s*", author_str)
+            if a.strip() and not is_garbage_embedded_author(a.strip())
+        ]
+
+        subject = meta.get("subject") or None  # Often used as summary / description in PDFs
+        keywords_str = meta.get("keywords") or ""
+        subjects = [k.strip() for k in re.split(r"[,;]\s*", keywords_str) if k.strip()]
+
+        # Look for ISBN in keywords, subject, or title (including raw_title before garbage filter, e.g. 3135239039.01._SS500_SCLZZZZZZZ_.jpg)
+        isbn13 = None
+        isbn10 = None
+        search_corpus = f"{keywords_str} {subject or ''} {raw_title or ''} {title or ''}"
+        isbns = extract_isbns_from_text(search_corpus)
+        if isbns:
+            isbn13, _ = normalize_isbn(isbns[0][0])
+
+        # Check XMP metadata if available
+        try:
+            xmp = doc.get_xml_metadata() or ""
+        except Exception:
+            xmp = ""
+        if xmp and not isbn13:
+            xmp_isbns = extract_isbns_from_text(xmp)
+            if xmp_isbns:
+                isbn13, _ = normalize_isbn(xmp_isbns[0][0])
+
+        return BookMetadata(
+            title=title,
+            authors=authors,
+            description=subject,
+            subjects=subjects,
+            isbn13=isbn13,
+            isbn10=isbn10,
+            source="pdf-embedded",
+        )
+
     def read_metadata(self) -> BookMetadata:
         """Extract metadata from PDF Document Info and XMP stream."""
+        if self._cached_metadata is not None:
+            return self._cached_metadata
         doc = pymupdf.open(self.file_path)
         try:
-            from ..filename_parser import is_garbage_embedded_title, is_garbage_embedded_author, parse_filename
-            meta = doc.metadata or {}
-            raw_title = (meta.get("title") or "").strip()
-            title = raw_title if (raw_title and not is_garbage_embedded_title(raw_title)) else None
-            if title and len(title.split()) == 1 and len(title) <= 6:
-                fn_clues = parse_filename(self.file_path.name)
-                fn_title = (fn_clues.get("title") or "").strip()
-                if len(fn_title.split()) >= 3 and title.lower() not in fn_title.lower():
-                    title = None
-            author_str = meta.get("author") or ""
-            authors = [
-                a.strip()
-                for a in re.split(r"[,;&]\s*", author_str)
-                if a.strip() and not is_garbage_embedded_author(a.strip())
-            ]
-
-            subject = meta.get("subject") or None  # Often used as summary / description in PDFs
-            keywords_str = meta.get("keywords") or ""
-            subjects = [k.strip() for k in re.split(r"[,;]\s*", keywords_str) if k.strip()]
-
-            # Look for ISBN in keywords, subject, or title (including raw_title before garbage filter, e.g. 3135239039.01._SS500_SCLZZZZZZZ_.jpg)
-            isbn13 = None
-            isbn10 = None
-            search_corpus = f"{keywords_str} {subject or ''} {raw_title or ''} {title or ''}"
-            isbns = extract_isbns_from_text(search_corpus)
-            if isbns:
-                isbn13, _ = normalize_isbn(isbns[0][0])
-
-            # Check XMP metadata if available
-            try:
-                xmp = doc.get_xml_metadata() or ""
-            except Exception:
-                xmp = ""
-            if xmp and not isbn13:
-                xmp_isbns = extract_isbns_from_text(xmp)
-                if xmp_isbns:
-                    isbn13, _ = normalize_isbn(xmp_isbns[0][0])
-
-            return BookMetadata(
-                title=title,
-                authors=authors,
-                description=subject,
-                subjects=subjects,
-                isbn13=isbn13,
-                isbn10=isbn10,
-                source="pdf-embedded",
-            )
+            self._cached_metadata = self._extract_metadata_from_doc(doc)
+            return self._cached_metadata
         finally:
             doc.close()
 
     def extract_front_text(self, max_pages: int = 15) -> str:
         """Extract text from the first N pages."""
+        if self._cached_front_text is not None and max_pages <= self._cached_front_text_pages:
+            return self._cached_front_text
         doc = pymupdf.open(self.file_path)
         try:
             texts = []
@@ -343,19 +360,26 @@ class PdfReader(BaseReader):
                 txt = doc[i].get_text()
                 if txt.strip():
                     texts.append(txt.strip())
-            return "\n\n--- PAGE BREAK ---\n\n".join(texts)
+            res = "\n\n--- PAGE BREAK ---\n\n".join(texts)
+            self._cached_front_text = res
+            self._cached_front_text_pages = max_pages
+            return res
         finally:
             doc.close()
 
     def extract_front_images(self, max_pages: int = 3) -> List[bytes]:
         """Render the first few pages as PNG images for visual OCR / AI inspection."""
+        try:
+            is_huge = self.file_path.stat().st_size > 25 * 1024 * 1024
+        except Exception:
+            is_huge = False
+        render_dpi = 110 if is_huge else 150
         doc = pymupdf.open(self.file_path)
         try:
             images = []
             page_count = min(max_pages, len(doc))
             for i in range(page_count):
-                # Render at 150 DPI for crisp readability
-                pix = doc[i].get_pixmap(dpi=150)
+                pix = doc[i].get_pixmap(dpi=render_dpi)
                 images.append(pix.tobytes("png"))
             return images
         finally:
@@ -366,9 +390,13 @@ class PdfReader(BaseReader):
         Extract cover image bytes from Page 1 of the PDF (extracting embedded portrait covers directly
         on blank-margin or hybrid jacket/prologue pages, while rendering full Page 1 for vector/composite covers).
         """
+        if self._cover_extracted:
+            return self._cached_cover_bytes
         doc = pymupdf.open(self.file_path)
         try:
-            return extract_pdf_page0_cover_bytes(doc)
+            self._cached_cover_bytes = extract_pdf_page0_cover_bytes(doc)
+            self._cover_extracted = True
+            return self._cached_cover_bytes
         finally:
             doc.close()
 

@@ -4161,6 +4161,13 @@ class OnDemandEnrichAPIView(APIView):
         from .opds import enrich_catalog_item_on_demand, enrich_file_location_on_demand
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip()
+        if action in ('scan_enriched_duplicates', 'merge_enriched_duplicates'):
+            from .opds import scan_and_merge_enriched_duplicates
+            apply_m = (action == 'merge_enriched_duplicates') or (
+                str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
@@ -4196,7 +4203,7 @@ class OnDemandEnrichAPIView(APIView):
                 review_only=review_only,
                 ai_describe_no_match=ai_describe_no_match,
             )
-            return Response(res, status=200 if res.get('ok') else 422)
+            return Response(res, status=200)
 
         if file_path and not item_id:
             path_cands = [file_path]
@@ -4218,7 +4225,7 @@ class OnDemandEnrichAPIView(APIView):
                     review_only=review_only,
                     ai_describe_no_match=ai_describe_no_match,
                 )
-                return Response(res, status=200 if res.get('ok') else 422)
+                return Response(res, status=200)
 
         if item_id:
             from .opds import resolve_catalog_item_by_id_or_fallback
@@ -4245,7 +4252,7 @@ class OnDemandEnrichAPIView(APIView):
                 ai_describe_no_match=ai_describe_no_match,
             )
             res['requested_item_id'] = item_id
-            return Response(res, status=200 if res.get('ok') else 422)
+            return Response(res, status=200)
 
         return Response({'ok': False, 'error': 'Please provide item_id or file_id.'}, status=400)
 
@@ -4262,6 +4269,13 @@ class RevertEnrichAPIView(APIView):
         from .opds import resolve_catalog_item_by_id_or_fallback, revert_catalog_item_enrichment
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip()
+        if action in ('scan_enriched_duplicates', 'merge_enriched_duplicates'):
+            from .opds import scan_and_merge_enriched_duplicates
+            apply_m = (action == 'merge_enriched_duplicates') or (
+                str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
@@ -4298,6 +4312,13 @@ class MoveToMagAPIView(APIView):
         )
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip()
+        if action in ('scan_enriched_duplicates', 'merge_enriched_duplicates'):
+            from .opds import scan_and_merge_enriched_duplicates
+            apply_m = (action == 'merge_enriched_duplicates') or (
+                str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         target_bucket = str(body.get('target_bucket') or request.GET.get('target_bucket') or '').strip()
@@ -4344,6 +4365,13 @@ class MoveToBookAPIView(APIView):
         )
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip()
+        if action in ('scan_enriched_duplicates', 'merge_enriched_duplicates'):
+            from .opds import scan_and_merge_enriched_duplicates
+            apply_m = (action == 'merge_enriched_duplicates') or (
+                str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         target_folder = (body.get('target_folder') or request.GET.get('target_folder') or '').strip() or None
@@ -4377,6 +4405,13 @@ class UndoMoveToMagAPIView(APIView):
         from .opds import undo_move_from_tomags
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip()
+        if action in ('scan_enriched_duplicates', 'merge_enriched_duplicates'):
+            from .opds import scan_and_merge_enriched_duplicates
+            apply_m = (action == 'merge_enriched_duplicates') or (
+                str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         moved_files = body.get('moved_files')
@@ -5218,6 +5253,95 @@ def _norm_title_preserve_qualifiers(val: str | None) -> str:
     return ' '.join(s.split())
 
 
+_AUTHOR_SUFFIX_TOKENS = {'jr', 'sr', 'ii', 'iii', 'iv', 'dr', 'md', 'phd', 'prof', 'esq'}
+
+
+def _parse_wishlist_author_persons(raw_author: str) -> list[tuple[list[str], str]]:
+    """
+    Parse an author string into a list of `(given_name_tokens, surname_token)` tuples.
+    Handles both 'First Middle Last' and 'Last, First' formats.
+    """
+    a = _clean_single_line(raw_author)
+    if not a:
+        return []
+    a = re.sub(r'<br\b.*$', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'<[^>]+>', ' ', a).strip()
+    a = re.sub(r'(?:foreword|preface|introduction|afterword)\s+by\b.*$', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'^\s*by\s+', '', a, flags=re.IGNORECASE).strip()
+    a = re.sub(r'\|.*$', '', a).strip()
+    a = re.sub(
+        r'\s*\([^)]*(?:author|editor|translator|narrator|illustrator|foreword|edition|hardcover|paperback|kindle)[^)]*\)',
+        '',
+        a,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not a or a.lower() in ('unknown', 'unknown author', 'n/a', 'various', 'anonymous'):
+        return []
+
+    semi_parts = [p.strip() for p in re.split(r'\s*(?:;|&|\band\b)\s*', a, flags=re.IGNORECASE) if p.strip()]
+    person_chunks: list[str] = []
+    for sp in semi_parts:
+        if ',' in sp:
+            c_parts = [cp.strip() for cp in sp.split(',') if cp.strip()]
+            if (
+                len(c_parts) == 2
+                and len(c_parts[0].split()) == 1
+                and 1 <= len(c_parts[1].split()) <= 2
+                and c_parts[1].lower() not in _AUTHOR_SUFFIX_TOKENS
+            ):
+                person_chunks.append(f"{c_parts[1]} {c_parts[0]}")
+            else:
+                person_chunks.extend(c_parts)
+        else:
+            person_chunks.append(sp)
+
+    persons: list[tuple[list[str], str]] = []
+    for chunk in person_chunks:
+        toks = [
+            tok.lower()
+            for tok in re.split(r'[^A-Za-z0-9\'\-]+', chunk)
+            if tok and tok.lower() not in _AUTHOR_SUFFIX_TOKENS
+        ]
+        toks = [t.strip("'-") for t in toks if t.strip("'-")]
+        if not toks:
+            continue
+        surname = toks[-1]
+        if len(surname) < 2:
+            continue
+        given = [t for t in toks[:-1] if len(t) >= 1]
+        persons.append((given, surname))
+    return persons
+
+
+def _wishlist_authors_match(query_author: str, item_authors: str) -> bool:
+    """
+    Return True only if `query_author` and `item_authors` share at least one author with the
+    same whole-word surname AND compatible given name/initial (when both specify a given name).
+    """
+    q_persons = _parse_wishlist_author_persons(query_author)
+    it_persons = _parse_wishlist_author_persons(item_authors)
+    if not q_persons or not it_persons:
+        return False
+
+    for q_given, q_sur in q_persons:
+        for it_given, it_sur in it_persons:
+            if q_sur != it_sur:
+                continue
+            if q_given and it_given:
+                qg0 = q_given[0]
+                ig0 = it_given[0]
+                if (
+                    qg0 == ig0
+                    or (len(qg0) == 1 and ig0.startswith(qg0))
+                    or (len(ig0) == 1 and qg0.startswith(ig0))
+                    or bool(set(q_given) & set(it_given))
+                ):
+                    return True
+            else:
+                return True
+    return False
+
+
 def _clean_wishlist_author(raw_author: str) -> tuple[str, str]:
     """
     Return `(cleaned_author, primary_author_surname)` stripped of Amazon/publisher byline noise.
@@ -5231,9 +5355,8 @@ def _clean_wishlist_author(raw_author: str) -> tuple[str, str]:
     a = re.sub(r'^\s*by\s+', '', a, flags=re.IGNORECASE).strip()
     a = re.sub(r'\|.*$', '', a).strip()
     a = re.sub(r'\s*\([^)]*(?:author|editor|translator|narrator|illustrator|foreword|edition|hardcover|paperback|kindle)[^)]*\)', '', a, flags=re.IGNORECASE).strip()
-    first_author = re.split(r'\s*(?:,|;|&|\band\b)\s*', a, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    tokens = [tok for tok in re.split(r'[^A-Za-z0-9\'\-]+', first_author) if len(tok) >= 2 and tok.lower() not in ('jr', 'sr', 'ii', 'iii', 'iv', 'dr', 'md', 'phd')]
-    surname = tokens[-1].lower() if tokens else ''
+    persons = _parse_wishlist_author_persons(a)
+    surname = persons[0][1] if persons else ''
     return a, surname
 
 
@@ -5531,7 +5654,13 @@ class WishlistCheckAPIView(APIView):
                 sname = entry['surname']
                 norm_bt = entry['norm_base_title']
                 norm_ft = entry['norm_full_title']
-                bt_words = [w for w in norm_bt.split() if len(w) >= 3 and w not in ('the', 'and', 'for', 'with', 'from', 'into')]
+                bt_words = [
+                    w for w in norm_bt.split()
+                    if len(w) >= 3 and w not in (
+                        'the', 'and', 'for', 'with', 'from', 'into', 'this', 'that', 'your', 'our',
+                        'his', 'her', 'their', 'about', 'through', 'under', 'over', 'between',
+                    )
+                ]
 
                 cand_seen = set()
                 cands = []
@@ -5550,18 +5679,7 @@ class WishlistCheckAPIView(APIView):
                     if not it_norm_base:
                         continue
 
-                    # Check author agreement first
-                    it_auth_norm = _norm_lookup_str(it.authors or '')
-                    is_unknown_auth = not it_auth_norm or it_auth_norm in ('unknown', 'unknown author')
-                    author_ok = False
-                    if sname and not is_unknown_auth:
-                        author_ok = sname in it_auth_norm
-                    elif not sname or (is_unknown_auth and len(bt_words) >= 3):
-                        author_ok = True
-                    if not author_ok:
-                        continue
-
-                    # Check base title or full title equality (do NOT allow partial word subset matches)
+                    # Check base title or full title equality first (do NOT allow partial word subset matches)
                     base_or_full_eq = (
                         it_norm_full == norm_ft
                         or it_norm_full == norm_bt
@@ -5570,6 +5688,43 @@ class WishlistCheckAPIView(APIView):
                     )
                     if not base_or_full_eq:
                         continue
+
+                    # Check strict author agreement (whole-word surname + compatible given name/initial)
+                    it_auth_norm = _norm_lookup_str(it.authors or '')
+                    is_unknown_auth = not it_auth_norm or it_auth_norm in ('unknown', 'unknown author')
+                    author_verified = False
+                    if sname and not is_unknown_auth:
+                        author_verified = _wishlist_authors_match(entry['clean_author'], it.authors or '')
+                        if not author_verified:
+                            # Different known authors with the same title -> different book altogether
+                            continue
+                    elif sname and is_unknown_auth:
+                        # Query has a known author, but library item has 'Unknown Author':
+                        # Check if query author surname appears in the library item's filename or raw title
+                        it_files_text = _norm_lookup_str(f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}")
+                        if sname in it_files_text.split():
+                            author_verified = True
+                        elif it_norm_full == norm_ft and len(bt_words) >= 3:
+                            _add_other_edition(it, f"Unverified author in MyLibrary ({it.authors or 'Unknown Author'})")
+                            continue
+                        else:
+                            continue
+                    elif not sname and not is_unknown_auth:
+                        # Query did NOT provide an author, while the library item belongs to a specific author (e.g. Robert Santelli):
+                        # Check if the library item's author surname appears in the query's raw title
+                        _, it_primary_surname = _clean_wishlist_author(it.authors or '')
+                        orig_q_tokens = set(_norm_lookup_str(entry['orig_title']).split())
+                        if it_primary_surname and it_primary_surname in orig_q_tokens:
+                            author_verified = True
+                        else:
+                            # Do NOT claim in_library=True without a matching author when subtitles differ or title is generic
+                            if it_norm_full != norm_ft or len(bt_words) < 4:
+                                _add_other_edition(it, f"Same base title by {it.authors} (author not matched)")
+                                continue
+                    else:
+                        # Neither side has a known author: require exact full title equality (including subtitle)
+                        if it_norm_full != norm_ft or len(bt_words) < 3:
+                            continue
 
                     # Collect candidate item's ISBNs, ASIN, edition markers, and publication year
                     it_isbns = set()
@@ -5623,11 +5778,11 @@ class WishlistCheckAPIView(APIView):
                         continue
 
                     # Conflict 6: Wishlist has a specific subtitle (or ISBN) that the library book lacks, and base title is short (<= 2 words, e.g. "Visualization")
-                    if (entry_has_sub != it_has_sub) and len(bt_words) <= 2:
+                    if (entry_has_sub != it_has_sub) and (len(bt_words) <= 2 or not author_verified):
                         _add_other_edition(it, f"Different title/subtitle ({it.title})")
                         continue
 
-                    _add_item(it, 'title_author' if sname else 'title')
+                    _add_item(it, 'title_author' if author_verified else 'title')
 
                 # If any candidate for this title/author had an explicit ISBN, ASIN, Year, or Edition conflict
                 # and we only matched a sibling/duplicate row by title (e.g. a row missing its ISBN or pub_date),

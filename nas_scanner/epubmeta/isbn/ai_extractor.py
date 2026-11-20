@@ -5,11 +5,51 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .validator import normalize_isbn
 
 logger = logging.getLogger(__name__)
+
+_COOLDOWN_FILE = "/tmp/mylibrary_provider_cooldowns.json"
+_GEMINI_COOLDOWN_UNTIL: float = 0.0
+_GEMINI_LAST_FILE_CHECK: float = 0.0
+
+
+def _check_gemini_cooldown() -> bool:
+    global _GEMINI_COOLDOWN_UNTIL, _GEMINI_LAST_FILE_CHECK
+    now = time.time()
+    if now < _GEMINI_COOLDOWN_UNTIL:
+        return True
+    if now - _GEMINI_LAST_FILE_CHECK >= 5.0:
+        _GEMINI_LAST_FILE_CHECK = now
+        try:
+            if os.path.exists(_COOLDOWN_FILE):
+                with open(_COOLDOWN_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                until = float(data.get("gemini_ai_until") or 0.0)
+                if until > _GEMINI_COOLDOWN_UNTIL:
+                    _GEMINI_COOLDOWN_UNTIL = until
+        except Exception:
+            pass
+    return now < _GEMINI_COOLDOWN_UNTIL
+
+
+def _set_gemini_cooldown(seconds: float = 900.0) -> None:
+    global _GEMINI_COOLDOWN_UNTIL
+    until = time.time() + seconds
+    _GEMINI_COOLDOWN_UNTIL = max(_GEMINI_COOLDOWN_UNTIL, until)
+    try:
+        data: Dict[str, Any] = {}
+        if os.path.exists(_COOLDOWN_FILE):
+            with open(_COOLDOWN_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        data["gemini_ai_until"] = _GEMINI_COOLDOWN_UNTIL
+        with open(_COOLDOWN_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 
 class GeminiBookExtractor:
@@ -149,6 +189,7 @@ class GeminiBookExtractor:
         # Reserve a $0.002 safety margin for the upcoming request so we never overshoot the cap
         if spent + 0.002 > self.max_daily_cost_usd or spent >= self.max_daily_cost_usd:
             self.quota_exhausted = True
+            _set_gemini_cooldown(900.0)
             msg = (
                 f"Daily AI budget cap reached (${spent:.4f} / ${self.max_daily_cost_usd:.2f} USD "
                 f"across {reqs} requests today)"
@@ -201,7 +242,10 @@ class GeminiBookExtractor:
 
     @property
     def is_available(self) -> bool:
-        return bool(self.api_key) and not getattr(self, "quota_exhausted", False)
+        if getattr(self, "quota_exhausted", False) or _check_gemini_cooldown():
+            self.quota_exhausted = True
+            return False
+        return bool(self.api_key)
 
     def _get_client(self):
         if not self._client:
@@ -286,13 +330,14 @@ class GeminiBookExtractor:
         except Exception as exc:
             err_str = str(exc)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
+                self.quota_exhausted = True
+                _set_gemini_cooldown(900.0)
                 if self.raise_on_quota:
                     from ..exceptions import RateLimitExceededError
                     retry_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
                     retry_sec = float(retry_match.group(1)) if retry_match else None
                     raise RateLimitExceededError("Gemini AI", err_str, retry_after=retry_sec) from exc
-                self.quota_exhausted = True
-                logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED). Disabling AI for remaining files.")
+                logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED). Cooling down AI for 15m across workers.")
             else:
                 logger.warning("Gemini AI extraction failed: %s", exc)
             return {}
@@ -412,13 +457,14 @@ class GeminiBookExtractor:
         except Exception as exc:
             err_str = str(exc)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
+                self.quota_exhausted = True
+                _set_gemini_cooldown(900.0)
                 if self.raise_on_quota:
                     from ..exceptions import RateLimitExceededError
                     retry_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
                     retry_sec = float(retry_match.group(1)) if retry_match else None
                     raise RateLimitExceededError("Gemini AI", err_str, retry_after=retry_sec) from exc
-                self.quota_exhausted = True
-                logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED).")
+                logger.warning("Gemini AI daily quota reached (429 RESOURCE_EXHAUSTED). Cooling down AI for 15m.")
             else:
                 logger.warning("Gemini AI description generation failed: %s", exc)
             return {}

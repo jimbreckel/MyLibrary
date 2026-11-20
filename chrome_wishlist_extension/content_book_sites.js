@@ -253,7 +253,7 @@
         const enrTag = lib.is_enriched ? ' · ✨ Enriched' : '';
         const matchViaLabel = (lib.match_type === 'isbn' || lib.match_type === 'asin')
           ? `Exact ${lib.match_type.toUpperCase()}`
-          : 'Title/Author Match';
+          : (lib.match_type === 'title_author' ? 'Title/Author Match' : 'Title Only Match');
 
         libStatusHtml = `
           <div class="mylib-bp-status-row">

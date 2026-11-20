@@ -2384,7 +2384,20 @@ const initCatalogSearch = () => {
     }
 
     function applyCardMetadataUpdate(targetId, data, updateModal) {
-        const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        let card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        if (!card && data && data.item_id) {
+            card = document.getElementById(`card-${data.item_id}`);
+        }
+        if (!card && window._activeModalItem && window._activeModalItem.firstFileId) {
+            const wantFid = String(window._activeModalItem.firstFileId);
+            const allDetBtns = document.querySelectorAll('.media-card .btn-details[data-files]');
+            for (const b of allDetBtns) {
+                if ((b.getAttribute('data-files') || '').includes(wantFid)) {
+                    card = b.closest('.media-card');
+                    break;
+                }
+            }
+        }
         if (card) {
             const detCheck = card.querySelector('.btn-details');
             if (detCheck && detCheck.getAttribute('data-is-bad-metadata') === 'true' && typeof window.applyBadMetadataStateToDom === 'function') {
@@ -2772,16 +2785,26 @@ const initCatalogSearch = () => {
             .then(res => {
                 if (res.ok) {
                     const finalCover = res.cover_url || coverUrl;
-                    const resolvedId = res.item_id || ctx.itemId;
+                    const origItemId = ctx.itemId;
+                    const resolvedId = res.item_id || origItemId;
+                    const updPayload = { item_id: resolvedId, cover_url: finalCover };
+                    if (res.title && (!ctx.title || /\(\d+\)$|\.pdf$|\.epub$/i.test(ctx.title))) {
+                        updPayload.title = res.title;
+                    }
+                    if (res.authors && res.authors !== 'Unknown Author' && (!ctx.authors || ctx.authors === 'Unknown Author')) {
+                        updPayload.authors = res.authors;
+                    }
                     if (window._activeModalItem) {
                         window._activeModalItem.cover = finalCover;
                         if (res.item_id) window._activeModalItem.itemId = res.item_id;
+                        if (updPayload.title) window._activeModalItem.title = updPayload.title;
+                        if (updPayload.authors) window._activeModalItem.authors = updPayload.authors;
                     }
-                    applyCardMetadataUpdate(ctx.itemId, { item_id: resolvedId, cover_url: finalCover }, true);
-                    if (resolvedId !== ctx.itemId) {
-                        applyCardMetadataUpdate(resolvedId, { cover_url: finalCover }, false);
+                    applyCardMetadataUpdate(origItemId, updPayload, true);
+                    if (resolvedId && origItemId && resolvedId !== origItemId) {
+                        applyCardMetadataUpdate(resolvedId, updPayload, false);
                     }
-                    const cardDom = document.getElementById(`card-${resolvedId}`) || document.getElementById(`card-${ctx.itemId}`);
+                    const cardDom = document.getElementById(`card-${resolvedId}`) || document.getElementById(`card-${origItemId}`);
                     if (cardDom) {
                         const issBadge = cardDom.querySelector('.card-cover-issue-badge');
                         if (issBadge) issBadge.remove();
@@ -2963,23 +2986,28 @@ const initCatalogSearch = () => {
                     }
                 } else {
                     const ctx = window._activeModalItem || {};
+                    const origItemId = ctx.itemId || payload.item_id;
                     const updPayload = { item_id: resolvedId, cover_url: genCoverUrl };
-                    if (res.metadata_updated) {
+                    if (res.metadata_updated || (res.title && (!ctx.title || /\(\d+\)$|\.pdf$|\.epub$/i.test(ctx.title)))) {
                         if (res.title) updPayload.title = res.title;
+                    }
+                    if (res.metadata_updated || (res.authors && res.authors !== 'Unknown Author' && (!ctx.authors || ctx.authors === 'Unknown Author'))) {
                         if (res.authors) updPayload.authors = res.authors;
-                        if (res.description) updPayload.description = res.description;
+                    }
+                    if (res.metadata_updated && res.description) {
+                        updPayload.description = res.description;
                     }
                     if (window._activeModalItem) {
                         window._activeModalItem.cover = genCoverUrl;
                         if (res.item_id) window._activeModalItem.itemId = res.item_id;
-                        if (res.metadata_updated && res.title) window._activeModalItem.title = res.title;
-                        if (res.metadata_updated && res.authors) window._activeModalItem.authors = res.authors;
+                        if (updPayload.title) window._activeModalItem.title = updPayload.title;
+                        if (updPayload.authors) window._activeModalItem.authors = updPayload.authors;
                     }
-                    applyCardMetadataUpdate(ctx.itemId || resolvedId, updPayload, true);
-                    if (resolvedId && ctx.itemId && resolvedId !== ctx.itemId) {
+                    applyCardMetadataUpdate(origItemId || resolvedId, updPayload, true);
+                    if (resolvedId && origItemId && resolvedId !== origItemId) {
                         applyCardMetadataUpdate(resolvedId, updPayload, false);
                     }
-                    const cardDom = document.getElementById(`card-${resolvedId}`) || document.getElementById(`card-${ctx.itemId}`);
+                    const cardDom = document.getElementById(`card-${resolvedId}`) || document.getElementById(`card-${origItemId}`);
                     if (cardDom) {
                         const issBadge = cardDom.querySelector('.card-cover-issue-badge');
                         if (issBadge) issBadge.remove();
@@ -3658,12 +3686,13 @@ const initCatalogSearch = () => {
                     }
                 } else {
                     const ctx = window._activeModalItem || {};
+                    const origItemId = ctx.itemId || payload.item_id;
                     if (window._activeModalItem) {
                         window._activeModalItem.cover = origCoverUrl;
                         if (res.item_id) window._activeModalItem.itemId = res.item_id;
                     }
-                    applyCardMetadataUpdate(ctx.itemId || resolvedId, { item_id: resolvedId, cover_url: origCoverUrl }, true);
-                    if (resolvedId && ctx.itemId && resolvedId !== ctx.itemId) {
+                    applyCardMetadataUpdate(origItemId || resolvedId, { item_id: resolvedId, cover_url: origCoverUrl }, true);
+                    if (resolvedId && origItemId && resolvedId !== origItemId) {
                         applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl }, false);
                     }
                 }
@@ -5530,7 +5559,7 @@ const initCatalogSearch = () => {
         const abortCtrl = new AbortController();
         activeEnrichControllers.add(abortCtrl);
 
-        return fetch(`${BASE_PREFIX}/api/enrich/`, {
+        const doFetchEnrich = (attempt = 1) => fetch(`${BASE_PREFIX}/api/enrich/`, {
             method: 'POST',
             signal: abortCtrl.signal,
             headers: {
@@ -5539,7 +5568,28 @@ const initCatalogSearch = () => {
             },
             body: JSON.stringify(payload)
         })
-            .then(resp => resp.json())
+            .then(async resp => {
+                const rawText = await resp.text();
+                try {
+                    return JSON.parse(rawText);
+                } catch (parseErr) {
+                    if (attempt < 2 && (resp.status >= 500 || resp.status === 0)) {
+                        await new Promise(res => setTimeout(res, 1500));
+                        return doFetchEnrich(attempt + 1);
+                    }
+                    throw new Error(`Server returned HTTP ${resp.status}`);
+                }
+            })
+            .catch(async fetchErr => {
+                if (fetchErr && fetchErr.name === 'AbortError') throw fetchErr;
+                if (attempt < 2) {
+                    await new Promise(res => setTimeout(res, 1500));
+                    return doFetchEnrich(attempt + 1);
+                }
+                throw fetchErr;
+            });
+
+        return doFetchEnrich()
             .then(data => {
                 activeEnrichControllers.delete(abortCtrl);
                 if (reBtn) {
@@ -5628,7 +5678,7 @@ const initCatalogSearch = () => {
                     btn.style.borderColor = border;
                     btn.style.color = color;
                     const errMsg = data.message || data.error || `Enrichment status: ${st}`;
-                    btn.title = `${errMsg} — Click to inspect error details & manual review options`;
+                    btn.title = `${errMsg} — Click to inspect details & manual review options`;
                     const cardEl = targetId ? document.getElementById(`card-${targetId}`) : null;
                     const detBtn = cardEl ? cardEl.querySelector('.btn-details') : null;
                     if (detBtn) {
@@ -5664,18 +5714,19 @@ const initCatalogSearch = () => {
                     const errBanner = document.getElementById('modal-enrich-error-banner');
                     if (errBanner && window._activeModalItem && window._activeModalItem.itemId === targetId) {
                         const curModalDesc = (window._activeModalItem.desc || '').trim();
-                        const showModalAiBtn = (st === 'NOT_FOUND' || st === 'NO_ISBN') && !curModalDesc;
+                        const isNoMatch = (st === 'NOT_FOUND' || st === 'NO_ISBN');
+                        const showModalAiBtn = isNoMatch && !curModalDesc;
                         const modalAiBtn = document.getElementById('modal-btn-ai-desc');
                         if (modalAiBtn) modalAiBtn.style.display = showModalAiBtn ? 'inline-flex' : 'none';
                         errBanner.style.display = 'block';
-                        errBanner.style.background = 'rgba(239,68,68,0.14)';
-                        errBanner.style.borderColor = 'rgba(239,68,68,0.48)';
-                        errBanner.style.color = '#fecaca';
+                        errBanner.style.background = isNoMatch ? 'rgba(245,158,11,0.14)' : 'rgba(239,68,68,0.14)';
+                        errBanner.style.borderColor = isNoMatch ? 'rgba(245,158,11,0.48)' : 'rgba(239,68,68,0.48)';
+                        errBanner.style.color = isNoMatch ? '#fde68a' : '#fecaca';
                         errBanner.innerHTML = `
                             <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem; flex-wrap:wrap;">
                                 <div style="flex:1; min-width:220px;">
                                     <div style="font-weight:700; font-size:0.78rem; text-transform:uppercase; margin-bottom:0.25rem;">
-                                        <i class="fa-solid fa-triangle-exclamation"></i> Enrichment ${escapeHtml(st)} Details
+                                        <i class="fa-solid ${isNoMatch ? 'fa-magnifying-glass-minus' : 'fa-triangle-exclamation'}"></i> ${isNoMatch ? 'No External Catalog Match Found' : `Enrichment ${escapeHtml(st)} Details`}
                                     </div>
                                     <div style="font-family:monospace; font-size:0.78rem; color:#f8fafc; word-break:break-word;">${escapeHtml(errMsg)}</div>
                                 </div>
@@ -5693,7 +5744,9 @@ const initCatalogSearch = () => {
                 }
                 if (err && err.name === 'AbortError') return;
                 btn.disabled = false;
-                btn.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error`;
+                delete btn.dataset.batchTouched;
+                btn.innerHTML = `<i class="fa-solid fa-rotate-right"></i> Retry Enrich`;
+                btn.title = `Temporary connection error (${err.message || 'server busy'}) — Click to retry`;
                 console.error('Error during on-demand enrichment:', err);
             });
     }

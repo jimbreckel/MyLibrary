@@ -220,7 +220,7 @@ function parseAnnasSearchHtml(html, book, annasBaseUrl, query, queryMode = 'titl
       titleMatched = true;
     }
 
-    const authorMatched = !surname || normCombinedWords.has(surname) || normCombined.includes(surname);
+    const authorMatched = !surname || normCombinedWords.has(surname);
 
     let isRelevant = false;
     if (queryMode === 'isbn') {

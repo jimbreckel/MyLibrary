@@ -561,7 +561,7 @@
         const enrTag = lib.is_enriched ? ' · ✨ Enriched' : '';
         const matchViaLabel = (lib.match_type === 'isbn' || lib.match_type === 'asin')
           ? `Exact ${lib.match_type.toUpperCase()}`
-          : 'Title/Author Match';
+          : (lib.match_type === 'title_author' ? 'Title/Author Match' : 'Title Only Match');
         libBadgeHtml = `
           <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-in-lib" title="Open in MyLibrary (${escapeHtml(matchViaLabel)})">
             ✅ In MyLibrary (${escapeHtml(fmts)}${enrTag} · ${escapeHtml(matchViaLabel)}) ↗

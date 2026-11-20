@@ -21,7 +21,7 @@ class OpenLibraryProvider(BaseProvider):
     def name(self) -> str:
         return "Open Library"
 
-    def __init__(self, timeout: int = 15, raise_on_quota: bool = False):
+    def __init__(self, timeout: Any = (3.0, 5.5), raise_on_quota: bool = False):
         self.timeout = timeout
         self.raise_on_quota = raise_on_quota
         self._disabled = False

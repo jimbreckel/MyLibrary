@@ -66,6 +66,16 @@ def build_periodical_series_q_filter(series_names: List[str]) -> Q:
 SEARCH_KEYWORDS_SPEC: List[Dict[str, Any]] = [
     # Field Scopes
     {
+        'keyword': '"word"',
+        'aliases': ['word:', 'w:', 'exact:'],
+        'category': 'Field',
+        'insert': 'word:',
+        'is_prefix': True,
+        'example': '"AI" or word:Go',
+        'label': 'Whole Word Match',
+        'desc': 'Wrap in quotes ("AI", "Go") or use word:Go (w:Go) to match whole words only',
+    },
+    {
         'keyword': 'title:',
         'aliases': ['t:'],
         'category': 'Field',
@@ -429,7 +439,39 @@ def find_similar_item(title, authors, isbn=None, asin=None, threshold=0.6):
             if not _is_garbage_or_placeholder_author(candidate.authors) and normalize_author(candidate.authors) == norm_author:
                 return candidate
 
+        try:
+            from .opds import _authors_refer_to_same_work, _canonical_work_title_info
+            _, clean_base, norm_base, item_ed = _canonical_work_title_info(title)
+            if clean_base and len(clean_base) >= 4 and norm_base:
+                cands = list(
+                    CatalogItem.objects.filter(title__istartswith=clean_base.strip())
+                    .order_by()[:40]
+                )
+                for candidate in cands:
+                    if _is_garbage_or_placeholder_title(candidate.title) or _is_garbage_or_placeholder_author(candidate.authors):
+                        continue
+                    if not _authors_refer_to_same_work(candidate.authors or '', authors):
+                        continue
+                    _, _, cand_base, cand_ed = _canonical_work_title_info(candidate.title or '')
+                    if cand_base == norm_base and (not item_ed or not cand_ed or item_ed == cand_ed):
+                        return candidate
+        except Exception:
+            pass
+
     return None
+
+
+def _build_whole_word_q(field_name: str, term: str) -> Q:
+    """
+    Build a fast PostgreSQL whole-word Q filter on `field_name`:
+    combines `__icontains` (to leverage the GIN trigram index) with `__iregex`
+    word-boundary matching so substrings inside longer words are excluded.
+    """
+    clean = (term or '').strip()
+    if not clean:
+        return Q()
+    pattern = rf'(^|[^[:alnum:]_]){re.escape(clean)}($|[^[:alnum:]_])'
+    return Q(**{f'{field_name}__icontains': clean}) & Q(**{f'{field_name}__iregex': pattern})
 
 
 def parse_search_query(query_string: str) -> Dict[str, Any]:
@@ -441,7 +483,9 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
     parsed: Dict[str, Any] = {
         'raw_query': raw,
         'free_terms': [],           # List[str]
+        'whole_word_terms': [],     # List[str] (quoted terms or \bterm\b)
         'neg_free_terms': [],       # List[str]
+        'neg_whole_word_terms': [], # List[str] (negated quoted terms -"word")
         'field_filters': [],        # List[Tuple[str, str, bool]] -> (canonical_field, value, negated)
         'year_filters': [],         # List[Tuple[str, int, Optional[int], bool]] -> (op, y1, y2, negated)
         'status_flags': [],         # List[Tuple[str, bool]] -> (canonical_flag, negated)
@@ -455,6 +499,9 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
 
     tokens = _TOKEN_RE.findall(raw)
     field_alias_map = {
+        'word': 'word',
+        'w': 'word',
+        'exact': 'word',
         'title': 'title',
         't': 'title',
         'author': 'author',
@@ -668,11 +715,19 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
                     parsed['active_badges'].append({'raw': tok, 'label': f"Sort: {sort_map[s_low][1]}", 'kind': 'sort'})
                     continue
 
-            # 4. Field filters (`title:`, `author:`, `pub:`, `isbn:`, `asin:`, `desc:`, `cat:`, `tag:`, `file:`, `format:`, `type:`)
+            # 4. Field filters (`word:`, `title:`, `author:`, `pub:`, `isbn:`, `asin:`, `desc:`, `cat:`, `tag:`, `file:`, `format:`, `type:`)
             if k in field_alias_map:
                 canon_field = field_alias_map[k]
-                parsed['field_filters'].append((canon_field, v, negated))
+                was_quoted_val = (
+                    (v_raw.strip().startswith('"') and v_raw.strip().endswith('"'))
+                    or (v_raw.strip().startswith("'") and v_raw.strip().endswith("'"))
+                )
+                if canon_field in ('title', 'description', 'publisher') and was_quoted_val:
+                    parsed['field_filters'].append((f'{canon_field}_word', v, negated))
+                else:
+                    parsed['field_filters'].append((canon_field, v, negated))
                 nice_field = {
+                    'word': 'Whole Word',
                     'title': 'Title',
                     'author': 'Author',
                     'publisher': 'Publisher',
@@ -694,17 +749,33 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
                 })
                 continue
 
-        # Free-text term or quoted phrase (positive or negated)
+        # Free-text term or quoted whole-word/phrase (positive or negated)
         clean_term = work
+        is_whole_word = False
         if (clean_term.startswith('"') and clean_term.endswith('"')) or (clean_term.startswith("'") and clean_term.endswith("'")):
             clean_term = clean_term[1:-1].strip()
+            is_whole_word = True
+        elif clean_term.startswith(r'\b') and clean_term.endswith(r'\b') and len(clean_term) > 4:
+            clean_term = clean_term[2:-2].strip()
+            is_whole_word = True
+        elif clean_term.startswith(r'\m') and clean_term.endswith(r'\M') and len(clean_term) > 4:
+            clean_term = clean_term[2:-2].strip()
+            is_whole_word = True
         if not clean_term:
             continue
         if negated:
-            parsed['neg_free_terms'].append(clean_term)
-            parsed['active_badges'].append({'raw': tok, 'label': f"Exclude: {clean_term}", 'kind': 'exclude'})
+            if is_whole_word:
+                parsed['neg_whole_word_terms'].append(clean_term)
+                parsed['active_badges'].append({'raw': tok, 'label': f'Exclude Word: "{clean_term}"', 'kind': 'exclude'})
+            else:
+                parsed['neg_free_terms'].append(clean_term)
+                parsed['active_badges'].append({'raw': tok, 'label': f"Exclude: {clean_term}", 'kind': 'exclude'})
         else:
-            parsed['free_terms'].append(clean_term)
+            if is_whole_word:
+                parsed['whole_word_terms'].append(clean_term)
+                parsed['active_badges'].append({'raw': tok, 'label': f'Whole Word: "{clean_term}"', 'kind': 'field'})
+            else:
+                parsed['free_terms'].append(clean_term)
 
     return parsed
 
@@ -948,8 +1019,14 @@ def perform_search(query_string, filters=None):
                 neg_file_formats.append(fmt_val)
             else:
                 file_formats.append(fmt_val)
+        elif canon_field == 'word':
+            q_cond = _build_whole_word_q('title', val) | _build_whole_word_q('authors', val)
+            queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'title':
             q_cond = Q(title__icontains=val)
+            queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
+        elif canon_field == 'title_word':
+            q_cond = _build_whole_word_q('title', val)
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'author':
             from .models import build_author_q_filter
@@ -957,6 +1034,9 @@ def perform_search(query_string, filters=None):
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'publisher':
             q_cond = Q(publisher__icontains=val)
+            queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
+        elif canon_field == 'publisher_word':
+            q_cond = _build_whole_word_q('publisher', val)
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field == 'isbn':
             clean_i = re.sub(r'[^0-9Xx]', '', val)
@@ -967,6 +1047,9 @@ def perform_search(query_string, filters=None):
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field in ('description', 'series'):
             q_cond = Q(description__icontains=val) | Q(title__icontains=val)
+            queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
+        elif canon_field == 'description_word':
+            q_cond = _build_whole_word_q('description', val) | _build_whole_word_q('title', val)
             queryset = queryset.exclude(q_cond) if negated else queryset.filter(q_cond)
         elif canon_field in ('file', 'path'):
             loc_ids = list(
@@ -1153,16 +1236,26 @@ def perform_search(query_string, filters=None):
             qs_out._fast_exclude_ids_set = fast_exclude_ids_set
         return qs_out
 
-    # 4. Apply negated free-text exclusions (`-term`)
+    # 4. Apply negated free-text and whole-word exclusions (`-term`, `-"word"`)
     for neg_term in parsed['neg_free_terms']:
         queryset = queryset.exclude(
             Q(title__icontains=neg_term) | Q(authors__icontains=neg_term)
         )
+    for neg_word in parsed.get('neg_whole_word_terms', []):
+        queryset = queryset.exclude(
+            _build_whole_word_q('title', neg_word) | _build_whole_word_q('authors', neg_word)
+        )
 
-    # 5. Apply positive free-text terms
-    free_q = ' '.join(parsed['free_terms']).strip()
-    if free_q:
-        clean_q = free_q.replace('-', '').replace(' ', '')
+    # 5. Apply positive whole-word terms (`"word"`, `\bword\b`) and free-text terms
+    for ww_term in parsed.get('whole_word_terms', []):
+        queryset = queryset.filter(
+            _build_whole_word_q('title', ww_term) | _build_whole_word_q('authors', ww_term)
+        )
+
+    free_q = ' '.join(parsed['free_terms'] + parsed.get('whole_word_terms', [])).strip()
+    if parsed['free_terms']:
+        raw_free_only = ' '.join(parsed['free_terms']).strip()
+        clean_q = raw_free_only.replace('-', '').replace(' ', '')
         if (clean_q.isdigit() and len(clean_q) in (10, 13)) or (
             len(clean_q) == 10 and clean_q.upper().startswith('B0')
         ):
@@ -1171,9 +1264,9 @@ def perform_search(query_string, filters=None):
             if exact_qs.exists():
                 return _ret(exact_qs)
 
-        if free_q.lower().endswith(('.epub', '.pdf', '.mobi', '.azw3', '.mp3', '.m4b')):
+        if raw_free_only.lower().endswith(('.epub', '.pdf', '.mobi', '.azw3', '.mp3', '.m4b')):
             loc_item_ids = list(
-                FileLocation.objects.filter(file_name__icontains=free_q)
+                FileLocation.objects.filter(file_name__icontains=raw_free_only)
                 .order_by()
                 .values_list('catalog_item_id', flat=True)[:250]
             )

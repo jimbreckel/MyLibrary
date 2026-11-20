@@ -2406,7 +2406,8 @@ _GENERIC_TITLE_STOPWORDS = {
 
 def _clean_book_stem_for_grouping(raw_name_or_title: str) -> str:
     """
-    Strip file extensions, duplicate copy suffixes `(1)`, inline `(retail)` / `(pdf)` / `(epub)` tags,
+    Strip file extensions, Anna's Archive `--` metadata tails, unclosed trailing `(` fragments,
+    duplicate copy suffixes `(1)`, inline `(retail)` / `(pdf)` / `(epub)` tags,
     embedded/trailing ISBN suffixes (`-978..._WEB`), and trailing `(Publisher, Year) WW` release tags.
     """
     s = str(raw_name_or_title or '').strip()
@@ -2415,9 +2416,14 @@ def _clean_book_stem_for_grouping(raw_name_or_title: str) -> str:
     s = os.path.basename(s.replace('\\', '/'))
     while re.search(r'\.(?:epub|pdf|mobi|azw3?|chm|djvu|cbz|cbr|fb2|txt|rtf|doc|docx|lit|prc|pdb)$', s, flags=re.I):
         s = re.sub(r'\.(?:epub|pdf|mobi|azw3?|chm|djvu|cbz|cbr|fb2|txt|rtf|doc|docx|lit|prc|pdb)$', '', s, flags=re.I).strip()
+    # Strip Anna's Archive '-- Author -- Series -- Publisher -- ISBN -- MD5 -- Anna's Archive' suffix
+    if ' -- ' in s:
+        s = s.split(' -- ', 1)[0].strip()
+    # Strip unclosed trailing '(' or '[' from truncated Anna's Archive titles (e.g. '(Dover Books on')
+    s = re.sub(r'\s*[\(\[][^)\]]*$', '', s).strip()
     s = re.sub(r'\s*\(\d{1,2}\)$', '', s)
     s = re.sub(
-        r'\s*[\(\[]\s*(?:retail|ebook|e-book|pdf|epub|mobi|azw3?|chm|djvu|nodrm|no\s*drm|z-lib(?:rary)?(?:\.org)?|v\d+(?:\.\d+)*|\d{1,2})\s*[\)\]]',
+        r'\s*[\(\[]\s*(?:retail|ebook|e-book|pdf|epub|mobi|azw3?|chm|djvu|nodrm|no\s*drm|z-lib(?:rary)?(?:\.org)?|v\d+(?:\.\d+)*|\d{1,2}|ecv|ocr|fixed|scan)\s*[\)\]]',
         ' ',
         s,
         flags=re.I,
@@ -2435,24 +2441,42 @@ def _clean_book_stem_for_grouping(raw_name_or_title: str) -> str:
         flags=re.I,
     )
     s = re.sub(r'(?:[-_]+|\s+-\s*)WEB\s*$', '', s, flags=re.I)
-    s = re.sub(r'\s*\([^)]*?\b(?:1[89]\d{2}|20\d{2})\b[^)]*\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$', '', s, flags=re.I)
-    s = re.sub(r'\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$', '', s, flags=re.I)
-    s = re.sub(r'\b\d+(?:st|nd|rd|th)\s+ed(?:ition)?\.?\b', ' ', s, flags=re.I)
+    # Repeatedly strip trailing (Publisher, Year), [orig Year], [eCV], and WW/release group tags in any order
+    for _ in range(4):
+        s_next = re.sub(
+            r'(?:\s*\([^)]*?\b(?:1[89]\d{2}|20\d{2}|dover\s+books|mcgraw[\s\-]*hill|springer|wiley|routledge|oxford|cambridge|penguin|vintage|harper|pearson|addison[\s\-]*wesley|prentice[\s\-]*hall|o\'?reilly|apress|manning|packt|no\s+starch|pragmatic|elsevier|academic\s+press|crc\s+press|mit\s+press)\b[^)]*\)|\s*\[[^\]]*?\b(?:orig|1[89]\d{2}|20\d{2}|ecv|ocr|scan|retail|fixed)\b[^\]]*\]|\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB))\s*$',
+            '',
+            s,
+            flags=re.I,
+        ).strip()
+        if s_next == s:
+            break
+        s = s_next
+    s = re.sub(r'\s+\bby\s*[A-Z][A-Za-z.\s,\'-]{1,35}$', '', s).strip()
+    s = re.sub(
+        r'(?::\s*|\s+)\b(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+)+(?:revised\s+|expanded\s+)?ed(?:ition)?\.?\b',
+        ' ',
+        s,
+        flags=re.I,
+    )
     s = re.sub(r'\b(?:a\s+)?self[\s\-]*teaching\s+guide\b', ' ', s, flags=re.I)
     s = re.sub(r'^\s*mcgraw[\s\-]*hill(?:\s+osborne)?\s+', '', s, flags=re.I)
     s = re.sub(r'^\s*demystified\s*-\s*', '', s, flags=re.I)
     if '.' in s and ' ' not in s and s.count('.') >= 2:
         s = s.replace('.', ' ')
+    s = re.sub(r'_\s+', ': ', s)
     s = s.replace('_', ' ')
-    # If "Title - Author" where the right side is a short author name like "E. Teicholz" or "P. bedell"
+    # If "Title - Author" where one side is an author name like "C. Pinter" or "Charles C. Pinter"
     if ' - ' in s:
         parts = [p.strip() for p in s.split(' - ') if p.strip()]
         if len(parts) == 2:
-            if re.match(r'^[A-Z]\.\s*[A-Za-z\-]+$', parts[1]):
+            author_pat = r'^(?:[A-Z]\.\s*|[A-Z][a-z]+\s+){1,3}[A-Z][a-zA-Z\-]+$'
+            lastname_first_pat = r"^[A-Z][a-zA-Z'-]+,\s+[A-Z][a-zA-Z.\s'-]+$"
+            if (re.match(author_pat, parts[1]) or re.match(lastname_first_pat, parts[1])) and len(parts[1].split()) <= 4:
                 s = parts[0]
             elif re.match(r'^[A-Z]\.\s*[A-Za-z\-]+$', parts[0]):
                 s = parts[1]
-    return re.sub(r'\s+', ' ', s).strip()
+    return re.sub(r'\s+', ' ', s).strip(' -:;,.')
 
 
 def _extract_distinctive_book_tokens(raw_name_or_title: str) -> set:
@@ -2493,17 +2517,26 @@ def are_two_files_same_book(file_a: str, file_b: str, item_isbn: str = '') -> bo
             if any(dp == n_other for dp in dash_parts):
                 return True
 
-    # Check if one of the filenames is an ISBN filename matching the other or item_isbn
+    # Check if one of the filenames is a bare ISBN filename matching the other or item_isbn.
+    # Note: eBook (.epub) and Print (.pdf) copies of the same book legitimately carry different ISBNs
+    # inside Anna's Archive filenames, so only treat differing ISBNs as a hard mismatch when BOTH
+    # stems are bare ISBN filenames (<= 13 chars) without a shared title!
     isbn_a = _extract_book_isbn_from_text(file_a) or _extract_book_isbn_from_text(stem_a)
     isbn_b = _extract_book_isbn_from_text(file_b) or _extract_book_isbn_from_text(stem_b)
     clean_item_isbn = re.sub(r'[^0-9Xx]', '', str(item_isbn or '')).upper()
     if isbn_a and isbn_b:
         if isbn_a == isbn_b or (len(isbn_a) >= 10 and len(isbn_b) >= 10 and isbn_a[-9:-1] == isbn_b[-9:-1]):
             return True
-        return False
+        if len(norm_a) <= 13 and len(norm_b) <= 13:
+            return False
     if (isbn_a and clean_item_isbn and isbn_a == clean_item_isbn and len(norm_a) <= 13) or (
         isbn_b and clean_item_isbn and isbn_b == clean_item_isbn and len(norm_b) <= 13
     ):
+        return True
+
+    base_a = _norm_lookup_str(stem_a.split(':')[0])
+    base_b = _norm_lookup_str(stem_b.split(':')[0])
+    if base_a and base_b and base_a == base_b and len(base_a) >= 6:
         return True
 
     toks_a = _extract_distinctive_book_tokens(stem_a)
@@ -2955,9 +2988,10 @@ def resolve_catalog_item_by_id_or_fallback(
 def _authors_refer_to_same_work(auth_a: str, auth_b: str) -> bool:
     """
     Return True if two `CatalogItem.authors` strings refer to the same author(s)
-    (e.g. 'Gardner D. Hiscox, Gardner Dexter Hiscox' vs 'Gardner D. Hiscox' vs 'G. Hiscox').
+    (e.g. 'Gardner D. Hiscox, Gardner Dexter Hiscox' vs 'Gardner D. Hiscox' vs 'G. Hiscox',
+    or single-surname 'Pinter' vs 'Charles C. Pinter').
     """
-    from .models import _are_same_person_author_variants, format_normalized_authors_str, parse_and_normalize_authors
+    from .models import _are_same_person_author_variants, _AUTHOR_SUFFIXES, format_normalized_authors_str, parse_and_normalize_authors
 
     ca = (auth_a or '').strip()
     cb = (auth_b or '').strip()
@@ -2973,6 +3007,14 @@ def _authors_refer_to_same_work(auth_a: str, auth_b: str) -> bool:
     list_b = parse_and_normalize_authors(cb)
     if list_a and list_b and _are_same_person_author_variants(list_a[0], list_b[0]):
         return True
+    # Handle single-surname author ('Pinter') vs full name ('Charles C. Pinter')
+    if list_a and list_b:
+        wa = [re.sub(r'[^a-z0-9]', '', w.lower()) for w in list_a[0].split() if re.sub(r'[^a-z0-9]', '', w.lower()) not in _AUTHOR_SUFFIXES]
+        wb = [re.sub(r'[^a-z0-9]', '', w.lower()) for w in list_b[0].split() if re.sub(r'[^a-z0-9]', '', w.lower()) not in _AUTHOR_SUFFIXES]
+        if (len(wa) == 1 and len(wb) >= 2 and len(wa[0]) >= 4 and wa[0] == wb[-1]) or (
+            len(wb) == 1 and len(wa) >= 2 and len(wb[0]) >= 4 and wb[0] == wa[-1]
+        ):
+            return True
     try:
         from epubmeta.matcher import score_authors
         if score_authors(list_a, list_b) >= 0.75:
@@ -2982,10 +3024,134 @@ def _authors_refer_to_same_work(auth_a: str, auth_b: str) -> bool:
     return False
 
 
-def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
+def _pick_better_authors_str(auth_a: str, auth_b: str) -> str:
+    """Return the more complete normalized author string when merging two records for the same author."""
+    from .models import format_normalized_authors_str
+    na = format_normalized_authors_str(auth_a or '')
+    nb = format_normalized_authors_str(auth_b or '')
+    if not na:
+        return nb
+    if not nb:
+        return na
+    wa = na.split(',')[0].split()
+    wb = nb.split(',')[0].split()
+    # Prefer multi-word 'Charles C. Pinter' over single-word 'Pinter', and full first name over initial 'C. Pinter'
+    if len(wb) > len(wa) and len(wa) == 1:
+        return nb
+    if len(wa) > len(wb) and len(wb) == 1:
+        return na
+    if wa and wb and len(wa[0].rstrip('.')) == 1 and len(wb[0].rstrip('.')) > 1:
+        return nb
+    if wa and wb and len(wb[0].rstrip('.')) == 1 and len(wa[0].rstrip('.')) > 1:
+        return na
+    return na if len(na) >= len(nb) else nb
+
+
+_EDITION_WORD_MAP = {
+    '1': ('1', 'First Edition'), '1st': ('1', 'First Edition'), 'first': ('1', 'First Edition'),
+    '2': ('2', 'Second Edition'), '2nd': ('2', 'Second Edition'), 'second': ('2', 'Second Edition'),
+    '3': ('3', 'Third Edition'), '3rd': ('3', 'Third Edition'), 'third': ('3', 'Third Edition'),
+    '4': ('4', 'Fourth Edition'), '4th': ('4', 'Fourth Edition'), 'fourth': ('4', 'Fourth Edition'),
+    '5': ('5', 'Fifth Edition'), '5th': ('5', 'Fifth Edition'), 'fifth': ('5', 'Fifth Edition'),
+    '6': ('6', 'Sixth Edition'), '6th': ('6', 'Sixth Edition'), 'sixth': ('6', 'Sixth Edition'),
+    '7': ('7', 'Seventh Edition'), '7th': ('7', 'Seventh Edition'), 'seventh': ('7', 'Seventh Edition'),
+    '8': ('8', 'Eighth Edition'), '8th': ('8', 'Eighth Edition'), 'eighth': ('8', 'Eighth Edition'),
+    '9': ('9', 'Ninth Edition'), '9th': ('9', 'Ninth Edition'), 'ninth': ('9', 'Ninth Edition'),
+    '10': ('10', 'Tenth Edition'), '10th': ('10', 'Tenth Edition'), 'tenth': ('10', 'Tenth Edition'),
+}
+
+
+def _canonical_work_title_info(raw_title: str) -> Tuple[str, str, str, str]:
+    """
+    Clean a `CatalogItem.title` and extract:
+      `(clean_display_title, clean_base_title, norm_base_title, edition_num)`
+    Examples:
+      - 'A Book of Abstract Algebra 2nd Second edition byPinter'
+        -> ('A Book of Abstract Algebra: Second Edition', 'A Book of Abstract Algebra', 'a book of abstract algebra', '2')
+      - 'A Book of Abstract Algebra: Second Edition (Dover Books on'
+        -> ('A Book of Abstract Algebra: Second Edition', 'A Book of Abstract Algebra', 'a book of abstract algebra', '2')
+    """
+    s = str(raw_title or '').strip()
+    if not s:
+        return '', '', '', ''
+    # Convert dot-separated release stems like 'Que.Charts.and.Graphs.for.Microsoft.Office.Excel.2007.Apr.2007'
+    if s.count('.') >= 3 and s.count(' ') <= 1:
+        s = re.sub(r'\.(?:epub|pdf|mobi|azw3?|chm|djvu)$', '', s, flags=re.I)
+        s = s.replace('.', ' ').strip()
+    if ' -- ' in s:
+        s = s.split(' -- ', 1)[0].strip()
+    # Strip leading publisher prefixes on unenriched scene/ebook filenames
+    s = re.sub(
+        r'^(?:Que|QUE|Springer[\s\-]*Verlag|Springer|Wiley|O\'?Reilly|Apress|Packt|Manning|Sams|Syngress|McGraw[\s\-]*Hill|Addison[\s\-]*Wesley|Prentice[\s\-]*Hall|No\s+Starch(?:\s+Press)?|Focal\s+Press|Morgan\s+Kaufmann|CRC\s+Press|Cambridge\s+University\s+Press|Oxford\s+University\s+Press)(?:\s*[-–—:]\s*|\s+)(?=[A-Z0-9])',
+        '',
+        s,
+    ).strip()
+    # Strip trailing release month+year or bracketed year like 'Apr 2007', '[2007]', '(2007)', 'WW'
+    s = re.sub(
+        r'(?:\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}|\s*[\[\(](?:19|20)\d{2}[\]\)]|\s+WW|\s*\(\d+\))+\s*$',
+        '',
+        s,
+        flags=re.I,
+    ).strip()
+    # Strip unclosed trailing '(' or '[' fragments (e.g. '(Dover Books on')
+    s = re.sub(r'\s*[\(\[][^)\]]*$', '', s).strip()
+    # Strip closed parenthetical series/publisher suffixes like '(Dover Books on Mathematics)' or '(Business Solutions)'
+    s = re.sub(
+        r'\s*\([^)]*?\b(?:dover\s+books|business\s+solutions|series|reference|edition|ed\.|mcgraw[\s\-]*hill|springer|wiley|routledge|oxford|cambridge|que)\b[^)]*\)\s*$',
+        '',
+        s,
+        flags=re.I,
+    ).strip()
+    # Strip trailing 'by<Author>' or 'by <Author>' (e.g. 'byPinter' or 'by Charles C. Pinter')
+    s = re.sub(r'\s+\bby\s*[A-Z][A-Za-z.\s,\'-]{1,35}$', '', s).strip()
+
+    ed_num = ''
+    ed_label = ''
+    m_ed = re.search(
+        r'\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+(?:revised\s+|expanded\s+)?ed(?:ition)?\.?\b',
+        s,
+        flags=re.I,
+    )
+    if m_ed:
+        tok = m_ed.group(1).lower()
+        if tok in _EDITION_WORD_MAP:
+            ed_num, ed_label = _EDITION_WORD_MAP[tok]
+        else:
+            digits = re.sub(r'\D', '', tok)
+            if digits:
+                ed_num = digits
+                ed_label = f'{tok} Edition'
+
+    # Remove inline/trailing edition markers (including doubled '2nd Second edition')
+    s_no_ed = re.sub(
+        r'(?::\s*|\s*[-–—]\s*|\s+)\b(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th))\s+)+(?:revised\s+|expanded\s+)?ed(?:ition)?\.?\b',
+        '',
+        s,
+        flags=re.I,
+    ).strip(' -:;,.')
+
+    base_part = s_no_ed.split(':', 1)[0].strip(' -:;,.')
+    clean_base = _clean_book_stem_for_grouping(base_part) or base_part
+    norm_base = _norm_lookup_str(clean_base)
+
+    if ':' in s_no_ed:
+        clean_display = s_no_ed
+    elif ed_label and ed_num != '1':
+        clean_display = f'{clean_base}: {ed_label}'
+    else:
+        clean_display = clean_base or s_no_ed
+    return clean_display, clean_base, norm_base, ed_num
+
+
+def merge_duplicate_catalog_items_for_item(
+    item: CatalogItem,
+    prefound_dups: Optional[List[CatalogItem]] = None,
+    skip_disk_cover: bool = False,
+) -> List[str]:
     """
     Find any duplicate `CatalogItem` rows in BookDB that share the same `(title, authors)`
-    (where `authors` is not `'Unknown Author'`) or the same valid ISBN + base title,
+    (where `authors` is not `'Unknown Author'`), the same valid ISBN + base title, or the
+    same canonical `(base_title, edition, author)` across EPUB and PDF formats;
     merge their `FileLocation`s onto `item`, copy any missing metadata/cover fields onto `item`,
     and delete the duplicate `CatalogItem` rows. Returns list of deleted duplicate UUID strings.
     """
@@ -2997,35 +3163,35 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
     authors_clean = (item.authors or '').strip()
     if _is_garbage_or_placeholder_title(item.title) or _is_garbage_or_placeholder_author(authors_clean):
         return merged_ids
-    authors_updated = False
+    item_updated = False
     norm_item_authors = format_normalized_authors_str(authors_clean)
     if norm_item_authors and norm_item_authors != item.authors:
         item.authors = norm_item_authors[:512]
         authors_clean = item.authors
-        authors_updated = True
+        item_updated = True
+
+    clean_disp_title, clean_base_title, norm_base, item_ed = _canonical_work_title_info(item.title)
+    if clean_disp_title and clean_disp_title != item.title and (
+        ' -- ' in item.title
+        or re.search(r'\([^)]*$', item.title)
+        or re.search(r'\bby\s*[A-Z]', item.title)
+        or re.search(r'\b\d+(?:st|nd|rd|th)\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+ed', item.title, re.I)
+    ):
+        item.title = clean_disp_title[:512]
+        item_updated = True
 
     try:
-        from django.db.models.functions import Upper
-        title_up = item.title.strip().upper()
-        cand_map: Dict[Any, CatalogItem] = {}
+        if prefound_dups is not None:
+            dups = [c for c in prefound_dups if c.id != item.id]
+        else:
+            from django.db.models.functions import Upper
+            title_up = item.title.strip().upper()
+            cand_map: Dict[Any, CatalogItem] = {}
 
-        # 1. Fast indexed lookup via `idx_catalogitem_upper_title_btree` (`UPPER(title)`)
-        for c in (
-            CatalogItem.objects.annotate(_ut=Upper('title'))
-            .filter(item_type=item.item_type, _ut=title_up)
-            .exclude(id=item.id)
-            .prefetch_related('files')
-            .order_by()[:20]
-        ):
-            if _authors_refer_to_same_work(c.authors or '', authors_clean):
-                cand_map[c.id] = c
-
-        # 2. Fast indexed lookup via `catalog_catalogitem_isbn` B-tree index (`isbn__in`)
-        clean_isbn = re.sub(r'[^0-9Xx]', '', str(item.isbn or '')).upper()
-        if len(clean_isbn) in (10, 13):
-            isbn_cands = list({item.isbn.strip(), clean_isbn, clean_isbn.lower()})
+            # 1. Fast indexed lookup via `idx_catalogitem_upper_title_btree` (`UPPER(title)`)
             for c in (
-                CatalogItem.objects.filter(item_type=item.item_type, isbn__in=isbn_cands)
+                CatalogItem.objects.annotate(_ut=Upper('title'))
+                .filter(item_type=item.item_type, _ut=title_up)
                 .exclude(id=item.id)
                 .prefetch_related('files')
                 .order_by()[:20]
@@ -3033,20 +3199,81 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                 if _authors_refer_to_same_work(c.authors or '', authors_clean):
                     cand_map[c.id] = c
 
-        dups = list(cand_map.values())
+            # 2. Fast indexed B-tree lookup on `idx_catalogitem_upper_basetitle_btree` + prefix `title__istartswith`
+            #    (catches EPUB vs PDF copies where one has ': Second Edition' and the other has '2nd Second edition')
+            if clean_base_title and len(clean_base_title) >= 4:
+                base_up = clean_base_title.strip().upper()
+                for c in (
+                    CatalogItem.objects.extra(
+                        where=["UPPER(TRIM(SPLIT_PART(SPLIT_PART(title, ':', 1), ' (', 1))) = %s"],
+                        params=[base_up],
+                    )
+                    .filter(item_type=item.item_type)
+                    .exclude(id=item.id)
+                    .prefetch_related('files')
+                    .order_by()[:40]
+                ):
+                    if c.id not in cand_map and _authors_refer_to_same_work(c.authors or '', authors_clean):
+                        cand_map[c.id] = c
+
+                for c in (
+                    CatalogItem.objects.filter(item_type=item.item_type, title__istartswith=clean_base_title.strip())
+                    .exclude(id=item.id)
+                    .prefetch_related('files')
+                    .order_by()[:40]
+                ):
+                    if c.id not in cand_map and (
+                        _authors_refer_to_same_work(c.authors or '', authors_clean)
+                        or (_is_garbage_or_placeholder_author(c.authors or '') and len(norm_base) >= 15 and len(norm_base.split()) >= 3)
+                    ):
+                        cand_map[c.id] = c
+
+                # 2b. Fast trigram GIN lookup (`idx_catalogitem_title_upper_trgm`) for unenriched copies
+                #     that have a leading publisher prefix (e.g. 'QUE - Charts...', 'Que.Charts.and.Graphs...', 'Springer-Verlag ...')
+                if len(clean_base_title.strip()) >= 15 and len(clean_base_title.split()) >= 3:
+                    space_q = clean_base_title.strip()
+                    dot_q = '.'.join(space_q.split())
+                    for c in (
+                        CatalogItem.objects.filter(item_type=item.item_type)
+                        .filter(Q(title__icontains=space_q) | Q(title__icontains=dot_q))
+                        .exclude(id=item.id)
+                        .prefetch_related('files')
+                        .order_by()[:40]
+                    ):
+                        if c.id not in cand_map and (
+                            _authors_refer_to_same_work(c.authors or '', authors_clean)
+                            or _is_garbage_or_placeholder_author(c.authors or '')
+                        ):
+                            cand_map[c.id] = c
+
+            # 3. Fast indexed lookup via `catalog_catalogitem_isbn` B-tree index (`isbn__in`)
+            clean_isbn = re.sub(r'[^0-9Xx]', '', str(item.isbn or '')).upper()
+            if len(clean_isbn) in (10, 13):
+                isbn_cands = list({item.isbn.strip(), clean_isbn, clean_isbn.lower()})
+                for c in (
+                    CatalogItem.objects.filter(item_type=item.item_type, isbn__in=isbn_cands)
+                    .exclude(id=item.id)
+                    .prefetch_related('files')
+                    .order_by()[:20]
+                ):
+                    if _authors_refer_to_same_work(c.authors or '', authors_clean):
+                        cand_map[c.id] = c
+
+            dups = list(cand_map.values())
+
         if not dups:
-            if authors_updated:
-                item.save(update_fields=['authors', 'updated_at'])
+            if item_updated:
+                item.save(update_fields=['title', 'authors', 'updated_at'])
             return merged_ids
 
-        norm_base = _norm_lookup_str(_clean_book_stem_for_grouping(item.title.split(':')[0]))
-        item_updated = authors_updated
         item_files = list(item.files.all())
         existing_paths = {f.file_path for f in item_files if f.file_path}
 
         for other in dups:
-            other_base = _norm_lookup_str(_clean_book_stem_for_grouping((other.title or '').split(':')[0]))
+            other_disp, _, other_base, other_ed = _canonical_work_title_info(other.title or '')
             if norm_base and other_base and norm_base != other_base:
+                continue
+            if item_ed and other_ed and item_ed != other_ed:
                 continue
             other_files = list(other.files.all())
             # Never merge if the underlying physical filenames are unrelated books!
@@ -3057,12 +3284,22 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                     for of in other_files
                 ):
                     continue
+            better_auth = _pick_better_authors_str(item.authors or '', other.authors or '')
+            if better_auth and better_auth != item.authors:
+                item.authors = better_auth[:512]
+                authors_clean = item.authors
+                item_updated = True
+            if other_disp and (not clean_disp_title or (':' in other_disp and ':' not in item.title)):
+                item.title = other_disp[:512]
+                clean_disp_title = other_disp
+                item_updated = True
             for field in ('isbn', 'asin', 'publisher', 'pub_date', 'description', 'cover_thumbnail', 'cover_image_url'):
                 if not getattr(item, field, None) and getattr(other, field, None):
                     setattr(item, field, getattr(other, field))
                     item_updated = True
             if (
-                getattr(item, 'cover_thumbnail', None)
+                not skip_disk_cover
+                and getattr(item, 'cover_thumbnail', None)
                 and getattr(other, 'cover_thumbnail', None)
                 and should_prefer_candidate_cover(item.cover_thumbnail, other.cover_thumbnail)
             ):
@@ -3078,7 +3315,7 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
                     f_loc.save(update_fields=['catalog_item'])
                     if f_loc.file_path:
                         existing_paths.add(f_loc.file_path)
-            if (
+            if not skip_disk_cover and (
                 not getattr(item, 'cover_thumbnail', None)
                 or classify_cover_image(item.cover_thumbnail) in ('missing', 'text_only')
                 or is_hybrid_or_white_page_cover(item.cover_thumbnail)
@@ -3140,6 +3377,189 @@ def merge_duplicate_catalog_items_for_item(item: CatalogItem) -> List[str]:
     except Exception:
         pass
     return merged_ids
+
+
+def _fast_primary_surname(raw_author: str) -> str:
+    """Zero-regex fast surname extractor for initial bucketing of 100k+ author strings."""
+    s = (raw_author or '').strip()
+    if not s:
+        return ''
+    low = s.lower()
+    if low in ('unknown', 'unknown author', 'various', 'anonymous', 'n/a'):
+        return ''
+    first_seg = low.split(';')[0].split('&')[0].split(' and ')[0].strip()
+    if not first_seg:
+        return ''
+    if ',' in first_seg:
+        c0 = first_seg.split(',', 1)[0].strip()
+        if ' ' not in c0 and len(c0) >= 2:
+            return c0.strip(".,'-")
+        words = c0.split()
+    else:
+        words = first_seg.split()
+    while words and words[-1].strip(".,'-") in ('jr', 'sr', 'ii', 'iii', 'iv', 'md', 'phd', 'ed', 'eds', 'inc', 'ltd'):
+        words.pop()
+    return words[-1].strip(".,'-") if words else ''
+
+
+def scan_and_merge_enriched_duplicates(apply_merge: bool = False, limit_merges: int = 500) -> Dict[str, Any]:
+    """
+    Scan all enriched BOOK `CatalogItem` rows in `BookDB` to identify duplicate / split
+    `CatalogItem` groups (especially EPUB + PDF pairs or edition/title formatting variants
+    of the same work by the same author) that should be combined onto a single `CatalogItem`.
+    If `apply_merge=True`, merges them via `merge_duplicate_catalog_items_for_item`.
+    """
+    from collections import defaultdict
+    from django.db import connection
+    from .search import _is_garbage_or_placeholder_author, _is_garbage_or_placeholder_title
+
+    get_enriched_paths_set()
+    enriched_ids_set = {str(x) for x in (_ENRICHED_PATHS_CACHE.get('enriched_item_ids_set') or set())}
+
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, title, authors, isbn
+            FROM catalog_catalogitem
+            WHERE item_type = 'BOOK'
+              AND title IS NOT NULL
+              AND authors IS NOT NULL
+              AND authors NOT IN ('', 'Unknown', 'Unknown Author')
+            """
+        )
+        raw_rows = cur.fetchall()
+
+    # Pass 1 (Zero-regex O(N) bucketing): group by (10-char lowercase alnum title prefix, primary surname)
+    coarse_buckets: Dict[Tuple[str, str], List[Tuple[Any, str, str, str, bool]]] = defaultdict(list)
+    for it_id, raw_t, raw_a, raw_isbn in raw_rows:
+        t_str = (raw_t or '').strip()
+        if len(t_str) < 3:
+            continue
+        sname = _fast_primary_surname(raw_a)
+        if len(sname) < 2:
+            continue
+        t_pref = ''.join(ch for ch in t_str[:18].lower() if ch.isalnum())[:10]
+        if len(t_pref) < 3:
+            continue
+        is_enr = str(it_id) in enriched_ids_set
+        coarse_buckets[(t_pref, sname)].append((it_id, t_str, (raw_a or '').strip(), raw_isbn or '', is_enr))
+
+    # Pass 2: Only on coarse buckets with >= 2 items where at least 1 is enriched, compute canonical base title
+    buckets: Dict[Tuple[str, str], List[Tuple[Any, str, str, str, str, bool]]] = defaultdict(list)
+    for (_, sname), entries in coarse_buckets.items():
+        if len(entries) < 2 or not any(e[4] for e in entries):
+            continue
+        for it_id, t_str, a_str, isbn_str, is_enr in entries:
+            if _is_garbage_or_placeholder_title(t_str) or _is_garbage_or_placeholder_author(a_str):
+                continue
+            _, _, norm_base, ed_num = _canonical_work_title_info(t_str)
+            if not norm_base or len(norm_base) < 4:
+                continue
+            buckets[(norm_base, sname)].append((it_id, t_str, a_str, isbn_str, ed_num, is_enr))
+
+    candidate_bucket_ids: List[List[Any]] = []
+    for (norm_base, surname), entries in buckets.items():
+        if len(entries) < 2:
+            continue
+        if not any(e[5] for e in entries):
+            continue
+        candidate_bucket_ids.append([e[0] for e in entries])
+
+    all_cand_ids = [uid for grp in candidate_bucket_ids for uid in grp]
+    items_by_id: Dict[Any, CatalogItem] = {}
+    for chunk_start in range(0, len(all_cand_ids), 400):
+        chunk = all_cand_ids[chunk_start:chunk_start + 400]
+        for it_obj in CatalogItem.objects.filter(id__in=chunk).prefetch_related('files'):
+            items_by_id[it_obj.id] = it_obj
+
+    found_groups: List[Dict[str, Any]] = []
+    merged_groups_count = 0
+    merged_items_total = 0
+
+    for grp_ids in candidate_bucket_ids:
+        grp_items = [items_by_id[uid] for uid in grp_ids if uid in items_by_id]
+        if len(grp_items) < 2:
+            continue
+        visited: set = set()
+        for idx, primary in enumerate(grp_items):
+            if primary.id in visited:
+                continue
+            p_disp, p_base, p_norm_base, p_ed = _canonical_work_title_info(primary.title or '')
+            p_files = list(primary.files.all())
+            p_ref_fn = (p_files[0].file_name or os.path.basename(p_files[0].file_path or '')) if p_files else primary.title
+            cluster = [primary]
+            for other in grp_items[idx + 1:]:
+                if other.id in visited:
+                    continue
+                if not _authors_refer_to_same_work(primary.authors or '', other.authors or ''):
+                    continue
+                _, _, o_norm_base, o_ed = _canonical_work_title_info(other.title or '')
+                if p_norm_base != o_norm_base:
+                    continue
+                if p_ed and o_ed and p_ed != o_ed:
+                    continue
+                o_files = list(other.files.all())
+                if p_files and o_files:
+                    if any(
+                        not are_two_files_same_book(p_ref_fn, of.file_name or os.path.basename(of.file_path or ''), primary.isbn or '')
+                        for of in o_files
+                    ):
+                        continue
+                cluster.append(other)
+            if len(cluster) >= 2:
+                for c_it in cluster:
+                    visited.add(c_it.id)
+                cluster.sort(
+                    key=lambda x: (
+                        1 if str(x.id) in enriched_ids_set else 0,
+                        len((x.authors or '').split()),
+                        1 if x.description else 0,
+                        1 if ':' in (x.title or '') else 0,
+                    ),
+                    reverse=True,
+                )
+                best_primary = cluster[0]
+                formats_per_item = []
+                all_fmts = set()
+                for c_it in cluster:
+                    c_fmts = sorted({(fl.file_format or '').upper() for fl in c_it.files.all() if fl.file_format})
+                    all_fmts.update(c_fmts)
+                    formats_per_item.append({
+                        'id': str(c_it.id),
+                        'title': c_it.title,
+                        'authors': c_it.authors,
+                        'isbn': c_it.isbn or '',
+                        'formats': c_fmts,
+                        'file_count': len(list(c_it.files.all())),
+                    })
+                merged_now: List[str] = []
+                if apply_merge and merged_groups_count < limit_merges:
+                    merged_now = merge_duplicate_catalog_items_for_item(
+                        best_primary,
+                        prefound_dups=cluster[1:],
+                        skip_disk_cover=True,
+                    )
+                    if merged_now:
+                        merged_groups_count += 1
+                        merged_items_total += len(merged_now)
+                found_groups.append({
+                    'canonical_title': _canonical_work_title_info(best_primary.title or '')[0],
+                    'canonical_author': _pick_better_authors_str(best_primary.authors or '', cluster[1].authors or ''),
+                    'combined_formats': sorted(all_fmts),
+                    'cross_format': len(all_fmts) > 1,
+                    'items': formats_per_item,
+                    'merged_ids': merged_now,
+                })
+
+    found_groups.sort(key=lambda g: (1 if g['cross_format'] else 0, len(g['items']), g['canonical_title']), reverse=True)
+    return {
+        'ok': True,
+        'total_groups_found': len(found_groups),
+        'cross_format_groups_found': sum(1 for g in found_groups if g['cross_format']),
+        'merged_groups_count': merged_groups_count,
+        'merged_items_total': merged_items_total,
+        'groups': found_groups[:200],
+    }
 
 
 def _hydrate_catalog_item_for_single_file(item: CatalogItem, f_loc: FileLocation, enrich_if_needed: bool = False) -> None:
@@ -6394,14 +6814,6 @@ def enrich_file_location_on_demand(
         and len(str(item.cover_thumbnail)) > 500
     ):
         orig_cover_thumb = item.cover_thumbnail
-    if not orig_cover_thumb:
-        try:
-            from epubmeta.external_dbs import generate_cover_thumbnail
-            emb_cov_bytes = reader.extract_cover_bytes() if reader else None
-            if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
-                orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
-        except Exception:
-            pass
     if (
         not orig_cover_thumb
         and item.cover_thumbnail
@@ -6415,7 +6827,20 @@ def enrich_file_location_on_demand(
         orig_cover_thumb = item.cover_thumbnail
     if not orig_cover_thumb:
         try:
-            extracted_orig = extract_original_cover_for_item(item, ignore_backup=True)
+            from epubmeta.external_dbs import generate_cover_thumbnail
+            emb_cov_bytes = reader.extract_cover_bytes() if reader else None
+            if emb_cov_bytes and len(emb_cov_bytes) >= 1000:
+                orig_cover_thumb = generate_cover_thumbnail(emb_cov_bytes, max_size=(360, 540)) or ''
+        except Exception:
+            pass
+    if not orig_cover_thumb:
+        try:
+            extracted_orig = extract_original_cover_for_item(
+                item,
+                ignore_backup=True,
+                prefer_existing_thumbnail=True,
+                max_file_mb=20.0,
+            )
             if extracted_orig and str(extracted_orig).startswith('data:image'):
                 orig_cover_thumb = extracted_orig
         except Exception:
@@ -8444,6 +8869,8 @@ def apply_book_cover_to_item(
     return {
         'ok': True,
         'item_id': str(item.id),
+        'title': item.title or '',
+        'authors': item.authors or '',
         'cover_url': item.cover_thumbnail or item.cover_image_url or cover_url,
         'external_cover_url': item.cover_image_url or '',
         'cover_issue': '',
