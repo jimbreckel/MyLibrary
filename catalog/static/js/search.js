@@ -200,9 +200,12 @@ const initCatalogSearch = () => {
             filesData = [];
         }
 
-        // Populate modal content
+        // Populate modal content — prefer the exact card containing `btn` so duplicate/merged cards never target the wrong DOM element
+        const modalCardEl = btn.closest('.media-card') || (itemId ? document.getElementById(`card-${itemId}`) : null);
         window._activeModalItem = {
             itemId,
+            origItemId: itemId,
+            cardEl: modalCardEl || null,
             title,
             authors,
             publisher,
@@ -241,7 +244,7 @@ const initCatalogSearch = () => {
         const covBtn = document.getElementById('btn-run-cover-search');
         if (covBtn) covBtn.disabled = false;
         if (window._activeCoverSearchAbort) {
-            try { window._activeCoverSearchAbort.abort(); } catch (_) {}
+            try { window._activeCoverSearchAbort.abort(); } catch (_) { }
             window._activeCoverSearchAbort = null;
         }
         const covRes = document.getElementById('cover-finder-results');
@@ -250,7 +253,7 @@ const initCatalogSearch = () => {
         if (covSt) covSt.textContent = '';
 
         // Populate Enrichment Error / Diagnostic Banner in View Details when applicable
-        const cardEl = itemId ? document.getElementById(`card-${itemId}`) : btn.closest('.media-card');
+        const cardEl = btn.closest('.media-card') || (itemId ? document.getElementById(`card-${itemId}`) : null);
         const cardEnrBtn = cardEl ? cardEl.querySelector('.btn-enrich-card') : null;
         const fileDiag = filesData.find(f => f && (f.enrich_error || f.enrich_status));
         const errStatus = btn.getAttribute('data-enrich-status') || (fileDiag ? fileDiag.enrich_status : '') || (cardEnrBtn && cardEnrBtn._reviewData ? cardEnrBtn._reviewData.status : '') || '';
@@ -1334,6 +1337,7 @@ const initCatalogSearch = () => {
             const imgs = drawer && Array.isArray(drawer._previewImages) ? drawer._previewImages : [];
             const active = window._activeModalItem || {};
             if (!imgs[imgIdx] || !active.itemId) return;
+            const origItemId = active.origItemId || active.itemId;
             const origText = btnEl ? btnEl.textContent : 'Use as Cover';
             if (btnEl) {
                 btnEl.disabled = true;
@@ -1368,10 +1372,14 @@ const initCatalogSearch = () => {
                     }
                     if (res.ok) {
                         const resolvedId = res.item_id || active.itemId;
-                        if (window._activeModalItem && res.item_id) {
-                            window._activeModalItem.itemId = res.item_id;
+                        const savedCover = res.cover_url || imgs[imgIdx].data_uri;
+                        if (window._activeModalItem) {
+                            window._activeModalItem.cover = savedCover;
+                            if (res.item_id) {
+                                window._activeModalItem.itemId = res.item_id;
+                            }
                         }
-                        applyCardMetadataUpdate(resolvedId, { cover_url: res.cover_url || imgs[imgIdx].data_uri }, true);
+                        applyCardMetadataUpdate(origItemId, { item_id: resolvedId, cover_url: savedCover, file_id: active.firstFileId || '' }, true);
                     }
                 })
                 .catch(() => {
@@ -2383,21 +2391,71 @@ const initCatalogSearch = () => {
         ).join(', ');
     }
 
-    function applyCardMetadataUpdate(targetId, data, updateModal) {
+    function findCardElementForUpdate(targetId, data) {
+        if (window._activeModalItem && window._activeModalItem.cardEl && document.body.contains(window._activeModalItem.cardEl)) {
+            const mId = String(window._activeModalItem.itemId || '');
+            const oId = String(window._activeModalItem.origItemId || '');
+            const tId = String(targetId || '');
+            const dId = String((data && data.item_id) || '');
+            if ((tId && (tId === mId || tId === oId)) || (dId && (dId === mId || dId === oId))) {
+                return window._activeModalItem.cardEl;
+            }
+        }
         let card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        if (!card && data && data.requested_item_id) {
+            card = document.getElementById(`card-${data.requested_item_id}`);
+        }
         if (!card && data && data.item_id) {
             card = document.getElementById(`card-${data.item_id}`);
         }
-        if (!card && window._activeModalItem && window._activeModalItem.firstFileId) {
-            const wantFid = String(window._activeModalItem.firstFileId);
-            const allDetBtns = document.querySelectorAll('.media-card .btn-details[data-files]');
-            for (const b of allDetBtns) {
-                if ((b.getAttribute('data-files') || '').includes(wantFid)) {
-                    card = b.closest('.media-card');
-                    break;
+        if (!card && activeReviewCtx) {
+            if (activeReviewCtx.origItemId) {
+                card = document.getElementById(`card-${activeReviewCtx.origItemId}`);
+            }
+            if (!card && activeReviewCtx.cardEl && document.body.contains(activeReviewCtx.cardEl)) {
+                card = activeReviewCtx.cardEl;
+            }
+            if (!card && activeReviewCtx.btn && activeReviewCtx.btn.closest) {
+                card = activeReviewCtx.btn.closest('.media-card');
+            }
+        }
+        if (!card && window._activeModalItem) {
+            if (window._activeModalItem.origItemId) {
+                card = document.getElementById(`card-${window._activeModalItem.origItemId}`);
+            }
+            if (!card && window._activeModalItem.cardEl && document.body.contains(window._activeModalItem.cardEl)) {
+                card = window._activeModalItem.cardEl;
+            }
+        }
+        if (!card) {
+            const wantFid = String(
+                (data && data.file_id) ||
+                (activeReviewCtx && activeReviewCtx.fileId) ||
+                (window._activeModalItem && window._activeModalItem.firstFileId) ||
+                ''
+            ).trim();
+            const wantFpath = String(
+                (data && data.file_path) ||
+                (activeReviewCtx && activeReviewCtx.data && activeReviewCtx.data.file_path) ||
+                (window._activeModalItem && window._activeModalItem.firstFilePath) ||
+                ''
+            ).trim();
+            if (wantFid || wantFpath) {
+                const allDetBtns = document.querySelectorAll('.media-card .btn-details[data-files]');
+                for (const b of allDetBtns) {
+                    const rawFiles = b.getAttribute('data-files') || '';
+                    if ((wantFid && rawFiles.includes(wantFid)) || (wantFpath && rawFiles.includes(wantFpath))) {
+                        card = b.closest('.media-card');
+                        break;
+                    }
                 }
             }
         }
+        return card;
+    }
+
+    function applyCardMetadataUpdate(targetId, data, updateModal) {
+        let card = findCardElementForUpdate(targetId, data);
         if (card) {
             const detCheck = card.querySelector('.btn-details');
             if (detCheck && detCheck.getAttribute('data-is-bad-metadata') === 'true' && typeof window.applyBadMetadataStateToDom === 'function') {
@@ -2432,12 +2490,15 @@ const initCatalogSearch = () => {
             }
             if (data.description && descEl) {
                 descEl.textContent = data.description;
+                descEl.removeAttribute('title');
+                descEl.setAttribute('data-full-desc', data.description);
             }
             if (data.cover_url) {
                 const headerImg = card.querySelector('.card-header-image');
                 let imgEl = headerImg ? headerImg.querySelector('.cover-image') : null;
                 const fallbackEl = headerImg ? headerImg.querySelector('.card-icon-fallback') : null;
                 if (imgEl) {
+                    imgEl.removeAttribute('srcset');
                     imgEl.src = data.cover_url;
                 } else if (headerImg) {
                     if (fallbackEl) fallbackEl.style.display = 'none';
@@ -2446,6 +2507,102 @@ const initCatalogSearch = () => {
                     imgEl.src = data.cover_url;
                     headerImg.insertBefore(imgEl, headerImg.firstChild);
                 }
+                // Also update any duplicate DOM cards sharing the same targetId / data.item_id
+                const matchSelectorIds = Array.from(new Set([targetId, data.item_id, data.requested_item_id].filter(Boolean).map(String)));
+                matchSelectorIds.forEach(sid => {
+                    document.querySelectorAll(`.media-card[id="card-${CSS.escape(sid)}"], .media-card[data-item-id="${CSS.escape(sid)}"]`).forEach(otherCard => {
+                        if (otherCard === card) return;
+                        const oHdr = otherCard.querySelector('.card-header-image');
+                        let oImg = oHdr ? oHdr.querySelector('.cover-image') : null;
+                        const oFb = oHdr ? oHdr.querySelector('.card-icon-fallback') : null;
+                        if (oImg) {
+                            oImg.removeAttribute('srcset');
+                            oImg.src = data.cover_url;
+                        } else if (oHdr) {
+                            if (oFb) oFb.style.display = 'none';
+                            oImg = document.createElement('img');
+                            oImg.className = 'cover-image';
+                            oImg.src = data.cover_url;
+                            oHdr.insertBefore(oImg, oHdr.firstChild);
+                        }
+                        const oDet = otherCard.querySelector('.btn-details');
+                        if (oDet) oDet.setAttribute('data-cover', data.cover_url);
+                    });
+                });
+            }
+            if (data.cover_updated !== undefined) {
+                const applyUpdatedBadge = (cEl) => {
+                    if (!cEl) return;
+                    const hImg = cEl.querySelector('.card-header-image');
+                    let updBadge = cEl.querySelector('.card-cover-updated-badge');
+                    if (data.cover_updated) {
+                        const issB = cEl.querySelector('.card-cover-issue-badge');
+                        if (issB) issB.remove();
+                        const covAct = cEl.querySelector('.card-cover-actions-row');
+                        if (covAct) covAct.remove();
+                        if (!updBadge && hImg) {
+                            updBadge = document.createElement('span');
+                            updBadge.className = 'card-cover-updated-badge';
+                            updBadge.style.cssText = 'position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(45,212,191,0.75); color:#5eead4; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);';
+                            updBadge.title = 'Cover manually updated & saved to BookDB';
+                            updBadge.innerHTML = '<i class="fa-solid fa-image"></i> COVER UPDATED';
+                            hImg.appendChild(updBadge);
+                        }
+                    } else if (updBadge) {
+                        updBadge.remove();
+                    }
+                };
+                applyUpdatedBadge(card);
+                const matchIds = Array.from(new Set([targetId, data.item_id, data.requested_item_id].filter(Boolean).map(String)));
+                matchIds.forEach(sid => {
+                    document.querySelectorAll(`.media-card[id="card-${CSS.escape(sid)}"], .media-card[data-item-id="${CSS.escape(sid)}"]`).forEach(cEl => applyUpdatedBadge(cEl));
+                });
+            }
+            if (data.cover_issue !== undefined) {
+                const headerImg = card.querySelector('.card-header-image');
+                let issBadge = card.querySelector('.card-cover-issue-badge');
+                let covActRow = card.querySelector('.card-cover-actions-row');
+                const iss = String(data.cover_issue || '').trim();
+                if (iss === 'missing' || iss === 'text_only' || iss === 'generic') {
+                    if (!issBadge && headerImg) {
+                        issBadge = document.createElement('span');
+                        issBadge.className = 'card-cover-issue-badge';
+                        headerImg.appendChild(issBadge);
+                    }
+                    if (issBadge) {
+                        if (iss === 'missing') {
+                            issBadge.style.cssText = 'position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(244,63,94,0.7); color:#fda4af; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);';
+                            issBadge.innerHTML = '<i class="fa-regular fa-image"></i> NO COVER';
+                        } else if (iss === 'generic') {
+                            issBadge.style.cssText = 'position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(168,85,247,0.78); color:#d8b4fe; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);';
+                            issBadge.innerHTML = '<i class="fa-solid fa-shapes"></i> GENERIC COVER';
+                        } else {
+                            issBadge.style.cssText = 'position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(245,158,11,0.75); color:#fcd34d; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);';
+                            issBadge.innerHTML = '<i class="fa-solid fa-font"></i> TEXT COVER';
+                        }
+                    }
+                    if (!covActRow) {
+                        const row2 = card.querySelector('.card-row2-actions');
+                        if (row2 && row2.parentElement) {
+                            const effId = data.item_id || targetId;
+                            covActRow = document.createElement('div');
+                            covActRow.className = 'card-cover-actions-row';
+                            covActRow.style.cssText = 'display:flex; gap:0.38rem; align-items:center; width:100%;';
+                            covActRow.innerHTML = `
+                                <button type="button" onclick="event.stopPropagation(); if(window.openCardFindCover) window.openCardFindCover('${escapeJsString(effId)}');" title="Open Web Cover Search for this book" style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.3rem; padding:0.4rem 0.55rem; border-radius:8px; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(56,189,248,0.18); border:1px solid rgba(56,189,248,0.52); color:#7dd3fc; transition:all 0.2s;"><i class="fa-regular fa-images"></i> Find Cover</button>
+                                <button type="button" onclick="event.stopPropagation(); if(window.dismissNeedsCover) window.dismissNeedsCover('${escapeJsString(effId)}', this);" title="Keep current cover and remove this book from the Missing / Text Cover shelf" style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.4rem 0.52rem; border-radius:8px; font-size:0.72rem; font-weight:600; cursor:pointer; white-space:nowrap; background:rgba(148,163,184,0.14); border:1px solid rgba(148,163,184,0.35); color:#cbd5e1;"><i class="fa-solid fa-check"></i> Keep Cover</button>
+                            `;
+                            row2.parentElement.appendChild(covActRow);
+                        }
+                    }
+                } else {
+                    if (issBadge) issBadge.remove();
+                    if (covActRow) covActRow.remove();
+                }
+            }
+            if (data.missing_cover_count !== undefined) {
+                const cntEl = document.getElementById('sidebar-missing-cover-count');
+                if (cntEl) cntEl.textContent = Number(data.missing_cover_count).toLocaleString();
             }
             if (detailsBtn) {
                 if (data.title) detailsBtn.setAttribute('data-title', data.title);
@@ -2459,7 +2616,7 @@ const initCatalogSearch = () => {
                 try {
                     const fArr = JSON.parse(detailsBtn.getAttribute('data-files') || '[]');
                     fArr.forEach(f => {
-                        if (!data.file_id || String(f.id) === String(data.file_id) || ['EPUB', 'PDF'].includes((f.file_format || '').toUpperCase())) {
+                        if (!data.file_id || String(f.id) === String(data.file_id) || ['EPUB', 'PDF', 'MOBI', 'AZW', 'AZW3', 'PRC', 'PDB', 'FB2', 'CBZ', 'CBR', 'DJVU', 'TXT', 'RTF', 'DOC', 'DOCX', 'LIT'].includes((f.file_format || '').toUpperCase().replace(/^\./, ''))) {
                             f.is_enriched = true;
                             if (Array.isArray(data.tags) && data.tags.length > 0) {
                                 f.tags = data.tags;
@@ -2480,22 +2637,46 @@ const initCatalogSearch = () => {
                     }
                 }
             }
+            const isCoverOnlyPatch = Boolean(
+                data.cover_url && !data.status && !data.already_enriched && data.tags === undefined && data.merged_item_ids === undefined
+            );
             const cardEnrBtn = card.querySelector('.btn-enrich-card');
-            if (cardEnrBtn) {
+            if (cardEnrBtn && !isCoverOnlyPatch) {
                 cardEnrBtn.innerHTML = `<i class="fa-solid fa-check"></i> Enriched!`;
                 cardEnrBtn.style.background = 'rgba(74,222,128,0.18)';
                 cardEnrBtn.style.borderColor = 'rgba(74,222,128,0.5)';
                 cardEnrBtn.style.color = '#4ade80';
                 cardEnrBtn.setAttribute('data-force', 'true');
             }
+            if (!isCoverOnlyPatch) {
+                const hdrForEnr = card.querySelector('.card-header-image');
+                if (hdrForEnr && !hdrForEnr.querySelector('.card-enriched-badge')) {
+                    const enrBadge = document.createElement('span');
+                    enrBadge.className = 'card-enriched-badge';
+                    enrBadge.style.cssText = 'position:absolute; bottom:8px; right:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(74,222,128,0.65); color:#4ade80; font-size:0.66rem; font-weight:700; padding:0.15rem 0.45rem; border-radius:999px; backdrop-filter:blur(4px);';
+                    enrBadge.title = 'Enriched & Verified by epubmeta';
+                    enrBadge.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Enriched';
+                    hdrForEnr.appendChild(enrBadge);
+                }
+            }
             const cardReEnrBtn = card.querySelector('.btn-reenrich-card');
-            if (cardReEnrBtn) {
+            if (cardReEnrBtn && !isCoverOnlyPatch) {
                 cardReEnrBtn.style.display = 'none';
             }
             // If backend merged duplicate CatalogItems into this card, remove the duplicate card(s) from the live DOM and combine their files
             const mergedIds = Array.isArray(data.merged_item_ids) ? data.merged_item_ids.map(String) : [];
             if (data.item_id && String(data.item_id) !== String(targetId)) {
+                // If another card with id=`card-${data.item_id}` already exists in the DOM, fold it into mergedIds so we never create duplicate DOM IDs!
+                document.querySelectorAll(`.media-card[id="card-${CSS.escape(String(data.item_id))}"]`).forEach(existingSameId => {
+                    if (existingSameId !== card) {
+                        existingSameId.id = `card-merged-dup-${targetId}`;
+                        if (!mergedIds.includes(`merged-dup-${targetId}`)) {
+                            mergedIds.push(`merged-dup-${targetId}`);
+                        }
+                    }
+                });
                 card.id = `card-${data.item_id}`;
+                card.setAttribute('data-item-id', data.item_id);
                 card.querySelectorAll('[data-item-id]').forEach(el => el.setAttribute('data-item-id', data.item_id));
             }
             if (window._activeModalItem && mergedIds.includes(String(window._activeModalItem.itemId))) {
@@ -2635,13 +2816,13 @@ const initCatalogSearch = () => {
         if (!resultsEl) return;
 
         if (window._activeCoverSearchAbort) {
-            try { window._activeCoverSearchAbort.abort(); } catch (_) {}
+            try { window._activeCoverSearchAbort.abort(); } catch (_) { }
             window._activeCoverSearchAbort = null;
         }
         const ctrl = new AbortController();
         window._activeCoverSearchAbort = ctrl;
         const timeoutId = setTimeout(() => {
-            try { ctrl.abort(); } catch (_) {}
+            try { ctrl.abort(); } catch (_) { }
         }, 16000);
 
         const q = (covInput ? covInput.value : '').trim();
@@ -2787,7 +2968,7 @@ const initCatalogSearch = () => {
                     const finalCover = res.cover_url || coverUrl;
                     const origItemId = ctx.itemId;
                     const resolvedId = res.item_id || origItemId;
-                    const updPayload = { item_id: resolvedId, cover_url: finalCover };
+                    const updPayload = { item_id: resolvedId, cover_url: finalCover, cover_updated: true };
                     if (res.title && (!ctx.title || /\(\d+\)$|\.pdf$|\.epub$/i.test(ctx.title))) {
                         updPayload.title = res.title;
                     }
@@ -2958,6 +3139,7 @@ const initCatalogSearch = () => {
                 }
 
                 if (isReview) {
+                    const origItemId = (activeReviewCtx && (activeReviewCtx.origItemId || activeReviewCtx.itemId)) || payload.item_id || resolvedId;
                     if (activeReviewCtx && activeReviewCtx.data) {
                         const d = activeReviewCtx.data;
                         if (res.item_id) {
@@ -2981,13 +3163,18 @@ const initCatalogSearch = () => {
                         }
                         window.erPickField('cover', 'cand', true);
                     }
-                    if (resolvedId) {
-                        applyCardMetadataUpdate(resolvedId, { cover_url: genCoverUrl }, true);
+                    if (origItemId || resolvedId) {
+                        applyCardMetadataUpdate(origItemId || resolvedId, {
+                            item_id: resolvedId,
+                            cover_url: genCoverUrl,
+                            file_id: payload.file_id || '',
+                            file_path: payload.file_path || '',
+                        }, true);
                     }
                 } else {
                     const ctx = window._activeModalItem || {};
                     const origItemId = ctx.itemId || payload.item_id;
-                    const updPayload = { item_id: resolvedId, cover_url: genCoverUrl };
+                    const updPayload = { item_id: resolvedId, cover_url: genCoverUrl, cover_updated: true };
                     if (res.metadata_updated || (res.title && (!ctx.title || /\(\d+\)$|\.pdf$|\.epub$/i.test(ctx.title)))) {
                         if (res.title) updPayload.title = res.title;
                     }
@@ -3033,10 +3220,14 @@ const initCatalogSearch = () => {
 
     function updateItemDescriptionInDom(targetId, newDesc) {
         if (!newDesc) return;
-        const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        const card = findCardElementForUpdate(targetId, null);
         if (card) {
             const descEl = card.querySelector('.card-description');
-            if (descEl) descEl.textContent = newDesc;
+            if (descEl) {
+                descEl.textContent = newDesc;
+                descEl.removeAttribute('title');
+                descEl.setAttribute('data-full-desc', newDesc);
+            }
             const detBtn = card.querySelector('.btn-details');
             if (detBtn) {
                 detBtn.setAttribute('data-desc', newDesc);
@@ -3254,7 +3445,7 @@ const initCatalogSearch = () => {
         const newPubDate = (data.pub_date || data.suggested_year || '').trim();
         const newIsbn = (data.isbn || data.suggested_isbn || '').trim();
 
-        const card = targetId ? document.getElementById(`card-${targetId}`) : null;
+        const card = findCardElementForUpdate(targetId, data);
         if (card) {
             const detCheck = card.querySelector('.btn-details');
             if (detCheck && detCheck.getAttribute('data-is-bad-metadata') === 'true' && typeof window.applyBadMetadataStateToDom === 'function') {
@@ -3675,14 +3866,20 @@ const initCatalogSearch = () => {
                 }
 
                 if (isReview) {
+                    const origItemId = (activeReviewCtx && (activeReviewCtx.origItemId || activeReviewCtx.itemId)) || payload.item_id || resolvedId;
                     if (activeReviewCtx && activeReviewCtx.data) {
                         const d = activeReviewCtx.data;
                         d.orig_cover = origCoverUrl || d.orig_cover || '';
                         d.UseDataUriCover = '';
                         window.erPickField('cover', 'orig', true);
                     }
-                    if (resolvedId && origCoverUrl) {
-                        applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl }, true);
+                    if ((origItemId || resolvedId) && origCoverUrl) {
+                        applyCardMetadataUpdate(origItemId || resolvedId, {
+                            item_id: resolvedId,
+                            cover_url: origCoverUrl,
+                            file_id: payload.file_id || '',
+                            file_path: payload.file_path || '',
+                        }, true);
                     }
                 } else {
                     const ctx = window._activeModalItem || {};
@@ -3691,9 +3888,9 @@ const initCatalogSearch = () => {
                         window._activeModalItem.cover = origCoverUrl;
                         if (res.item_id) window._activeModalItem.itemId = res.item_id;
                     }
-                    applyCardMetadataUpdate(origItemId || resolvedId, { item_id: resolvedId, cover_url: origCoverUrl }, true);
+                    applyCardMetadataUpdate(origItemId || resolvedId, { item_id: resolvedId, cover_url: origCoverUrl, cover_updated: false }, true);
                     if (resolvedId && origItemId && resolvedId !== origItemId) {
-                        applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl }, false);
+                        applyCardMetadataUpdate(resolvedId, { cover_url: origCoverUrl, cover_updated: false }, false);
                     }
                 }
 
@@ -3968,7 +4165,17 @@ const initCatalogSearch = () => {
     function openEnrichReviewModal(data, btn, updateModal, itemId, fileId) {
         const modal = document.getElementById('enrich-review-modal');
         if (!modal) return;
-        activeReviewCtx = { data, btn, updateModal, itemId: data.item_id || itemId, fileId: data.file_id || fileId };
+        const origItemId = itemId || (data && (data.requested_item_id || data.item_id)) || (btn && btn.getAttribute && btn.getAttribute('data-item-id')) || '';
+        const cardEl = (btn && btn.closest && btn.closest('.media-card')) || (origItemId ? document.getElementById(`card-${origItemId}`) : null) || ((data && data.item_id) ? document.getElementById(`card-${data.item_id}`) : null);
+        activeReviewCtx = {
+            data,
+            btn,
+            updateModal,
+            itemId: (data && data.item_id) || origItemId,
+            origItemId: origItemId || (data && data.item_id) || '',
+            cardEl: cardEl || null,
+            fileId: (data && data.file_id) || fileId || '',
+        };
 
         const stBadge = document.getElementById('er-status-badge');
         if (stBadge) stBadge.textContent = data.status || 'NEEDS_REVIEW';
@@ -3990,8 +4197,8 @@ const initCatalogSearch = () => {
                 <div id="er-field-cover-${side}" data-pick-key="cover" data-pick-side="${side}" onclick="window.erPickField('cover', '${side}', true)" style="cursor:pointer; user-select:none; background:rgba(15,23,42,0.65); border:2px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.4rem 0.55rem; display:flex; align-items:center; justify-content:space-between; gap:0.65rem; transition:all 0.15s;" title="Click to use ${side === 'orig' ? 'Original Cover' : 'Candidate Cover'}">
                     <div style="display:flex; align-items:center; gap:0.65rem; min-width:0;">
                         ${meta.cover
-                            ? `<img src="${escapeHtml(meta.cover)}" alt="Cover" style="width:42px; height:60px; object-fit:cover; border-radius:4px; background:#020617; flex-shrink:0;">`
-                            : `<div style="width:42px; height:60px; border-radius:4px; background:#020617; border:1px dashed rgba(255,255,255,0.15); display:flex; align-items:center; justify-content:center; color:#64748b; font-size:0.65rem; flex-shrink:0;">None</div>`}
+                    ? `<img src="${escapeHtml(meta.cover)}" alt="Cover" style="width:42px; height:60px; object-fit:cover; border-radius:4px; background:#020617; flex-shrink:0;">`
+                    : `<div style="width:42px; height:60px; border-radius:4px; background:#020617; border:1px dashed rgba(255,255,255,0.15); display:flex; align-items:center; justify-content:center; color:#64748b; font-size:0.65rem; flex-shrink:0;">None</div>`}
                         <div>
                             <span style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; display:block;">Select Cover (${side === 'orig' ? '1st Option: Original' : 'Candidate'})</span>
                             <span id="er-cover-lbl-${side}" style="font-size:0.76rem; color:${meta.cover ? '#f8fafc' : '#64748b'}; font-weight:600;">${meta.cover ? (side === 'orig' ? 'Original Book Cover' : 'Enriched Web Cover') : 'No Cover Available'}</span>
@@ -4009,9 +4216,9 @@ const initCatalogSearch = () => {
                 { key: 'desc', label: 'Description', val: meta.description || '' },
             ];
             return coverHtml + rows.map(r => `
-                <div id="er-field-${r.key}-${side}" data-pick-key="${r.key}" data-pick-side="${side}" onclick="window.erPickField('${r.key}', '${side}', true)" style="cursor:pointer; user-select:none; background:rgba(15,23,42,0.65); border:2px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.35rem 0.55rem; transition:all 0.15s;" title="Click to use this ${r.label} in Selected Metadata">
+                <div id="er-field-${r.key}-${side}" data-pick-key="${r.key}" data-pick-side="${side}" ${r.key === 'desc' && r.val ? `data-full-desc="${escapeHtml(r.val)}"` : ''} onclick="window.erPickField('${r.key}', '${side}', true)" style="cursor:pointer; user-select:none; background:rgba(15,23,42,0.65); border:2px solid rgba(255,255,255,0.08); border-radius:6px; padding:0.35rem 0.55rem; transition:all 0.15s;" ${r.key === 'desc' && r.val ? '' : `title="Click to use this ${r.label} in Selected Metadata"`}>
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:0.4rem; margin-bottom:0.1rem;">
-                        <span style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; display:block;">${r.label}</span>
+                        <span style="font-size:0.68rem; color:#94a3b8; text-transform:uppercase; display:block;">${r.label}${r.key === 'desc' && r.val && r.val.length > 160 ? ' <small style="color:#38bdf8; text-transform:none;">(Hover for full text)</small>' : ''}</span>
                         <span id="er-badge-${r.key}-${side}" style="display:none; background:rgba(74,222,128,0.2); border:1px solid rgba(74,222,128,0.55); color:#4ade80; border-radius:999px; padding:0.06rem 0.42rem; font-size:0.63rem; font-weight:700; white-space:nowrap;"><i class="fa-solid fa-check"></i> Selected</span>
                     </div>
                     <span style="color:${r.val ? '#f8fafc' : '#64748b'}; font-weight:${r.key === 'title' ? '600' : '400'}; display:block; word-break:break-word;">${r.val ? escapeHtml(r.val.length > 160 ? r.val.slice(0, 160) + '…' : r.val) : '—'}</span>
@@ -4200,13 +4407,13 @@ const initCatalogSearch = () => {
         if (!resultsEl) return;
 
         if (window._activeErCoverSearchAbort) {
-            try { window._activeErCoverSearchAbort.abort(); } catch (_) {}
+            try { window._activeErCoverSearchAbort.abort(); } catch (_) { }
             window._activeErCoverSearchAbort = null;
         }
         const ctrl = new AbortController();
         window._activeErCoverSearchAbort = ctrl;
         const timeoutId = setTimeout(() => {
-            try { ctrl.abort(); } catch (_) {}
+            try { ctrl.abort(); } catch (_) { }
         }, 16000);
 
         const curTitle = (document.getElementById('er-input-title')?.value || data?.candidate_title || data?.orig_title || '').trim();
@@ -4338,9 +4545,19 @@ const initCatalogSearch = () => {
         }
         window.erPickField('cover', 'cand', true);
 
-        const itemId = activeReviewCtx.itemId || d.item_id;
+        const origItemId = activeReviewCtx.origItemId || activeReviewCtx.itemId || d.item_id || '';
+        const itemId = activeReviewCtx.itemId || d.item_id || origItemId;
         const fileId = activeReviewCtx.fileId || d.file_id || '';
         const erInput = document.getElementById('er-cover-search-input');
+        // Immediately reflect the chosen cover on the shelf card even before the network round-trip completes
+        if (origItemId || itemId) {
+            applyCardMetadataUpdate(origItemId || itemId, {
+                item_id: itemId,
+                cover_url: coverUrl,
+                file_id: fileId,
+                file_path: d.file_path || '',
+            }, true);
+        }
         if (itemId || fileId) {
             if (statusEl) statusEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving selected cover to BookDB...`;
             fetch(`${BASE_PREFIX}/api/cover-apply/`, {
@@ -4374,7 +4591,13 @@ const initCatalogSearch = () => {
                         }
                         d.candidate_cover = savedCover;
                         d.UseDataUriCover = savedCover;
-                        applyCardMetadataUpdate(resolvedId, { cover_url: savedCover }, true);
+                        applyCardMetadataUpdate(origItemId || resolvedId, {
+                            item_id: resolvedId,
+                            cover_url: savedCover,
+                            cover_updated: true,
+                            file_id: fileId,
+                            file_path: d.file_path || '',
+                        }, true);
                         if (statusEl) statusEl.innerHTML = `<span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-check"></i> Cover selected and saved to BookDB!</span>`;
                     } else if (statusEl) {
                         statusEl.innerHTML = `<span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-check"></i> Cover selected for Approve Selected Fields!</span>`;
@@ -4632,6 +4855,15 @@ const initCatalogSearch = () => {
             }
         }
         window.erPickField('cover', 'cand', true);
+        const origItemId = activeReviewCtx.origItemId || activeReviewCtx.itemId || activeReviewCtx.data.item_id || '';
+        if (origItemId) {
+            applyCardMetadataUpdate(origItemId, {
+                item_id: activeReviewCtx.itemId || origItemId,
+                cover_url: chosenUri,
+                file_id: activeReviewCtx.fileId || '',
+                file_path: activeReviewCtx.data.file_path || '',
+            }, true);
+        }
         const statusBar = document.getElementById('er-preview-copy-status');
         if (statusBar) {
             statusBar.style.display = 'flex';
@@ -4716,7 +4948,7 @@ const initCatalogSearch = () => {
                     return;
                 }
                 if (res.ok) {
-                    const targetId = itemId || res.requested_item_id || res.item_id;
+                    const targetId = (activeReviewCtx && activeReviewCtx.origItemId) || itemId || res.requested_item_id || res.item_id;
                     transitionCardEnrichBucket(targetId, 'enriched', 'needs_review');
                     if (btn) {
                         btn.disabled = false;
@@ -4730,9 +4962,10 @@ const initCatalogSearch = () => {
                     applyCardMetadataUpdate(targetId, res, updateModal);
                     window.closeEnrichReviewModal();
                 } else {
+                    const origIdKeep = (activeReviewCtx && activeReviewCtx.origItemId) || itemId;
                     const mergedReviewData = Object.assign({}, data || {}, res);
                     if (btn) btn._reviewData = mergedReviewData;
-                    openEnrichReviewModal(mergedReviewData, btn, updateModal, itemId, fileId);
+                    openEnrichReviewModal(mergedReviewData, btn, updateModal, origIdKeep, fileId);
                     if (res.candidate_title || res.candidate_authors) {
                         window.erUseAll('cand');
                     }
@@ -4777,6 +5010,17 @@ const initCatalogSearch = () => {
             const chosen = side === 'orig' ? (d.orig_cover || '') : (d.candidate_cover || '');
             d.UseDataUriCover = chosen;
             window.erHighlightFieldSide('cover', side);
+            if (fromUserClick && chosen) {
+                const origItemId = activeReviewCtx.origItemId || activeReviewCtx.itemId || d.item_id || '';
+                if (origItemId) {
+                    applyCardMetadataUpdate(origItemId, {
+                        item_id: activeReviewCtx.itemId || origItemId,
+                        cover_url: chosen,
+                        file_id: activeReviewCtx.fileId || d.file_id || '',
+                        file_path: d.file_path || '',
+                    }, true);
+                }
+            }
             return;
         }
         const map = {
@@ -4957,7 +5201,8 @@ const initCatalogSearch = () => {
 
     window.erApproveSelected = function () {
         if (!activeReviewCtx) return;
-        const { data, btn, updateModal, itemId } = activeReviewCtx;
+        const { data, btn, updateModal, itemId, fileId } = activeReviewCtx;
+        const origItemId = activeReviewCtx.origItemId || itemId || (data && data.item_id) || '';
         const approveBtn = document.getElementById('er-btn-approve');
         if (approveBtn) {
             approveBtn.disabled = true;
@@ -4983,7 +5228,8 @@ const initCatalogSearch = () => {
             body: JSON.stringify({
                 action: 'approve',
                 file_path: data.file_path,
-                item_id: itemId,
+                file_id: fileId || (data && data.file_id) || '',
+                item_id: itemId || origItemId,
                 selected_metadata: selectedMetadata,
             })
         }).then(async r => {
@@ -5005,6 +5251,7 @@ const initCatalogSearch = () => {
                     approveBtn.innerHTML = `<i class="fa-solid fa-check"></i> Approve Selected Fields`;
                 }
                 if (res.ok) {
+                    const resolvedId = res.item_id || itemId || origItemId;
                     if (btn) {
                         btn._reviewData = null;
                         btn.innerHTML = `<i class="fa-solid fa-check"></i> Enriched!`;
@@ -5012,9 +5259,11 @@ const initCatalogSearch = () => {
                         btn.style.borderColor = 'rgba(74,222,128,0.5)';
                         btn.style.color = '#4ade80';
                     }
-                    transitionCardEnrichBucket(itemId, 'enriched', 'needs_review');
-                    applyCardMetadataUpdate(itemId, {
-                        item_id: res.item_id || itemId,
+                    transitionCardEnrichBucket(origItemId || resolvedId, 'enriched', 'needs_review');
+                    applyCardMetadataUpdate(origItemId || resolvedId, {
+                        item_id: resolvedId,
+                        file_id: fileId || (data && data.file_id) || '',
+                        file_path: data.file_path || '',
                         title: selectedMetadata.title,
                         authors: selectedMetadata.author,
                         publisher: selectedMetadata.publisher,
@@ -5023,7 +5272,7 @@ const initCatalogSearch = () => {
                         description: selectedMetadata.description,
                         cover_url: res.cover_url || selectedMetadata.cover || rawCover,
                         merged_item_ids: res.merged_item_ids || [],
-                    }, updateModal || Boolean(window._activeModalItem && String(window._activeModalItem.itemId) === String(itemId)));
+                    }, updateModal || Boolean(window._activeModalItem && (String(window._activeModalItem.itemId) === String(itemId) || String(window._activeModalItem.origItemId) === String(origItemId))));
                     window.closeEnrichReviewModal();
                 } else {
                     alert(res.error || 'Could not save approved metadata.');
@@ -5106,7 +5355,7 @@ const initCatalogSearch = () => {
                     return;
                 }
                 if (res.ok) {
-                    const targetId = itemId || res.requested_item_id || res.item_id;
+                    const targetId = (activeReviewCtx && activeReviewCtx.origItemId) || itemId || res.requested_item_id || res.item_id;
                     transitionCardEnrichBucket(targetId, 'enriched', 'needs_review');
                     if (btn) {
                         btn.disabled = false;
@@ -5120,9 +5369,10 @@ const initCatalogSearch = () => {
                     applyCardMetadataUpdate(targetId, res, updateModal);
                     window.closeEnrichReviewModal();
                 } else {
+                    const origIdKeep = (activeReviewCtx && activeReviewCtx.origItemId) || itemId;
                     const mergedReviewData = Object.assign({}, data || {}, res);
                     if (btn) btn._reviewData = mergedReviewData;
-                    openEnrichReviewModal(mergedReviewData, btn, updateModal, itemId, fileId);
+                    openEnrichReviewModal(mergedReviewData, btn, updateModal, origIdKeep, fileId);
                     if (res.candidate_title || res.candidate_authors) {
                         window.erUseAll('cand');
                     }
@@ -5449,7 +5699,7 @@ const initCatalogSearch = () => {
         });
     }
 
-    window.enrichAllOnPage = function() {
+    window.enrichAllOnPage = function () {
         const unenrichedTargets = getUnenrichedCardButtons();
         if (unenrichedTargets.length > 0) {
             batchPageTotal = unenrichedTargets.length;
@@ -5671,7 +5921,13 @@ const initCatalogSearch = () => {
                         border = 'rgba(245,158,11,0.5)';
                         color = '#fbbf24';
                     } else if (st === 'QUARANTINED') {
-                        label = `<i class="fa-solid fa-biohazard"></i> Quarantined`;
+                        label = data.item_deleted
+                            ? `<i class="fa-solid fa-biohazard"></i> Quarantined (Removed)`
+                            : `<i class="fa-solid fa-biohazard"></i> Quarantined`;
+                        if (data.item_deleted && targetId) {
+                            const qCard = document.getElementById(`card-${targetId}`);
+                            if (qCard) qCard.style.opacity = '0.55';
+                        }
                     }
                     btn.innerHTML = label;
                     btn.style.background = bg;
@@ -5755,147 +6011,299 @@ const initCatalogSearch = () => {
 
     // Helper functions
     function escapeHtml(str) {
-                if (!str) return '';
-                return str
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#039;');
-            }
+        if (!str) return '';
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
 
     function escapeJsString(str) {
-                if (!str) return '';
-                return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            }
+        if (!str) return '';
+        return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
 
     function getTypeBadgeClass(type) {
-                if (type === 'BOOK') return 'type-book';
-                if (type === 'MAGAZINE') return 'type-magazine';
-                if (type === 'KINDLE') return 'type-kindle';
-                if (type === 'AUDIBLE') return 'type-audible';
-                return 'type-book';
-            }
+        if (type === 'BOOK') return 'type-book';
+        if (type === 'MAGAZINE') return 'type-magazine';
+        if (type === 'KINDLE') return 'type-kindle';
+        if (type === 'AUDIBLE') return 'type-audible';
+        return 'type-book';
+    }
 
     function createBadge(text) {
-                const badge = document.createElement('span');
-                badge.className = 'modal-badge';
-                badge.textContent = text;
-                return badge;
-            }
+        const badge = document.createElement('span');
+        badge.className = 'modal-badge';
+        badge.textContent = text;
+        return badge;
+    }
 
     function getCookie(name) {
-                let cookieValue = null;
-                if (document.cookie && document.cookie !== '') {
-                    const cookies = document.cookie.split(';');
-                    for (let i = 0; i < cookies.length; i++) {
-                        const cookie = cookies[i].trim();
-                        if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                            cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                            break;
-                        }
-                    }
+        let cookieValue = null;
+        if (document.cookie && document.cookie !== '') {
+            const cookies = document.cookie.split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i].trim();
+                if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                    break;
                 }
-                return cookieValue;
             }
+        }
+        return cookieValue;
+    }
 
     // ----------------------------------------------------
     // Top Controls Bar: Sort By, Filter by Type, Enrichment Status, Read/Unread Status
     // ----------------------------------------------------
     function updateQueryParamAndNavigate(paramName, paramValue) {
-                abortAllEnrichRequests();
-                const url = new URL(window.location.href);
-                url.pathname = url.pathname.replace(/^\/mylibrary\/mylibrary\b/, '/mylibrary');
-                url.searchParams.delete('page');
-                if (paramName === 'type') {
-                    url.searchParams.delete('type');
-                    if (paramValue) {
-                        url.searchParams.set('type', paramValue);
-                    }
-                } else if (paramName === 'enrich_status') {
-                    if (['needs_enriching', 'needs_review', 'in_review', 'no_match', 'no_isbn', 'not_found', 'enriched'].includes(url.searchParams.get('shelf') || '')) {
-                        url.searchParams.delete('shelf');
-                    }
-                    if (paramValue) {
-                        url.searchParams.set('enrich_status', paramValue);
-                    } else {
-                        url.searchParams.delete('enrich_status');
-                    }
-                } else {
-                    if (paramValue) {
-                        url.searchParams.set(paramName, paramValue);
-                    } else {
-                        url.searchParams.delete(paramName);
-                    }
-                }
-                window.location.href = url.toString();
+        abortAllEnrichRequests();
+        const url = new URL(window.location.href);
+        url.pathname = url.pathname.replace(/^\/mylibrary\/mylibrary\b/, '/mylibrary');
+        url.searchParams.delete('page');
+        if (paramName === 'type') {
+            url.searchParams.delete('type');
+            if (paramValue) {
+                url.searchParams.set('type', paramValue);
             }
+        } else if (paramName === 'enrich_status') {
+            if (['needs_enriching', 'needs_review', 'in_review', 'no_match', 'no_isbn', 'not_found', 'enriched'].includes(url.searchParams.get('shelf') || '')) {
+                url.searchParams.delete('shelf');
+            }
+            if (paramValue) {
+                url.searchParams.set('enrich_status', paramValue);
+            } else {
+                url.searchParams.delete('enrich_status');
+            }
+        } else {
+            if (paramValue) {
+                url.searchParams.set(paramName, paramValue);
+            } else {
+                url.searchParams.delete(paramName);
+            }
+        }
+        window.location.href = url.toString();
+    }
 
     const topTypeSelect = document.getElementById('top-type-select');
-        if (topTypeSelect) {
-            topTypeSelect.addEventListener('change', () => {
-                updateQueryParamAndNavigate('type', topTypeSelect.value);
-            });
+    if (topTypeSelect) {
+        topTypeSelect.addEventListener('change', () => {
+            updateQueryParamAndNavigate('type', topTypeSelect.value);
+        });
+    }
+
+    const topEnrichStatusSelect = document.getElementById('top-enrich-status-select');
+    if (topEnrichStatusSelect) {
+        topEnrichStatusSelect.addEventListener('change', () => {
+            updateQueryParamAndNavigate('enrich_status', topEnrichStatusSelect.value);
+        });
+    }
+
+    const topReadStatusSelect = document.getElementById('top-read-status-select');
+    if (topReadStatusSelect) {
+        topReadStatusSelect.addEventListener('change', () => {
+            updateQueryParamAndNavigate('read_status', topReadStatusSelect.value);
+        });
+    }
+
+    const topSortSelect = document.getElementById('top-sort-select');
+    if (topSortSelect) {
+        topSortSelect.addEventListener('change', () => {
+            updateQueryParamAndNavigate('sort', topSortSelect.value);
+        });
+    }
+
+    const aiDescNoMatchToggle = document.getElementById('opt-ai-desc-no-match');
+    if (aiDescNoMatchToggle) {
+        aiDescNoMatchToggle.checked = localStorage.getItem('mylibrary_ai_desc_no_match') === '1';
+        aiDescNoMatchToggle.addEventListener('change', () => {
+            localStorage.setItem('mylibrary_ai_desc_no_match', aiDescNoMatchToggle.checked ? '1' : '0');
+        });
+    }
+
+    // ----------------------------------------------------
+    // Hover Full Description Popover (Cards & Review Modal)
+    // ----------------------------------------------------
+    (function initDescriptionHoverPopover() {
+        let popEl = document.getElementById('full-desc-hover-popover');
+        if (!popEl) {
+            popEl = document.createElement('div');
+            popEl.id = 'full-desc-hover-popover';
+            popEl.style.cssText = [
+                'display:none',
+                'position:fixed',
+                'z-index:10060',
+                'max-width:440px',
+                'min-width:260px',
+                'max-height:320px',
+                'overflow-y:auto',
+                'background:rgba(15, 23, 42, 0.98)',
+                'border:1px solid rgba(56, 189, 248, 0.55)',
+                'border-radius:12px',
+                'padding:0.8rem 0.95rem',
+                'color:#f1f5f9',
+                'font-size:0.83rem',
+                'line-height:1.55',
+                'box-shadow:0 18px 42px rgba(0, 0, 0, 0.82)',
+                'backdrop-filter:blur(10px)',
+                'word-break:break-word',
+                'pointer-events:auto'
+            ].join(';');
+            document.body.appendChild(popEl);
         }
 
-        const topEnrichStatusSelect = document.getElementById('top-enrich-status-select');
-        if (topEnrichStatusSelect) {
-            topEnrichStatusSelect.addEventListener('change', () => {
-                updateQueryParamAndNavigate('enrich_status', topEnrichStatusSelect.value);
-            });
+        const HOVER_SHOW_DELAY_MS = 1250;
+        let activeTarget = null;
+        let pendingTarget = null;
+        let showTimer = null;
+        let hideTimer = null;
+
+        function cancelPendingShow() {
+            if (showTimer) {
+                clearTimeout(showTimer);
+                showTimer = null;
+            }
+            pendingTarget = null;
         }
 
-        const topReadStatusSelect = document.getElementById('top-read-status-select');
-        if (topReadStatusSelect) {
-            topReadStatusSelect.addEventListener('change', () => {
-                updateQueryParamAndNavigate('read_status', topReadStatusSelect.value);
-            });
+        function scheduleHide() {
+            cancelPendingShow();
+            clearTimeout(hideTimer);
+            hideTimer = setTimeout(() => {
+                popEl.style.display = 'none';
+                activeTarget = null;
+            }, 140);
         }
 
-        const topSortSelect = document.getElementById('top-sort-select');
-        if (topSortSelect) {
-            topSortSelect.addEventListener('change', () => {
-                updateQueryParamAndNavigate('sort', topSortSelect.value);
-            });
-        }
-
-        const aiDescNoMatchToggle = document.getElementById('opt-ai-desc-no-match');
-        if (aiDescNoMatchToggle) {
-            aiDescNoMatchToggle.checked = localStorage.getItem('mylibrary_ai_desc_no_match') === '1';
-            aiDescNoMatchToggle.addEventListener('change', () => {
-                localStorage.setItem('mylibrary_ai_desc_no_match', aiDescNoMatchToggle.checked ? '1' : '0');
-            });
-        }
-
-        // ----------------------------------------------------
-        // Grid / List View Toggle Logic
-        // ----------------------------------------------------
-        const gridBtn = document.getElementById('view-grid-btn');
-        const listBtn = document.getElementById('view-list-btn');
-        const catalogGrid = document.querySelector('.catalog-grid');
-
-        if (gridBtn && listBtn) {
-            // Load preference
-            const currentView = localStorage.getItem('catalogView') || 'grid';
-            setView(currentView);
-
-            gridBtn.addEventListener('click', () => setView('grid'));
-            listBtn.addEventListener('click', () => setView('list'));
-
-            function setView(view) {
-                if (view === 'list') {
-                    if (catalogGrid) catalogGrid.classList.add('list-view');
-                    gridBtn.classList.remove('active');
-                    listBtn.classList.add('active');
-                    localStorage.setItem('catalogView', 'list');
-                } else {
-                    if (catalogGrid) catalogGrid.classList.remove('list-view');
-                    gridBtn.classList.add('active');
-                    listBtn.classList.remove('active');
-                    localStorage.setItem('catalogView', 'grid');
+        function normalizeTitleAttr(targetEl) {
+            if (targetEl && targetEl.hasAttribute('title')) {
+                if (!targetEl.getAttribute('data-full-desc')) {
+                    targetEl.setAttribute('data-full-desc', targetEl.getAttribute('title') || '');
                 }
+                targetEl.removeAttribute('title');
             }
         }
+
+        function showPopoverFor(targetEl) {
+            if (!targetEl || !document.body.contains(targetEl)) return;
+            normalizeTitleAttr(targetEl);
+            const fullText = (
+                targetEl.getAttribute('data-full-desc') ||
+                targetEl.textContent ||
+                ''
+            ).trim();
+            if (!fullText || fullText.startsWith('No description available')) return;
+
+            clearTimeout(hideTimer);
+            activeTarget = targetEl;
+
+            const card = targetEl.closest('.media-card');
+            const bookTitle = card
+                ? (card.querySelector('.card-title')?.textContent || '').trim()
+                : (document.getElementById('er-input-title')?.value || '').trim();
+
+            const headerHtml = bookTitle
+                ? `<div style="font-size:0.74rem; font-weight:700; color:#38bdf8; margin-bottom:0.38rem; padding-bottom:0.32rem; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; gap:0.35rem;"><i class="fa-solid fa-align-left"></i> <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(bookTitle)}</span></div>`
+                : '';
+            popEl.innerHTML = headerHtml + `<div style="white-space:pre-wrap;">${escapeHtml(fullText)}</div>`;
+            popEl.style.display = 'block';
+
+            const rect = targetEl.getBoundingClientRect();
+            const popW = Math.min(440, window.innerWidth - 24);
+            const popH = Math.min(popEl.offsetHeight || 220, 320);
+
+            let left = rect.left;
+            if (left + popW > window.innerWidth - 12) {
+                left = window.innerWidth - popW - 12;
+            }
+            if (left < 12) left = 12;
+
+            let top = rect.bottom + 6;
+            if (top + popH > window.innerHeight - 12) {
+                top = Math.max(12, rect.top - popH - 6);
+            }
+
+            popEl.style.left = `${left}px`;
+            popEl.style.top = `${top}px`;
+        }
+
+        document.addEventListener('mouseover', (e) => {
+            const descTarget = e.target.closest('.card-description, #er-field-desc-orig, #er-field-desc-cand');
+            if (descTarget) {
+                normalizeTitleAttr(descTarget);
+                clearTimeout(hideTimer);
+                if (activeTarget === descTarget && popEl.style.display === 'block') {
+                    return;
+                }
+                if (pendingTarget === descTarget && showTimer) {
+                    return;
+                }
+                cancelPendingShow();
+                pendingTarget = descTarget;
+                showTimer = setTimeout(() => {
+                    showTimer = null;
+                    const targetNow = pendingTarget;
+                    pendingTarget = null;
+                    showPopoverFor(targetNow);
+                }, HOVER_SHOW_DELAY_MS);
+            } else if (e.target.closest('#full-desc-hover-popover')) {
+                clearTimeout(hideTimer);
+            }
+        });
+
+        document.addEventListener('mouseout', (e) => {
+            const fromDesc = e.target.closest('.card-description, #er-field-desc-orig, #er-field-desc-cand, #full-desc-hover-popover');
+            if (!fromDesc) return;
+            const toEl = e.relatedTarget;
+            if (toEl && pendingTarget && pendingTarget.contains(toEl)) {
+                return;
+            }
+            if (toEl && (toEl.closest('#full-desc-hover-popover') || (activeTarget && activeTarget.contains(toEl)))) {
+                return;
+            }
+            scheduleHide();
+        });
+
+        document.addEventListener('mousedown', (e) => {
+            if (!e.target.closest('#full-desc-hover-popover')) {
+                cancelPendingShow();
+                popEl.style.display = 'none';
+                activeTarget = null;
+            }
+        });
+    })();
+
+    // ----------------------------------------------------
+    // Grid / List View Toggle Logic
+    // ----------------------------------------------------
+    const gridBtn = document.getElementById('view-grid-btn');
+    const listBtn = document.getElementById('view-list-btn');
+    const catalogGrid = document.querySelector('.catalog-grid');
+
+    if (gridBtn && listBtn) {
+        // Load preference
+        const currentView = localStorage.getItem('catalogView') || 'grid';
+        setView(currentView);
+
+        gridBtn.addEventListener('click', () => setView('grid'));
+        listBtn.addEventListener('click', () => setView('list'));
+
+        function setView(view) {
+            if (view === 'list') {
+                if (catalogGrid) catalogGrid.classList.add('list-view');
+                gridBtn.classList.remove('active');
+                listBtn.classList.add('active');
+                localStorage.setItem('catalogView', 'list');
+            } else {
+                if (catalogGrid) catalogGrid.classList.remove('list-view');
+                gridBtn.classList.add('active');
+                listBtn.classList.remove('active');
+                localStorage.setItem('catalogView', 'grid');
+            }
+        }
+    }
 };
 
 if (document.readyState === 'loading') {

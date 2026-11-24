@@ -95,6 +95,30 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCustomSitesList(items.customSites || []);
   });
 
+  function refreshOwnedStatsInPopup() {
+    chrome.runtime.sendMessage({ type: 'GET_OWNED_STATS' }, (resp) => {
+      if (!resp || !resp.ok) return;
+      const packtEl = document.getElementById('cnt-owned-packt');
+      const springerEl = document.getElementById('cnt-owned-springer');
+      const totalEl = document.getElementById('owned-totals-pill');
+      if (packtEl) packtEl.textContent = String(resp.packtCount || 0);
+      if (springerEl) springerEl.textContent = String(resp.springerCount || 0);
+      if (totalEl) totalEl.textContent = `${resp.totalCount || 0} Owned`;
+    });
+  }
+  refreshOwnedStatsInPopup();
+
+  const clearOwnedBtn = document.getElementById('btn-clear-owned');
+  if (clearOwnedBtn) {
+    clearOwnedBtn.addEventListener('click', () => {
+      chrome.runtime.sendMessage({ type: 'CLEAR_OWNED_TITLES' }, () => {
+        refreshOwnedStatsInPopup();
+        statusEl.textContent = '🗑 Cleared cached Packt & Springer owned titles.';
+        statusEl.style.color = '#fbbf24';
+      });
+    });
+  }
+
   // One-click Anna's Archive domain preset buttons
   document.querySelectorAll('#annas-presets .preset-chip').forEach((chip) => {
     chip.addEventListener('click', () => {

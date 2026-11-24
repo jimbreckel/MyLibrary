@@ -96,7 +96,10 @@
 
   function isEntryInLibrary(entry) {
     if (isEntryDismissed(entry)) return false;
-    return Boolean(entry.libResult && entry.libResult.in_library);
+    return Boolean(
+      entry.libResult &&
+      (entry.libResult.in_library || (Array.isArray(entry.libResult.owned_sources) && entry.libResult.owned_sources.length > 0))
+    );
   }
 
   function escapeHtml(str) {
@@ -555,6 +558,11 @@
 
     if (lib) {
       const dismissed = isEntryDismissed(entry);
+      const ownedSources = Array.isArray(lib.owned_sources) ? lib.owned_sources : [];
+      const ownedBadgeHtml = ownedSources.length > 0
+        ? `<span class="mylib-badge" style="background:rgba(16,185,129,0.22); border:1px solid rgba(52,211,153,0.65); color:#6ee7b7;" title="Imported from your ${escapeHtml(ownedSources.join(' & '))} Owned Titles">🏛️ Owned on ${escapeHtml(ownedSources.join(' & '))}</span>`
+        : '';
+
       if (lib.in_library && !dismissed) {
         panel.classList.add('mylib-owned');
         const fmts = (lib.formats && lib.formats.length > 0) ? lib.formats.join(', ') : (lib.item_types || ['BOOK']).join(', ');
@@ -566,6 +574,7 @@
           <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-in-lib" title="Open in MyLibrary (${escapeHtml(matchViaLabel)})">
             ✅ In MyLibrary (${escapeHtml(fmts)}${enrTag} · ${escapeHtml(matchViaLabel)}) ↗
           </a>
+          ${ownedBadgeHtml}
           <button type="button" class="mylib-badge mylib-badge-annas-none mylib-btn-dismiss-fp" data-key="${escapeHtml(entry.key)}" title="Mark as False Positive (e.g. different edition or newer book with the same title)">
             ✕ False Positive
           </button>
@@ -586,8 +595,13 @@
           detailsHtml = `<div class="mylib-match-details">${matchLines.join('')}</div>`;
         }
       } else {
-        panel.classList.add('mylib-missing');
+        if (ownedSources.length > 0 && !dismissed) {
+          panel.classList.add('mylib-owned');
+        } else {
+          panel.classList.add('mylib-missing');
+        }
         libBadgeHtml = `
+          ${ownedBadgeHtml}
           <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-not-in-lib" title="Not found in MyLibrary — click to search manually">
             ❌ Not in MyLibrary${dismissed ? ' (Dismissed False Positive)' : ''} ↗
           </a>

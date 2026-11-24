@@ -117,6 +117,7 @@ def extract_book_metadata_for_routing(file_path: Path) -> Dict[str, Any]:
     emb_publisher = ''
     emb_pub_date: Optional[datetime.date] = None
     emb_isbn = ''
+    emb_asin = ''
     emb_desc = ''
     cover_data_uri: Optional[str] = None
 
@@ -144,6 +145,12 @@ def extract_book_metadata_for_routing(file_path: Path) -> Dict[str, Any]:
                     for el in root.iter():
                         tag_low = el.tag.split('}')[-1].lower()
                         txt = (el.text or '').strip()
+                        if tag_low == 'meta' and not emb_asin:
+                            m_name = (el.attrib.get('name') or el.attrib.get('property') or '').lower()
+                            if m_name in ('mobi-asin', 'asin', 'amazon') or 'asin' in m_name:
+                                m_val = (el.attrib.get('content') or txt or '').strip().upper()
+                                if re.match(r'^[A-Z0-9]{10}$', m_val):
+                                    emb_asin = m_val
                         if not txt:
                             continue
                         if tag_low == 'title' and not emb_title:
@@ -163,10 +170,17 @@ def extract_book_metadata_for_routing(file_path: Path) -> Dict[str, Any]:
                             emb_pub_date = _parse_date_str(txt)
                         elif tag_low == 'description' and not emb_desc:
                             emb_desc = re.sub(r'<[^>]+>', ' ', txt).strip()
-                        elif tag_low == 'identifier' and not emb_isbn:
-                            clean_id = re.sub(r'[^0-9Xx]', '', txt)
-                            if len(clean_id) in (10, 13) and (clean_id.startswith(('978', '979')) or len(clean_id) == 10):
-                                emb_isbn = clean_id.upper()
+                        elif tag_low == 'identifier':
+                            scheme = (el.attrib.get('{http://www.idpf.org/2007/opf}scheme') or el.attrib.get('scheme') or '').lower()
+                            m_asin = re.search(r'(?:urn:asin:|asin:|amazon:)?\b(B[0-9A-Z]{9})\b', txt, re.IGNORECASE)
+                            if m_asin and not emb_asin:
+                                emb_asin = m_asin.group(1).upper()
+                            elif scheme in ('mobi-asin', 'asin', 'amazon') and re.match(r'^[A-Z0-9]{10}$', txt, re.IGNORECASE) and not emb_asin:
+                                emb_asin = txt.upper()
+                            if not emb_isbn:
+                                clean_id = re.sub(r'[^0-9Xx]', '', txt)
+                                if len(clean_id) in (10, 13) and (clean_id.startswith(('978', '979')) or len(clean_id) == 10):
+                                    emb_isbn = clean_id.upper()
 
                     # Extract cover image from EPUB if present
                     opf_dir = os.path.dirname(opf_path)
@@ -244,6 +258,15 @@ def extract_book_metadata_for_routing(file_path: Path) -> Dict[str, Any]:
         stem = re.sub(r'[._]+', ' ', stem).strip()
         fn_title = stem or file_path.name
 
+    # If the embedded title has a different volume/level number than the filename title
+    # (e.g. publisher copy-pasted "HSK Level 1" inside the OPF of "HSK Level 2" / "HSK Level 3"),
+    # prefer the filename title so volumes don't collide.
+    if emb_title and fn_title:
+        emb_nums = re.findall(r'\b(?:level|book|vol(?:ume)?|part|grade)\s*(\d+)\b', emb_title, re.I)
+        fn_nums = re.findall(r'\b(?:level|book|vol(?:ume)?|part|grade)\s*(\d+)\b', fn_title, re.I)
+        if emb_nums and fn_nums and emb_nums != fn_nums:
+            emb_title = fn_title
+
     has_embedded_meta = bool(emb_title and emb_authors)
     final_title = emb_title or fn_title or file_path.stem
     final_authors = ', '.join(emb_authors) if emb_authors else (', '.join(fn_authors) if fn_authors else 'Unknown Author')
@@ -257,6 +280,7 @@ def extract_book_metadata_for_routing(file_path: Path) -> Dict[str, Any]:
         'publisher': emb_publisher[:250],
         'pub_date': final_pub_date,
         'isbn': final_isbn[:32],
+        'asin': emb_asin[:32] if emb_asin else '',
         'description': emb_desc,
         'cover_thumbnail': cover_data_uri,
         'has_embedded_meta': has_embedded_meta,
@@ -484,6 +508,12 @@ def organize_book_file(
             leading=3,
             use_shard=use_shard,
         )
+        # Stamp mtime to now when ingesting from /toBooks so Recently Added shows the newly ingested book at the top
+        if tobooks_root is not None and not deduped:
+            try:
+                os.utime(dest_path, None)
+            except Exception:
+                pass
         # Clean up empty parent directory if inside toBooks or Periodicals
         try:
             if old_parent.exists() and old_parent != books_root and (not tobooks_root or old_parent != tobooks_root):

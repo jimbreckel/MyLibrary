@@ -42,15 +42,33 @@ _GARBAGE_EMBEDDED_TITLE_RE = re.compile(
 )
 
 
+def strip_trailing_year_tag(text: Optional[str]) -> str:
+    """
+    Strip trailing parenthetical or bracketed publication year tags such as
+    'Way Of the Lawless (1921)', 'Title [1895]', 'Title (2011-02-26)', or 'Title (Penguin, 1987)',
+    while leaving standalone year titles like '1984' or '2001: A Space Odyssey' untouched.
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = re.sub(
+        r"(?<=\S)\s*[\(\[]\s*(?:[^)\]\d]{0,40}?\b)?(?:18\d{2}|19\d{2}|20\d{2})(?:-\d{1,2}(?:-\d{1,2})?)?\s*[\)\]]\s*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    ).strip()
+    return s
+
+
 def _strip_inline_release_and_isbn_junk(text: str) -> str:
-    """Strip inline/trailing (retail), (pdf), (epub), (v5.0), trailing ISBNs (-9780823430086_WEB, (978...)), and double extensions."""
+    """Strip inline/trailing (retail), (pdf), (epub), (v5.0), trailing (YYYY) year tags, trailing ISBNs, and double extensions."""
     if not text:
         return ""
     s = text.strip()
     while re.search(r"\.(?:epub|pdf|mobi|azw3?|chm|djvu|fb2|lit|prc|pdb)$", s, flags=re.IGNORECASE):
         s = re.sub(r"\.(?:epub|pdf|mobi|azw3?|chm|djvu|fb2|lit|prc|pdb)$", "", s, flags=re.IGNORECASE).strip()
     s = re.sub(
-        r"\s*[\(\[]\s*(?:retail|ebook|e-book|pdf|epub|mobi|azw3?|chm|djvu|nodrm|no\s*drm|z-lib(?:rary)?(?:\.org)?|v\d+(?:\.\d+)*|\d{1,2})\s*[\)\]]",
+        r"\s*[\(\[]\s*(?:retail|ebook|e-book|pdf|epub|mobi|azw3?|chm|djvu|rtf|txt|doc|docx|html?|lit|prc|pdb|fb2|nodrm|no\s*drm|z-lib(?:rary)?(?:\.org)?|v\d+(?:\.\d+)*|\d{1,2}|ss)\s*[\)\]]",
         " ",
         s,
         flags=re.IGNORECASE,
@@ -68,7 +86,8 @@ def _strip_inline_release_and_isbn_junk(text: str) -> str:
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(r"(?:[-_]+|\s+-\s*)WEB\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"(?:[-_]+|\s+-\s*)WEB\s*$", "", s, flags=re.IGNORECASE).strip()
+    s = strip_trailing_year_tag(s)
     return s.strip()
 
 
@@ -114,6 +133,7 @@ def clean_book_title(raw_title: Optional[str]) -> Optional[str]:
         return None
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^SS\s+(?=[A-Z])", "", cleaned).strip()
     cleaned = _strip_inline_release_and_isbn_junk(cleaned)
     cleaned = re.sub(r"_\s+", ": ", cleaned)
     cleaned = re.sub(r"\s*_\s*", " ", cleaned)
@@ -146,6 +166,7 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     cleaned = stem
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^SS\s+(?=[A-Z])", "", cleaned).strip()
     cleaned = _strip_inline_release_and_isbn_junk(cleaned)
     if "." in cleaned and " " not in cleaned and cleaned.count(".") >= 2:
         cleaned = cleaned.replace(".", " ").strip()
@@ -155,7 +176,7 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     pub_year_candidate = None
     had_trailing_pub_paren = False
 
-    m_pub_tail = re.search(r"\s*\((?:[^)]*?\b(19\d{2}|20\d{2})\b[^)]*)\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$", cleaned, re.I)
+    m_pub_tail = re.search(r"\s*\((?:[^)]*?\b(18\d{2}|19\d{2}|20\d{2})\b[^)]*)\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$", cleaned, re.I)
     if m_pub_tail:
         pub_year_candidate = m_pub_tail.group(1)
         had_trailing_pub_paren = True
@@ -179,8 +200,13 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
         parts = cleaned.split(" - ")
         first_seg = parts[0].strip()
         last_seg = parts[-1].strip()
+        from .authors import is_series_number_segment, strip_series_and_redundant_author_from_title
+
+        first_is_series = is_series_number_segment(first_seg)
         first_looks_like_title = bool(
-            re.search(
+            first_is_series
+            or re.match(r"^(?:the|a|an)\s+\S+", first_seg, re.I)
+            or re.search(
                 r"\b(?:demystified|handbook|guide|manual|introduction|principles|programming|engineering|encyclopedia|dictionary|edition|ed\.|design|management|networks|systems|analysis|fundamentals|reference|complete|bible|secrets|for\s+dummies)\b",
                 first_seg,
                 re.I,
@@ -188,9 +214,10 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
         )
         last_looks_like_author = bool(
             last_seg
+            and not re.match(r"^(?:the|a|an)\s+", last_seg, re.I)
             and (
                 re.match(
-                    r"^(?:[A-Z]\.\s*[A-Za-z\-]+|[A-Za-z]+,\s*[A-Z]\.?|[A-Z][a-z]+\s+[A-Z][a-z\-]+)(?:,\s*(?:[A-Z]\.\s*[A-Za-z\-]+|[A-Z][a-z]+\s+[A-Z][a-z\-]+))*$",
+                    r"^(?:[A-Z]\.\s*(?:[A-Z]\.\s*)*[A-Za-z\-]+|[A-Za-z]+,\s*[A-Z][A-Za-z.\s]*|[A-Z][a-z]+\s+(?:[A-Z]\.?\s+|[A-Z][a-z]+\s+)?[A-Z][a-z\-]+)(?:,\s*(?:[A-Z]\.\s*[A-Za-z\-]+|[A-Z][a-z]+\s+(?:[A-Z]\.?\s+)?[A-Z][a-z\-]+))*$",
                     last_seg,
                 )
                 or (had_trailing_pub_paren and len(last_seg.split()) <= 3)
@@ -198,12 +225,19 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
         )
         if last_looks_like_author and (had_trailing_pub_paren or first_looks_like_title):
             author_candidate = last_seg
-            title_candidate = ": ".join(p.strip() for p in parts[:-1] if p.strip())
-        elif first_looks_like_title:
+            title_parts = [p.strip() for p in parts[:-1] if p.strip()]
+            if len(title_parts) >= 2 and is_series_number_segment(title_parts[0]):
+                title_parts = title_parts[1:]
+            title_candidate = ": ".join(title_parts)
+        elif first_looks_like_title and not first_is_series:
             title_candidate = f"{first_seg}: {' - '.join(parts[1:]).strip()}"
             author_candidate = None
         else:
-            rest_seg = " - ".join(parts[1:]).strip()
+            rem_parts = [p.strip() for p in parts[1:] if p.strip()]
+            # Drop middle series segment in 'Author - [Series 01] - Title'
+            if len(rem_parts) >= 2 and is_series_number_segment(rem_parts[0]):
+                rem_parts = rem_parts[1:]
+            rest_seg = " - ".join(rem_parts).strip()
             # Check if " - " is separating <Publication/Series> - <Issue/Date> (e.g. "Computer Idee 2013 - 01", "PC Games Hardware - 06 2012", "Science - 08 January 2010")
             rest_is_issue_or_date = bool(
                 re.match(
@@ -218,7 +252,7 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
                 author_candidate = re.sub(r"\s+\b(?:19\d{2}|20\d{2})\b\s*$", "", first_seg).strip() or None
             else:
                 author_candidate = first_seg
-                title_candidate = rest_seg
+                title_candidate = strip_series_and_redundant_author_from_title(rest_seg, first_seg) or rest_seg
     elif "-" in cleaned and "(" not in cleaned and "," in cleaned.split("-", 1)[0]:
         # Only split on a tight hyphen when the left side is "Last, First-Title" (e.g., "Dunne, J. W.-An Experiment with Time")
         parts = cleaned.split("-", 1)

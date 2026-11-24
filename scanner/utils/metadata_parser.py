@@ -25,6 +25,7 @@ def _apply_epubmeta_fallbacks(filepath, meta):
     try:
         import re
         from epubmeta.filename_parser import parse_filename, clean_book_title
+        from epubmeta.authors import extract_inline_author_and_clean_title
         from epubmeta.isbn.validator import normalize_isbn
 
         raw_isbn = meta.get('isbn')
@@ -47,7 +48,24 @@ def _apply_epubmeta_fallbacks(filepath, meta):
         if (not meta.get('title') or meta.get('title') == stem) and clues.get('title'):
             meta['title'] = clues['title']
         elif meta.get('title'):
-            meta['title'] = clean_book_title(meta['title']) or meta['title']
+            in_t, in_a = extract_inline_author_and_clean_title(
+                meta['title'],
+                raw_authors=None if meta.get('authors') in (None, '', 'Unknown', 'Unknown Author') else meta.get('authors'),
+                file_name=os.path.basename(filepath),
+            )
+            if in_t and in_a:
+                cleaned_emb_t = in_t
+                if not meta.get('authors') or meta.get('authors') in ('Unknown', 'Unknown Author'):
+                    meta['authors'] = ", ".join(in_a)
+            else:
+                cleaned_emb_t = clean_book_title(meta['title']) or meta['title']
+            clue_t = clues.get('title') or ''
+            if clue_t:
+                emb_nums = re.findall(r'\b(?:level|book|vol(?:ume)?|part|grade)\s*(\d+)\b', cleaned_emb_t, re.I)
+                fn_nums = re.findall(r'\b(?:level|book|vol(?:ume)?|part|grade)\s*(\d+)\b', clue_t, re.I)
+                if emb_nums and fn_nums and emb_nums != fn_nums:
+                    cleaned_emb_t = clue_t
+            meta['title'] = cleaned_emb_t
     except Exception:
         pass
     return meta
@@ -194,6 +212,30 @@ def parse_epub(filepath, include_cover=False):
                         asin = txt.upper()
                     elif ('isbn' in scheme or (txt.replace('-', '').isdigit() and len(txt.replace('-', '')) in (10, 13))) and not isbn:
                         isbn = txt
+
+                if not asin:
+                    for el in metadata.iter():
+                        scheme = (
+                            el.attrib.get('{http://www.idpf.org/2007/opf}scheme')
+                            or el.attrib.get('scheme')
+                            or el.attrib.get('name')
+                            or el.attrib.get('property')
+                            or ''
+                        ).lower()
+                        if scheme in ('amazon', 'asin', 'mobi-asin') or 'asin' in scheme:
+                            val = (el.text or el.attrib.get('content') or '').strip().upper()
+                            if re.match(r'^[A-Z0-9]{10}$', val):
+                                asin = val
+                                break
+                    if not asin and opf_data:
+                        raw_opf_str = opf_data.decode('utf-8', errors='ignore') if isinstance(opf_data, bytes) else str(opf_data)
+                        m_meta_asin = re.search(
+                            r'(?:name=["\'](?:MOBI-ASIN|asin)["\'][^>]*content=["\']([A-Z0-9]{10})["\']|content=["\']([A-Z0-9]{10})["\'][^>]*name=["\'](?:MOBI-ASIN|asin)["\'])',
+                            raw_opf_str,
+                            re.IGNORECASE,
+                        )
+                        if m_meta_asin:
+                            asin = (m_meta_asin.group(1) or m_meta_asin.group(2)).upper()
 
                 if include_cover:
                     cover_bytes = _extract_epub_cover_from_zip(epub, opf_root, opf_dir, namelist_set)

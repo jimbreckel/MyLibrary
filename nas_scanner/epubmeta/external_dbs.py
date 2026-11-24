@@ -293,6 +293,24 @@ class ScannerStateBridge:
         except Exception as e:
             logger.debug("Failed updating scanner_state.db for %s: %s", file_path, e)
 
+    def remove_file_state(self, file_path: Path) -> None:
+        """Remove a deleted or quarantined file from scanner_state.db `file_states`."""
+        from .pg_scanner_db import connect_scanner_db, is_postgres_scanner_enabled
+        if not is_postgres_scanner_enabled() and not self.db_path.exists():
+            return
+        raw = str(file_path)
+        candidates = [raw, raw.replace("\\", "/")]
+        rel = extract_relative_book_subpath(raw)
+        if rel:
+            candidates.append(posixpath.join("/books", rel))
+            candidates.append(posixpath.join("/volume1/common/Media/Books", rel))
+        try:
+            with connect_scanner_db(self.db_path, timeout=30.0) as conn:
+                for cand in dict.fromkeys(candidates):
+                    conn.execute("DELETE FROM file_states WHERE filepath = ?", (cand,))
+        except Exception as e:
+            logger.debug("Failed removing %s from scanner_state.db file_states: %s", file_path, e)
+
 
 def _strip_html_tags(text: Optional[str]) -> Optional[str]:
     if not text:
@@ -737,4 +755,32 @@ class MyLibraryClient:
             )
         except Exception as e:
             logger.warning("Failed pushing %s to MyLibrary (%s): %s", file_path.name, url, e)
+        return False
+
+    def prune_deleted_file(self, file_path: Path, container_root: str = "/books") -> bool:
+        """Immediately prune a quarantined/deleted file location (and orphan CatalogItem) from MyLibrary BookDB."""
+        raw = str(file_path)
+        deleted_paths = [
+            to_container_books_path(file_path, container_root=container_root),
+            raw,
+            raw.replace("\\", "/"),
+        ]
+        rel = extract_relative_book_subpath(raw)
+        if rel:
+            deleted_paths.append(posixpath.join("/volume1/common/Media/Books", rel))
+        clean_paths = list(dict.fromkeys(p for p in deleted_paths if p))
+        url = f"{self.server_url}/api/sync/cleanup/"
+        try:
+            resp = requests.post(url, json={"deleted_paths": clean_paths}, headers=self._headers(), timeout=self.timeout)
+            if resp.status_code == 200:
+                logger.info("Pruned quarantined file %s from MyLibrary BookDB", file_path.name)
+                return True
+            logger.warning(
+                "MyLibrary cleanup returned HTTP %s for %s: %s",
+                resp.status_code,
+                file_path.name,
+                resp.text[:200],
+            )
+        except Exception as e:
+            logger.warning("Failed pruning quarantined file %s from MyLibrary (%s): %s", file_path.name, url, e)
         return False

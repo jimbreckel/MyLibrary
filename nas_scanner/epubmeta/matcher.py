@@ -42,16 +42,53 @@ def _get_words(text: Optional[str]) -> Set[str]:
     return {w for w in cleaned.split() if len(w) > 1 and w not in stop_words}
 
 
+_SURNAME_IGNORE_TOKENS = {
+    "jr", "sr", "ii", "iii", "iv", "v", "phd", "md", "esq", "cpa",
+    "ed", "eds", "editor", "editors", "auth", "author", "comp", "tr", "trans",
+}
+
+
 def _extract_surnames(authors: List[str]) -> List[str]:
-    """Extract approximate surnames from author list."""
-    surnames = []
-    for a in authors:
-        cleaned = re.sub(r"[^\w\s]", "", a).strip()
-        parts = cleaned.split()
+    """Extract approximate surnames from author list (handling '(ed)', 'Last, First', and '&'/'and')."""
+    from .authors import split_and_normalize_authors, strip_author_role_tags
+
+    surnames: List[str] = []
+    expanded: List[str] = []
+    for raw_a in authors:
+        if not raw_a:
+            continue
+        norm_pairs = split_and_normalize_authors(strip_author_role_tags(raw_a))
+        if norm_pairs:
+            expanded.extend(disp for disp, _ in norm_pairs if disp)
+        else:
+            expanded.append(raw_a)
+
+    for a in expanded:
+        no_role = strip_author_role_tags(a)
+        cleaned = re.sub(r"[^\w\s]", " ", no_role).strip()
+        parts = [p for p in cleaned.split() if p.lower() not in _SURNAME_IGNORE_TOKENS]
         if parts:
-            # Usually last token is surname (e.g. 'John W. Dunne' -> 'dunne')
             surnames.append(parts[-1].lower())
     return surnames
+
+
+def _strip_trailing_year(text: Optional[str]) -> str:
+    """Strip trailing parenthetical/bracketed publication years like '(1921)' or Goodreads series tags like '(Thieves' World, #3)'."""
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = re.sub(
+        r"(?<=\S)\s*[\(\[]\s*(?:[^)\]\d]{0,40}?\b)?(?:18\d{2}|19\d{2}|20\d{2})(?:-\d{1,2}(?:-\d{1,2})?)?\s*[\)\]]\s*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    ).strip()
+    s = re.sub(
+        r"(?<=\S)\s*\([^()]{1,60},\s*#\d+(?:\.\d+)?\)\s*$",
+        "",
+        s,
+    ).strip()
+    return s
 
 
 def score_title(candidate_title: Optional[str], clue_title: Optional[str]) -> float:
@@ -59,8 +96,11 @@ def score_title(candidate_title: Optional[str], clue_title: Optional[str]) -> fl
     if not candidate_title or not clue_title:
         return 0.0
 
-    c_norm = _clean_str(candidate_title)
-    k_norm = _clean_str(clue_title)
+    cand_clean_yr = _strip_trailing_year(candidate_title) or candidate_title
+    clue_clean_yr = _strip_trailing_year(clue_title) or clue_title
+
+    c_norm = _clean_str(cand_clean_yr)
+    k_norm = _clean_str(clue_clean_yr)
 
     if not c_norm or not k_norm:
         return 0.0
@@ -68,23 +108,38 @@ def score_title(candidate_title: Optional[str], clue_title: Optional[str]) -> fl
     if c_norm == k_norm:
         return 1.0
 
+    # Leading article match (e.g., 'The Way of the Lawless' vs 'Way Of the Lawless')
+    c_no_art = re.sub(r"^(?:the|a|an)\s+", "", c_norm)
+    k_no_art = re.sub(r"^(?:the|a|an)\s+", "", k_norm)
+    if c_no_art and c_no_art == k_no_art:
+        return 0.98
+
     # Subtitle or prefix match (e.g., 'Supremacy' vs 'Supremacy How Rule by the Court...')
-    if c_norm.startswith(k_norm) or k_norm.startswith(c_norm):
-        shorter = min(len(c_norm), len(k_norm))
-        longer = max(len(c_norm), len(k_norm))
+    if c_norm.startswith(k_norm) or k_norm.startswith(c_norm) or (c_no_art and k_no_art and (c_no_art.startswith(k_no_art) or k_no_art.startswith(c_no_art))):
+        shorter = min(len(c_no_art or c_norm), len(k_no_art or k_norm))
+        longer = max(len(c_no_art or c_norm), len(k_no_art or k_norm))
         # If the prefix is substantial
         if shorter >= 6 or shorter / longer > 0.4:
             return 0.90
 
     # Word set overlap
-    c_words = _get_words(candidate_title)
-    k_words = _get_words(clue_title)
+    c_words = _get_words(cand_clean_yr)
+    k_words = _get_words(clue_clean_yr)
     if c_words and k_words:
         intersection = c_words & k_words
         union = c_words | k_words
         jaccard = len(intersection) / len(union) if union else 0.0
-        # Recall relative to the shorter title
-        recall = len(intersection) / min(len(c_words), len(k_words)) if min(len(c_words), len(k_words)) > 0 else 0.0
+        # Recall relative to the shorter title (avoiding false high recall when a multi-book omnibus/boxset contains a short single-book title)
+        is_unwanted_omnibus = bool(
+            len(c_words) >= max(9, len(k_words) * 3)
+            and re.search(r"\b(?:books?\s+\d+\s*[\+&\-]|omnibus|box\s*set|complete\s+series)\b|\b1\.\s+\S+.*\b[23]\.\s+\S+", cand_clean_yr, re.I)
+            and not re.search(r"\b(?:books?\s+\d+\s*[\+&\-]|omnibus|box\s*set|complete\s+series)\b", clue_clean_yr, re.I)
+        )
+        recall = (
+            0.0
+            if is_unwanted_omnibus
+            else (len(intersection) / min(len(c_words), len(k_words)) if min(len(c_words), len(k_words)) > 0 else 0.0)
+        )
         word_score = max(jaccard, recall * 0.85)
     else:
         word_score = 0.0
@@ -96,9 +151,9 @@ def score_title(candidate_title: Optional[str], clue_title: Optional[str]) -> fl
 
     raw_score = max(word_score, seq_score)
 
-    # Penalize conflicting numbers (e.g., "50 Things..." vs "100+ Things...", or "Vol 1" vs "Vol 2")
-    c_nums = set(re.findall(r"\b\d+\b", c_norm))
-    k_nums = set(re.findall(r"\b\d+\b", k_norm))
+    # Penalize conflicting numbers (e.g., "50 Things..." vs "100+ Things...", or "Vol 1" vs "Vol 2"), normalizing leading zeros ('04' == '4')
+    c_nums = {str(int(x)) for x in re.findall(r"\b\d+\b", c_norm)}
+    k_nums = {str(int(x)) for x in re.findall(r"\b\d+\b", k_norm)}
     if c_nums and k_nums and not (c_nums & k_nums):
         raw_score *= 0.45
 
@@ -117,17 +172,18 @@ def score_authors(candidate_authors: List[str], clue_authors: List[str]) -> floa
         return 0.0
 
     overlap = c_surnames & k_surnames
+    c_str = _clean_str(" ".join(candidate_authors))
+    k_str = _clean_str(" ".join(clue_authors))
+    sim = difflib.SequenceMatcher(None, c_str, k_str).ratio()
     if overlap:
         # If all known surnames found in candidate
         if overlap == k_surnames:
             return 1.0
-        # Partial author match (e.g. 1 out of 2 authors)
-        return len(overlap) / max(len(k_surnames), len(c_surnames))
+        # Partial author match (e.g. 1 out of 2 authors, or minor spelling variant on co-author)
+        partial = len(overlap) / max(len(k_surnames), len(c_surnames))
+        return max(partial, sim if sim >= 0.80 else 0.0)
 
     # If no surnames matched, only count if full names are close enough to be a typo/transliteration
-    c_str = _clean_str(" ".join(candidate_authors))
-    k_str = _clean_str(" ".join(clue_authors))
-    sim = difflib.SequenceMatcher(None, c_str, k_str).ratio()
     return sim if sim >= 0.75 else 0.0
 
 
@@ -138,6 +194,7 @@ def calculate_match_confidence(
     isbn_matched_in_front_matter: bool = False,
     min_confidence: float = 0.50,
     content_meta: Optional[BookMetadata] = None,
+    allow_swapped_clues: bool = True,
 ) -> MatchResult:
     """
     Calculate confidence score (0.0 - 1.0) verifying if candidate metadata matches
@@ -161,6 +218,11 @@ def calculate_match_confidence(
         et = existing_meta.title.strip()
         if et.lower() not in generic_titles and et not in title_clues:
             title_clues.append(et)
+        if existing_meta.authors:
+            from .authors import strip_series_and_redundant_author_from_title
+            et_stripped = strip_series_and_redundant_author_from_title(et, existing_meta.authors)
+            if et_stripped and et_stripped.lower() not in generic_titles and et_stripped not in title_clues:
+                title_clues.append(et_stripped)
     if content_meta and content_meta.title:
         ct = content_meta.title.strip()
         if ct.lower() not in generic_titles and ct not in title_clues:
@@ -221,6 +283,61 @@ def calculate_match_confidence(
         if not has_title_clue or t_score >= 0.55:
             composite = max(composite, 0.90)
             details.append("Boosted: Verified ISBN extracted directly from document front matter.")
+
+    # Switched Title/Author check: if normal clues failed, check if the file's Title and Author were inverted
+    # (requires BOTH candidate title matching original author clue >= 0.70 AND candidate author matching original title clue >= 0.65).
+    if allow_swapped_clues and composite < min_confidence and candidate.title and candidate.authors:
+        from .authors import clean_swapped_author_candidates, clean_swapped_title_candidates
+
+        swapped_title_clues: List[str] = []
+        swapped_author_clues_list: List[List[str]] = []
+
+        if existing_meta:
+            if existing_meta.authors:
+                for st in clean_swapped_title_candidates(existing_meta.authors):
+                    if st.lower() not in generic_titles and st not in swapped_title_clues:
+                        swapped_title_clues.append(st)
+            if existing_meta.title:
+                _, sa_list = clean_swapped_author_candidates(existing_meta.title)
+                if sa_list:
+                    swapped_author_clues_list.append(sa_list)
+
+        if filename_info:
+            if filename_info.get("authors"):
+                for st in clean_swapped_title_candidates(filename_info["authors"]):
+                    if st.lower() not in generic_titles and st not in swapped_title_clues:
+                        swapped_title_clues.append(st)
+            if filename_info.get("title"):
+                _, sa_list = clean_swapped_author_candidates(filename_info["title"])
+                if sa_list:
+                    swapped_author_clues_list.append(sa_list)
+
+        sw_t_score = 0.0
+        best_sw_t = None
+        for stc in swapped_title_clues:
+            s = score_title(candidate.title, stc)
+            if s > sw_t_score:
+                sw_t_score = s
+                best_sw_t = stc
+
+        sw_a_score = 0.0
+        best_sw_a = None
+        for sac in swapped_author_clues_list:
+            s = score_authors(candidate.authors, sac)
+            if s > sw_a_score:
+                sw_a_score = s
+                best_sw_a = sac
+
+        if sw_t_score >= 0.70 and sw_a_score >= 0.65:
+            sw_comp = (sw_t_score * 0.65) + (sw_a_score * 0.35)
+            if sw_comp > composite:
+                composite = sw_comp
+                t_score = sw_t_score
+                a_score = sw_a_score
+                details.append(
+                    f"Switched Title/Author match: title={int(sw_t_score * 100)}% ('{candidate.title}' vs '{best_sw_t}'), "
+                    f"author={int(sw_a_score * 100)}% ({candidate.authors} vs {best_sw_a})"
+                )
 
     composite = min(1.0, max(0.0, composite))
     is_confident = composite >= min_confidence

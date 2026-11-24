@@ -187,14 +187,14 @@ SEARCH_KEYWORDS_SPEC: List[Dict[str, Any]] = [
         'desc': 'Limit by catalog item type (book, magazine, kindle, audible, audiobook)',
     },
     {
-        'keyword': 'year:',
-        'aliases': ['published:', 'after:', 'before:'],
+        'keyword': '@yyyy@',
+        'aliases': ['year:', 'published:', 'after:', 'before:'],
         'category': 'Format & Date',
-        'insert': 'year:',
-        'is_prefix': True,
-        'example': 'year:2024..2026',
-        'label': 'Publication Year / Range',
-        'desc': 'Filter by year or range (year:2025, year:2020..2026, year:>=2024, after:2023, before:2000)',
+        'insert': '@2026@',
+        'is_prefix': False,
+        'example': '@2026@ or year:2024..2026',
+        'label': 'Publication Year (@yyyy@)',
+        'desc': 'Type @yyyy@ (e.g. @2026@, @2025@) for books published that year sorted newest first, or year:2020..2026',
     },
     # Status & Virtual Shelves
     {
@@ -246,6 +246,16 @@ SEARCH_KEYWORDS_SPEC: List[Dict[str, Any]] = [
         'example': 'is:badmeta',
         'label': 'Bad Metadata Shelf',
         'desc': 'Books flagged as having bad metadata from Moon+ Reader or Web UI',
+    },
+    {
+        'keyword': 'is:quarantined',
+        'aliases': ['is:quarantine'],
+        'category': 'Shelf & Status',
+        'insert': 'is:quarantined',
+        'is_prefix': False,
+        'example': 'is:quarantined',
+        'label': 'Quarantined (Missing Copy)',
+        'desc': 'Quarantined corrupt/empty books that have no valid replacement copy in your library',
     },
     {
         'keyword': 'is:reading',
@@ -558,6 +568,31 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
             negated = True
             work = work[1:]
 
+        # Shorthand `@yyyy@` (or `@yyyy..yyyy@`) -> filter by publication year and sort newest book first
+        m_at_yr = re.match(r'^@(\d{4})(?:(?:\.\.|-)(\d{4}))?@$', work)
+        if m_at_yr:
+            y1 = int(m_at_yr.group(1))
+            y2 = int(m_at_yr.group(2)) if m_at_yr.group(2) else None
+            if y2 is not None:
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                parsed['year_filters'].append(('range', y1, y2, negated))
+                parsed['active_badges'].append({
+                    'raw': tok,
+                    'label': f"{'Not ' if negated else ''}Published: {y1}–{y2} (Newest First)",
+                    'kind': 'date',
+                })
+            else:
+                parsed['year_filters'].append(('exact', y1, None, negated))
+                parsed['active_badges'].append({
+                    'raw': tok,
+                    'label': f"{'Not ' if negated else ''}Published: {y1} (Newest First)",
+                    'kind': 'date',
+                })
+            if not negated and not parsed['sort_override']:
+                parsed['sort_override'] = 'pubdate_desc'
+            continue
+
         if ':' in work:
             k_raw, v_raw = work.split(':', 1)
             k = k_raw.lower().strip()
@@ -678,6 +713,8 @@ def parse_search_query(query_string: str) -> Dict[str, Any]:
                     'tomags': ('tomags', False, 'Moved to toMags'),
                     'tomag': ('tomags', False, 'Moved to toMags'),
                     'to_mags': ('tomags', False, 'Moved to toMags'),
+                    'quarantined': ('quarantined', False, '☢️ Quarantined (Missing Copy)'),
+                    'quarantine': ('quarantined', False, '☢️ Quarantined (Missing Copy)'),
                 }
                 if v_low in status_map:
                     canon_st, default_neg, st_label = status_map[v_low]
@@ -805,6 +842,26 @@ def get_keyword_autocomplete_suggestions(query_string: str) -> List[Dict[str, st
     clean_low = low_tok[1:] if neg_prefix else low_tok
 
     hints: List[Dict[str, str]] = []
+
+    # Case 0: `@yyyy@` shorthand year autocomplete when user types `@` or `@20...`
+    if clean_low.startswith('@'):
+        yr_part = clean_low.strip('@')
+        cur_yr = datetime.date.today().year
+        cand_years = [str(y) for y in range(cur_yr, cur_yr - 15, -1)]
+        for y_str in cand_years:
+            if not yr_part or y_str.startswith(yr_part):
+                rep_tok = f"{neg_prefix}@{y_str}@"
+                hints.append({
+                    'kind': 'keyword',
+                    'keyword': rep_tok,
+                    'full_query': f"{prefix_before_last}{rep_tok} ",
+                    'label': f"Books published in {y_str} — sorted Newest Book First",
+                    'category': 'YEAR',
+                    'submit_immediately': False,
+                })
+                if len(hints) >= 6:
+                    break
+        return hints
 
     # Case 1: Dynamic Category completion (`cat:`, `category:`, `folder:`)
     if clean_low.startswith(('cat:', 'category:', 'folder:', 'dir:')):

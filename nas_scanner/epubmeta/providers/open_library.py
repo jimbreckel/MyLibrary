@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional
 import requests
 
-from ..models import BookMetadata
+from ..models import BookMetadata, is_non_english_for_book
 from ..isbn.validator import clean_isbn, normalize_isbn
 from .base import BaseProvider
 
@@ -114,10 +114,12 @@ class OpenLibraryProvider(BaseProvider):
         elif search_doc and "author_name" in search_doc:
             authors = [a.strip() for a in search_doc["author_name"] if a.strip()]
 
-        # Extract Description
+        # Extract Description (discard shared work description if it is in a foreign language while the edition title is English)
         description = None
         if work_key:
-            description = self._fetch_work_description(work_key)
+            raw_work_desc = self._fetch_work_description(work_key)
+            if raw_work_desc and not is_non_english_for_book(raw_work_desc, title):
+                description = raw_work_desc
 
         # Extract Subjects / Tags
         subjects: List[str] = []
@@ -175,10 +177,18 @@ class OpenLibraryProvider(BaseProvider):
         if not title or self._disabled:
             return None
         import re as _re
+        from ..filename_parser import strip_trailing_year_tag
+        from ..authors import strip_author_role_tags
+        clean_title = strip_trailing_year_tag(title) or title
+        clean_author = strip_author_role_tags(author) if author else author
+        if clean_author and "," in clean_author and len(clean_author.split(",")) == 2:
+            p_last, p_first = [p.strip() for p in clean_author.split(",", 1)]
+            if p_first and p_last:
+                clean_author = f"{p_first} {p_last}"
         fields_str = "key,title,subtitle,author_name,first_publish_year,isbn,publisher,subject,cover_i"
-        params = {"title": title, "fields": fields_str}
-        if author:
-            params["author"] = author
+        params = {"title": clean_title, "fields": fields_str}
+        if clean_author:
+            params["author"] = clean_author
 
         try:
             resp = self.session.get("https://openlibrary.org/search.json", params=params, timeout=self.timeout)
@@ -186,11 +196,11 @@ class OpenLibraryProvider(BaseProvider):
                 self._disabled = True
                 return None
             docs = resp.json().get("docs", []) if resp.status_code == 200 else []
-            if not docs and not self._disabled and (":" in title or " - " in title or (author and "." in author)):
-                short_title = _re.split(r"\s*(?::| - )\s*", title, maxsplit=1)[0].strip() or title
-                alt_author = author
-                if author and "." in author and len(author.split()) >= 2:
-                    alt_author = author.split()[-1].strip()
+            if not docs and not self._disabled and (":" in clean_title or " - " in clean_title or "(" in clean_title or (clean_author and "." in clean_author)):
+                short_title = _re.split(r"\s*(?::| - |\()\s*", clean_title, maxsplit=1)[0].strip() or clean_title
+                alt_author = clean_author
+                if clean_author and "." in clean_author and len(clean_author.split()) >= 2:
+                    alt_author = clean_author.split()[-1].strip()
                 alt_params = {"title": short_title, "fields": fields_str}
                 if alt_author:
                     alt_params["author"] = alt_author
@@ -235,6 +245,8 @@ class OpenLibraryProvider(BaseProvider):
                             doc_subtitle = doc.get("subtitle")
                             if doc_title and doc_subtitle and doc_subtitle.lower() not in doc_title.lower():
                                 doc_title = f"{doc_title}: {doc_subtitle}"
+                            if desc and is_non_english_for_book(desc, doc_title or title):
+                                desc = None
                             cov_url = (
                                 f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
                                 if doc.get("cover_i")

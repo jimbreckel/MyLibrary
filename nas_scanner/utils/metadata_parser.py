@@ -25,6 +25,7 @@ def _apply_epubmeta_fallbacks(filepath, meta):
     try:
         import re
         from epubmeta.filename_parser import parse_filename, clean_book_title
+        from epubmeta.authors import extract_inline_author_and_clean_title
         from epubmeta.isbn.validator import normalize_isbn
 
         raw_isbn = meta.get('isbn')
@@ -47,7 +48,17 @@ def _apply_epubmeta_fallbacks(filepath, meta):
         if (not meta.get('title') or meta.get('title') == stem) and clues.get('title'):
             meta['title'] = clues['title']
         elif meta.get('title'):
-            meta['title'] = clean_book_title(meta['title']) or meta['title']
+            in_t, in_a = extract_inline_author_and_clean_title(
+                meta['title'],
+                raw_authors=None if meta.get('authors') in (None, '', 'Unknown', 'Unknown Author') else meta.get('authors'),
+                file_name=os.path.basename(filepath),
+            )
+            if in_t and in_a:
+                meta['title'] = in_t
+                if not meta.get('authors') or meta.get('authors') in ('Unknown', 'Unknown Author'):
+                    meta['authors'] = ", ".join(in_a)
+            else:
+                meta['title'] = clean_book_title(meta['title']) or meta['title']
     except Exception:
         pass
     return meta

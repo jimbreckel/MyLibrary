@@ -391,6 +391,12 @@
                         <span><i class="fa-solid fa-magnifying-glass-minus" style="color:#f97316;"></i> No Match</span>
                         <small id="sidebar-no-match-count" style="color:#f97316; font-weight:700;">{{ enrich_status_counts.no_match|default:0|intcomma }}</small>
                     </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=quarantined_missing"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if quarantined_shelf_active %}#f87171{% else %}#cbd5e1{% endif %}; background:{% if quarantined_shelf_active %}rgba(239,68,68,0.18){% else %}transparent{% endif %}; border:1px solid {% if quarantined_shelf_active %}rgba(248,113,113,0.48){% else %}transparent{% endif %};"
+                        title="Corrupt/empty books moved to quarantine that have NO valid copy in your library (so you can replace them on Anna's Archive or Amazon)">
+                        <span><i class="fa-solid fa-biohazard" style="color:#f87171;"></i> Quarantined (Missing)</span>
+                        <small id="sidebar-quarantined-missing-count" style="color:#f87171; font-weight:700;">{{ quarantined_missing_counts.missing|default:0|intcomma }}</small>
+                    </a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=removed_protection"
                         style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}#10b981{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'removed_protection' or selected_shelf == 'nodrm' %}rgba(16,185,129,0.38){% else %}transparent{% endif %};"
                         title="Books with 'nodrm' in the filename, sorted newest first">
@@ -457,6 +463,44 @@
                         title="Amazon books that also have a local EPUB/PDF/Audiobook copy on your NAS">
                         <span><i class="fa-solid fa-link" style="color:#60a5fa;"></i> Matched to NAS Books</span>
                         <small style="color:#60a5fa; font-weight:700;">{{ amazon_counts.amazon_matched|default:0|intcomma }}</small>
+                    </a>
+                    {% if amazon_counts.amazon_newer_edition %}
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon_newer_edition"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.32rem 0.6rem 0.32rem 1.25rem; border-radius:8px; font-size:0.79rem; color:{% if selected_shelf == 'amazon_newer_edition' %}#38bdf8{% else %}#94a3b8{% endif %}; background:{% if selected_shelf == 'amazon_newer_edition' %}rgba(56,189,248,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'amazon_newer_edition' %}rgba(56,189,248,0.38){% else %}transparent{% endif %};"
+                        title="Amazon purchases matched to a newer or updated edition on your NAS">
+                        <span><i class="fa-solid fa-sparkles" style="color:#38bdf8;"></i> Newer Edition on NAS</span>
+                        <small style="color:#38bdf8; font-weight:700;">{{ amazon_counts.amazon_newer_edition|default:0|intcomma }}</small>
+                    </a>
+                    {% endif %}
+                    <a href="{% url 'catalog:dashboard' %}?shelf=packt_owned"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'packt_owned' %}#fb923c{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'packt_owned' %}rgba(251,146,60,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'packt_owned' %}rgba(251,146,60,0.38){% else %}transparent{% endif %};"
+                        title="Titles owned in your Packt account (synced from https://subscription.packtpub.com/owned via sync_owned.bat)">
+                        <span><i class="fa-solid fa-building-columns" style="color:#fb923c;"></i> Owned on Packt</span>
+                        <small style="color:#fb923c; font-weight:700;">{{ publisher_owned_counts.packt_owned|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=packt_only"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'packt_only' %}#f87171{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'packt_only' %}rgba(248,113,113,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'packt_only' %}rgba(248,113,113,0.38){% else %}transparent{% endif %};"
+                        title="Packt Owned books/videos that do NOT match any local NAS file">
+                        <span><i class="fa-solid fa-cloud" style="color:#f87171;"></i> Packt Only (Not on NAS)</span>
+                        <small style="color:#f87171; font-weight:700;">{{ publisher_owned_counts.packt_only|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=springer_owned"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'springer_owned' %}#38bdf8{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'springer_owned' %}rgba(56,189,248,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'springer_owned' %}rgba(56,189,248,0.38){% else %}transparent{% endif %};"
+                        title="Titles owned in your Springer My Bookshelf (synced from https://library.springer.com/ via sync_owned.bat)">
+                        <span><i class="fa-solid fa-graduation-cap" style="color:#38bdf8;"></i> Owned on Springer</span>
+                        <small style="color:#38bdf8; font-weight:700;">{{ publisher_owned_counts.springer_owned|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=springer_only"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf == 'springer_only' %}#f87171{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf == 'springer_only' %}rgba(248,113,113,0.16){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf == 'springer_only' %}rgba(248,113,113,0.38){% else %}transparent{% endif %};"
+                        title="Springer Owned books that do NOT match any local NAS file">
+                        <span><i class="fa-solid fa-cloud" style="color:#f87171;"></i> Springer Only (Not on NAS)</span>
+                        <small style="color:#f87171; font-weight:700;">{{ publisher_owned_counts.springer_only|default:0|intcomma }}</small>
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=missing_owned"
+                        style="display:flex; justify-content:space-between; align-items:center; text-decoration:none; padding:0.4rem 0.6rem; border-radius:8px; font-size:0.84rem; color:{% if selected_shelf in 'missing_owned,packt_missing_owned,springer_missing_owned,amazon_missing_owned' %}#fb7185{% else %}#cbd5e1{% endif %}; background:{% if selected_shelf in 'missing_owned,packt_missing_owned,springer_missing_owned,amazon_missing_owned' %}rgba(244,63,94,0.18){% else %}transparent{% endif %}; border:1px solid {% if selected_shelf in 'missing_owned,packt_missing_owned,springer_missing_owned,amazon_missing_owned' %}rgba(244,63,94,0.45){% else %}transparent{% endif %};"
+                        title="Previously owned titles on Amazon, Packt, or Springer that disappeared from your owned library in a later sync">
+                        <span><i class="fa-solid fa-ghost" style="color:#fb7185;"></i> Missing Owned</span>
+                        <small style="color:#fb7185; font-weight:700;">{{ missing_owned_total_count|default:0|intcomma }}</small>
                     </a>
                 </div>
             </div>
@@ -614,11 +658,15 @@
                     Enriched EPUBs</span>
                 {% elif selected_shelf == 'missing_cover' or selected_enrich_status == 'missing_cover' %}
                 &mdash; <span style="color:#f59e0b; font-weight:600;"><i class="fa-regular fa-image"></i> Enriched
-                    Books: Missing / Text Cover:</span>
-                <span style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem;">
+                    Books: Missing / Text / Generic Cover:</span>
+                <span
+                    style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem; flex-wrap:wrap;">
                     <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if not selected_cover_issue %}background:rgba(245,158,11,0.28); border:1px solid rgba(245,158,11,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">All
                         ({{ missing_cover_count|default:0|intcomma }})</a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover&amp;cover_issue=generic"
+                        style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_cover_issue == 'generic' %}background:rgba(168,85,247,0.28); border:1px solid rgba(168,85,247,0.75); color:#f3e8ff;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#d8b4fe;{% endif %}"><i
+                            class="fa-solid fa-shapes"></i> Generic Cover ({{ generic_cover_count|default:0|intcomma }})</a>
                     <a href="{% url 'catalog:dashboard' %}?shelf=missing_cover&amp;cover_issue=text_only"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_cover_issue == 'text_only' %}background:rgba(245,158,11,0.28); border:1px solid rgba(245,158,11,0.7); color:#fef3c7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fcd34d;{% endif %}"><i
                             class="fa-solid fa-font"></i> Text-Only ({{ text_only_cover_count|default:0|intcomma }})</a>
@@ -654,6 +702,52 @@
                 {% elif selected_shelf == 'amazon_matched' %}
                 &mdash; <span style="color:#60a5fa; font-weight:600;"><i class="fa-solid fa-link"></i> Amazon Books
                     Matched to Local NAS Files ({{ amazon_counts.amazon_matched|default:0|intcomma }} Books)</span>
+                {% elif selected_shelf == 'packt_owned' %}
+                &mdash; <span style="color:#fb923c; font-weight:600;"><i class="fa-solid fa-building-columns"></i> Owned
+                    on
+                    Packt (subscription.packtpub.com/owned &mdash; {{ publisher_owned_counts.packt_owned|default:0|intcomma }} Titles)</span>
+                {% elif selected_shelf == 'packt_only' %}
+                &mdash; <span style="color:#f87171; font-weight:600;"><i class="fa-solid fa-cloud"></i> Packt Only
+                    &mdash; Not Matched to Local NAS Books ({{ publisher_owned_counts.packt_only|default:0|intcomma }}
+                    Titles)</span>
+                {% elif selected_shelf == 'springer_owned' %}
+                &mdash; <span style="color:#38bdf8; font-weight:600;"><i class="fa-solid fa-graduation-cap"></i> Owned
+                    on
+                    Springer (library.springer.com &mdash; {{ publisher_owned_counts.springer_owned|default:0|intcomma }} Titles)</span>
+                {% elif selected_shelf == 'springer_only' %}
+                &mdash; <span style="color:#f87171; font-weight:600;"><i class="fa-solid fa-cloud"></i> Springer Only
+                    &mdash; Not Matched to Local NAS Books ({{ publisher_owned_counts.springer_only|default:0|intcomma }} Titles)</span>
+                {% elif selected_shelf in 'missing_owned,packt_missing_owned,springer_missing_owned,amazon_missing_owned' %}
+                &mdash; <span style="color:#fb7185; font-weight:600;"><i class="fa-solid fa-ghost"></i> Missing Owned
+                    &mdash; Disappeared from Owned Library ({{ missing_owned_total_count|default:0|intcomma }} Total:
+                    <a href="{% url 'catalog:dashboard' %}?shelf=missing_owned"
+                        style="color:#fda4af; text-decoration:underline;">All {{ missing_owned_total_count|default:0|intcomma }}</a> &middot;
+                    <a href="{% url 'catalog:dashboard' %}?shelf=amazon_missing_owned"
+                        style="color:#fb923c; text-decoration:underline;">Amazon {{ amazon_counts.amazon_missing_owned|default:0|intcomma }}</a> &middot;
+                    <a href="{% url 'catalog:dashboard' %}?shelf=packt_missing_owned"
+                        style="color:#fdba74; text-decoration:underline;">Packt {{ publisher_owned_counts.packt_missing_owned|default:0|intcomma }}</a> &middot;
+                    <a href="{% url 'catalog:dashboard' %}?shelf=springer_missing_owned"
+                        style="color:#38bdf8; text-decoration:underline;">Springer {{ publisher_owned_counts.springer_missing_owned|default:0|intcomma }}</a>)</span>
+                {% elif quarantined_shelf_active %}
+                &mdash; <span style="color:#f87171; font-weight:700;"><i class="fa-solid fa-biohazard"></i> Quarantined Books:</span>
+                <span style="display:inline-flex; gap:0.35rem; align-items:center; margin-left:0.35rem; flex-wrap:wrap;">
+                    <a href="{% url 'catalog:dashboard' %}?shelf=quarantined_missing"
+                        style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'quarantined_missing' %}background:rgba(239,68,68,0.28); border:1px solid rgba(248,113,113,0.75); color:#fee2e2;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#fca5a5;{% endif %}">
+                        <i class="fa-solid fa-biohazard"></i> No Valid Copy ({{ quarantined_missing_counts.missing|default:0|intcomma }})
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=quarantined_covered"
+                        style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'quarantined_covered' %}background:rgba(34,197,94,0.28); border:1px solid rgba(74,222,128,0.75); color:#dcfce7;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#86efac;{% endif %}">
+                        <i class="fa-solid fa-circle-check"></i> Have Valid Copy ({{ quarantined_missing_counts.covered|default:0|intcomma }})
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=quarantined_dismissed"
+                        style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'quarantined_dismissed' %}background:rgba(148,163,184,0.28); border:1px solid rgba(148,163,184,0.65); color:#f1f5f9;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#94a3b8;{% endif %}">
+                        <i class="fa-solid fa-eye-slash"></i> Dismissed ({{ quarantined_missing_counts.dismissed|default:0|intcomma }})
+                    </a>
+                    <a href="{% url 'catalog:dashboard' %}?shelf=quarantined_all"
+                        style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_shelf == 'quarantined_all' %}background:rgba(56,189,248,0.28); border:1px solid rgba(56,189,248,0.7); color:#e0f2fe;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">
+                        All ({{ quarantined_missing_counts.total|default:0|intcomma }})
+                    </a>
+                </span>
                 {% endif %}
                 {% if selected_read_status == 'read' %}
                 &mdash; <span style="color:#4ade80; font-weight:600;"><i class="fa-solid fa-circle-check"></i> 100% Read
@@ -693,7 +787,16 @@
                     <a href="{% url 'catalog:dashboard' %}?shelf=needs_review&amp;review_type=all"
                         style="text-decoration:none; font-size:0.75rem; font-weight:700; padding:0.16rem 0.52rem; border-radius:999px; {% if selected_review_type == 'all' %}background:rgba(56,189,248,0.28); border:1px solid rgba(56,189,248,0.7); color:#e0f2fe;{% else %}background:rgba(30,41,59,0.75); border:1px solid rgba(148,163,184,0.3); color:#cbd5e1;{% endif %}">All
                         ({{ all_review_and_no_match_count|default:0|intcomma }})</a>
+                    <button type="button" id="btn-fix-switched-nomatch"
+                        onclick="window.startSwitchedNoMatchBatch && window.startSwitchedNoMatchBatch(false)"
+                        title="Scan No Match items for switched Title &amp; Author (e.g. Title='Martin H. Greenberg (ed)' by 'Journey to Infinity'), check if they match when swapped, and automatically fix &amp; enrich them"
+                        style="display:inline-flex; align-items:center; gap:0.32rem; font-size:0.74rem; font-weight:700; padding:0.18rem 0.62rem; border-radius:999px; cursor:pointer; background:linear-gradient(135deg, rgba(16,185,129,0.26), rgba(56,189,248,0.24)); border:1px solid rgba(52,211,153,0.65); color:#a7f3d0;">
+                        <i class="fa-solid fa-right-left"></i> <span>Check &amp; Fix Switched</span>
+                    </button>
                 </span>
+                <div id="switched-batch-banner"
+                    style="display:none; width:100%; margin-top:0.55rem; padding:0.55rem 0.8rem; border-radius:10px; background:rgba(15,23,42,0.88); border:1px solid rgba(52,211,153,0.45); font-size:0.78rem; color:#e2e8f0;">
+                </div>
                 {% endif %}
                 {% if selected_folders %}
                 &mdash;
@@ -855,7 +958,288 @@
             </div>
         </div>
 
-        {% if items %}
+        {% if selected_shelf in 'amazon,kindle_plus,amazon_bookmarked,audible,amazon_only,amazon_matched,amazon_newer_edition,amazon_all' %}
+        <!-- Kindle Delivery & Local Kindle Cleanup Bar (All Amazon Shelves) -->
+        <div id="kindle-delivery-toolbar"
+            style="background:linear-gradient(135deg, rgba(15,23,42,0.94), rgba(30,41,59,0.92)); border:1px solid rgba(251,146,60,0.45); border-radius:14px; padding:0.85rem 1.1rem; margin-bottom:1.1rem; display:flex; flex-direction:column; gap:0.65rem; box-shadow:0 10px 28px rgba(0,0,0,0.35);">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.75rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
+                    <span
+                        style="display:inline-flex; align-items:center; gap:0.4rem; font-size:0.88rem; font-weight:800; color:#fb923c;">
+                        <i class="fa-brands fa-amazon" style="font-size:1.05rem;"></i> Amazon Shelf Status &amp; Kindle
+                        Tools
+                    </span>
+                    <div style="display:inline-flex; align-items:center; gap:0.35rem; flex-wrap:wrap;">
+                        <a href="{% url 'catalog:dashboard' %}?shelf=amazon_matched"
+                            style="text-decoration:none; font-size:0.74rem; font-weight:700; padding:0.24rem 0.55rem; border-radius:999px; background:{% if selected_shelf == 'amazon_matched' %}rgba(74,222,128,0.25){% else %}rgba(15,23,42,0.75){% endif %}; border:1px solid rgba(74,222,128,0.55); color:#4ade80;"
+                            title="Show Amazon books that are on your NAS">
+                            <i class="fa-solid fa-hard-drive"></i> On NAS: {{ amazon_counts.amazon_matched|default:0|intcomma }}
+                        </a>
+                        {% if amazon_counts.amazon_newer_edition %}
+                        <a href="{% url 'catalog:dashboard' %}?shelf=amazon_newer_edition"
+                            style="text-decoration:none; font-size:0.74rem; font-weight:700; padding:0.24rem 0.55rem; border-radius:999px; background:{% if selected_shelf == 'amazon_newer_edition' %}rgba(56,189,248,0.28){% else %}rgba(15,23,42,0.75){% endif %}; border:1px solid rgba(56,189,248,0.65); color:#38bdf8;"
+                            title="Show Amazon books matched to a Newer / Updated Edition on your NAS">
+                            <i class="fa-solid fa-sparkles"></i> Newer Ed. on NAS: {{ amazon_counts.amazon_newer_edition|default:0|intcomma }}
+                        </a>
+                        {% endif %}
+                        <a href="{% url 'catalog:dashboard' %}?shelf=amazon_only"
+                            style="text-decoration:none; font-size:0.74rem; font-weight:700; padding:0.24rem 0.55rem; border-radius:999px; background:{% if selected_shelf == 'amazon_only' %}rgba(248,113,113,0.25){% else %}rgba(15,23,42,0.75){% endif %}; border:1px solid rgba(248,113,113,0.55); color:#fca5a5;"
+                            title="Show Amazon books not yet on your NAS">
+                            <i class="fa-solid fa-cloud"></i> Amazon Only: {{ amazon_counts.amazon_only|default:0|intcomma }}
+                        </a>
+                    </div>
+                    <div
+                        style="display:inline-flex; align-items:center; gap:0.4rem; background:rgba(2,6,23,0.65); border:1px solid rgba(251,146,60,0.4); border-radius:9px; padding:0.3rem 0.6rem;">
+                        <i class="fa-solid fa-tablet-screen-button" style="color:#fb923c; font-size:0.82rem;"></i>
+                        <label for="kindle-target-device-select"
+                            style="font-size:0.75rem; color:#94a3b8; font-weight:600;">Target Kindle:</label>
+                        <select id="kindle-target-device-select"
+                            onchange="if(window.onKindleTargetDeviceChange) window.onKindleTargetDeviceChange(this);"
+                            style="background:transparent; border:none; color:#f8fafc; font-size:0.8rem; font-weight:700; cursor:pointer; outline:none; max-width:320px;">
+                            <option value="A101329625FBGFO0QECXO" data-dsn="C36839180E3E566C07FCEF7DEFD96D32" selected>
+                                JAMES's Kindle for Windows (Default - PC)</option>
+                            <option value="A015285311F3W73S7EA31" data-dsn="fbc9082131a2444bb978c0bf861ac3bc">Jimmy's
+                                Tab S11</option>
+                            <option value="A018607231PVOX7INFXHE" data-dsn="657a28b98877458fbdcae5c9069c0976">Jimmy's
+                                Galaxy S25 Ultra</option>
+                            <option value="A0440102192GKG2EE19T3" data-dsn="61bacf27b0444b12825b3bd51a8031f2">Jimmy's
+                                Tab S8 Ultra</option>
+                            <option value="A02063483UBXG3PKOGGOX" data-dsn="e73d7ef3536d46aaae7f8156125ede47">Jimmy's
+                                Tab A8</option>
+                            <option value="A05507311ZARZZO8ORYGN" data-dsn="A3SF9CPPQ8XQON00A2CTZ977SKFQZY">JAMES's
+                                Kindle for Web</option>
+                        </select>
+                        <button type="button"
+                            onclick="if(window.refreshKindleDevicesFromAmazon) window.refreshKindleDevicesFromAmazon(this);"
+                            title="Refresh registered Kindle devices live from your Amazon account"
+                            style="background:transparent; border:none; color:#38bdf8; cursor:pointer; font-size:0.75rem; padding:0 0.2rem;">
+                            <i class="fa-solid fa-arrows-rotate"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem;">
+                    <button type="button" id="btn-send-page-to-kindle"
+                        onclick="if(window.sendBooksToKindle) window.sendBooksToKindle('page', this);"
+                        title="Send all Kindle books on this current page to the selected Kindle device"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.82rem; border-radius:9px; font-size:0.78rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(251,146,60,0.2); border:1px solid rgba(251,146,60,0.58); color:#fdba74; transition:all 0.2s;">
+                        <i class="fa-solid fa-paper-plane"></i> <span>Send This Page to Kindle</span>
+                    </button>
+                    <button type="button" id="btn-send-all-missing-to-kindle"
+                        onclick="if(window.sendBooksToKindle) window.sendBooksToKindle('all_missing', this);"
+                        title="Send ALL Amazon Only (Not on NAS) Kindle books to the selected Kindle device in batches"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.85rem; border-radius:9px; font-size:0.78rem; font-weight:800; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(249,115,22,0.32), rgba(234,88,12,0.28)); border:1px solid rgba(251,146,60,0.75); color:#ffedd5; transition:all 0.2s;">
+                        <i class="fa-solid fa-cloud-arrow-down"></i> <span>Send All Missing Kindle Books</span>
+                    </button>
+                    <button type="button" id="btn-process-tobooks-now"
+                        onclick="if(window.processToBooksNow) window.processToBooksNow(this);"
+                        title="Immediately ingest any books dropped in /toBooks and relink them against your Amazon books (including newer editions)"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.85rem; border-radius:9px; font-size:0.78rem; font-weight:800; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(56,189,248,0.28), rgba(14,165,233,0.24)); border:1px solid rgba(56,189,248,0.75); color:#e0f2fe; transition:all 0.2s;">
+                        <i class="fa-solid fa-boxes-packing"></i> <span>Ingest /toBooks &amp; Relink</span>
+                    </button>
+                    <button type="button" id="btn-check-annas-missing"
+                        onclick="if(window.checkAllMissingOnAnnas) window.checkAllMissingOnAnnas(this);"
+                        title="Check which of the remaining Amazon Only (Not on NAS) books are available on Anna's Archive"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.85rem; border-radius:9px; font-size:0.78rem; font-weight:800; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(16,185,129,0.28), rgba(5,150,105,0.25)); border:1px solid rgba(52,211,153,0.75); color:#d1fae5; transition:all 0.2s;">
+                        <i class="fa-solid fa-magnifying-glass"></i> <span>Check All on Anna's Archive</span>
+                    </button>
+                    <button type="button" id="btn-empty-kindle-pc"
+                        onclick="if(window.emptyKindlePCDownloads) window.emptyKindlePCDownloads(this);"
+                        title="Empty all downloaded books from Kindle for Windows (Classic\Content &amp; book_asset.db)"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.82rem; border-radius:9px; font-size:0.78rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(244,63,94,0.2); border:1px solid rgba(244,63,94,0.58); color:#fda4af; transition:all 0.2s;">
+                        <i class="fa-solid fa-broom"></i> <span>Empty Kindle PC Downloads</span>
+                    </button>
+                    <button type="button" id="btn-deregister-other-kindles"
+                        onclick="if(window.deregisterOtherKindleDevices) window.deregisterOtherKindleDevices(this);"
+                        title="Deregister all other unused Kindle devices on Amazon MYCD (keeping only the currently selected Target Kindle) to free up book license limits"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.82rem; border-radius:9px; font-size:0.78rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(168,85,247,0.2); border:1px solid rgba(168,85,247,0.58); color:#d8b4fe; transition:all 0.2s;">
+                        <i class="fa-solid fa-tablet-button"></i> <span>Clear Other Kindle Devices</span>
+                    </button>
+                </div>
+            </div>
+            <div id="kindle-delivery-status-bar"
+                style="display:none; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; padding:0.48rem 0.75rem; border-radius:9px; background:rgba(2,6,23,0.75); border:1px solid rgba(56,189,248,0.4); font-size:0.79rem; color:#e2e8f0;">
+                <span id="kindle-delivery-status-text">Ready.</span>
+                <div id="kindle-delivery-status-actions" style="display:flex; gap:0.45rem; align-items:center;"></div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if quarantined_shelf_active %}
+        <!-- Quarantined Books Replacement Toolbar -->
+        <div id="quarantined-replacement-toolbar"
+            style="background:linear-gradient(135deg, rgba(15,23,42,0.95), rgba(30,41,59,0.92)); border:1px solid rgba(248,113,113,0.45); border-radius:14px; padding:0.85rem 1.1rem; margin-bottom:1.1rem; display:flex; flex-direction:column; gap:0.65rem; box-shadow:0 10px 28px rgba(0,0,0,0.35);">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.75rem;">
+                <div style="display:flex; flex-direction:column; gap:0.2rem;">
+                    <span style="display:inline-flex; align-items:center; gap:0.45rem; font-size:0.9rem; font-weight:800; color:#f87171;">
+                        <i class="fa-solid fa-biohazard"></i> Quarantined Books Without a Valid Copy in Library
+                    </span>
+                    <span style="font-size:0.76rem; color:#94a3b8;">
+                        Corrupt or 0-page files moved to <code>/books_bad/quarantine</code> where no valid copy exists on your NAS or Owned shelves. Download a replacement into <code>/toBooks</code> and click <strong>Ingest /toBooks</strong> to clear it automatically.
+                    </span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem;">
+                    <button type="button"
+                        onclick="if(window.checkAllMissingOnAnnas) window.checkAllMissingOnAnnas(this);"
+                        title="Check Anna's Archive for all quarantined books on this page via the MyLibrary Chrome Extension"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.85rem; border-radius:9px; font-size:0.78rem; font-weight:800; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(16,185,129,0.28), rgba(5,150,105,0.25)); border:1px solid rgba(52,211,153,0.75); color:#d1fae5; transition:all 0.2s;">
+                        <i class="fa-solid fa-magnifying-glass"></i> <span>Check Page on Anna's Archive</span>
+                    </button>
+                    <button type="button"
+                        onclick="if(window.processToBooksNow) window.processToBooksNow(this);"
+                        title="Immediately ingest any replacement books dropped into /toBooks and re-verify this shelf"
+                        style="display:inline-flex; align-items:center; gap:0.38rem; padding:0.44rem 0.85rem; border-radius:9px; font-size:0.78rem; font-weight:800; cursor:pointer; white-space:nowrap; background:linear-gradient(135deg, rgba(56,189,248,0.28), rgba(14,165,233,0.24)); border:1px solid rgba(56,189,248,0.75); color:#e0f2fe; transition:all 0.2s;">
+                        <i class="fa-solid fa-boxes-packing"></i> <span>Ingest /toBooks &amp; Re-Check</span>
+                    </button>
+                </div>
+            </div>
+            <div id="kindle-delivery-status-bar"
+                style="display:none; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5rem; padding:0.48rem 0.75rem; border-radius:9px; background:rgba(2,6,23,0.75); border:1px solid rgba(56,189,248,0.4); font-size:0.79rem; color:#e2e8f0;">
+                <span id="kindle-delivery-status-text">Ready.</span>
+                <div id="kindle-delivery-status-actions" style="display:flex; gap:0.45rem; align-items:center;"></div>
+            </div>
+        </div>
+
+        {% if quarantined_items %}
+        <div class="catalog-grid">
+            {% for qitem in quarantined_items %}
+            <article class="media-card" data-quar-key="{{ qitem.quar_key }}"
+                style="border:1px solid {% if qitem.has_valid_copy %}rgba(74,222,128,0.42){% else %}rgba(248,113,113,0.38){% endif %};">
+                <div class="card-header-image" style="height:115px; background:linear-gradient(135deg, rgba(30,41,59,0.95), rgba(15,23,42,0.98)); display:flex; align-items:center; justify-content:center; position:relative;">
+                    <i class="fa-solid fa-biohazard" style="font-size:2.4rem; color:{% if qitem.has_valid_copy %}rgba(74,222,128,0.45){% else %}rgba(248,113,113,0.55){% endif %};"></i>
+                    <span class="card-type-badge" style="background:rgba(239,68,68,0.85); color:#fff;">
+                        {{ qitem.file_format }}
+                    </span>
+                    {% if qitem.top_folder %}
+                    <span style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(56,189,248,0.5); color:#7dd3fc; font-size:0.66rem; font-weight:700; padding:0.15rem 0.48rem; border-radius:999px;">
+                        <i class="fa-regular fa-folder-open"></i> {{ qitem.top_folder }}
+                    </span>
+                    {% endif %}
+                    {% if qitem.has_valid_copy %}
+                    <span style="position:absolute; bottom:8px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(74,222,128,0.65); color:#4ade80; font-size:0.66rem; font-weight:700; padding:0.15rem 0.48rem; border-radius:999px;">
+                        <i class="fa-solid fa-circle-check"></i> Valid Copy in Library
+                    </span>
+                    {% elif qitem.quarantined_files_count > 1 %}
+                    <span style="position:absolute; bottom:8px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(248,113,113,0.55); color:#fca5a5; font-size:0.66rem; font-weight:700; padding:0.15rem 0.45rem; border-radius:999px;">
+                        {{ qitem.quarantined_files_count }} corrupt files
+                    </span>
+                    {% endif %}
+                </div>
+
+                <div class="card-body" style="display:flex; flex-direction:column; gap:0.45rem; flex:1;">
+                    <h3 class="card-title" title="{{ qitem.title }}" style="margin:0;">{{ qitem.title }}</h3>
+                    <div class="card-authors" style="font-size:0.82rem; color:#94a3b8;">
+                        {% if qitem.authors %}
+                        <i class="fa-solid fa-user-pen" style="opacity:0.75;"></i> {{ qitem.authors }}
+                        {% elif qitem.publisher_hint %}
+                        <i class="fa-solid fa-building" style="opacity:0.75;"></i> {{ qitem.publisher_hint }}
+                        {% else %}
+                        <span style="opacity:0.6;">Unknown Author</span>
+                        {% endif %}
+                        {% if qitem.edition %} &middot; <span style="color:#fcd34d;">{{ qitem.edition }}</span>{% endif %}
+                        {% if qitem.pub_year %} &middot; <span>{{ qitem.pub_year }}</span>{% endif %}
+                    </div>
+
+                    {% if qitem.isbn %}
+                    <div style="font-size:0.73rem; font-family:monospace; color:#7dd3fc;">
+                        ISBN: {{ qitem.isbn }}
+                    </div>
+                    {% endif %}
+
+                    <div style="font-size:0.72rem; color:#fca5a5; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.28); border-radius:7px; padding:0.35rem 0.5rem; line-height:1.35; word-break:break-word;"
+                        title="{{ qitem.file_path }}">
+                        <div><strong>Quarantined:</strong> {{ qitem.error_message|truncatechars:110 }}</div>
+                        <div style="color:#94a3b8; font-size:0.69rem; margin-top:2px;">File: {{ qitem.file_name }}</div>
+                    </div>
+
+                    {% if qitem.valid_matches %}
+                    <div style="font-size:0.73rem; color:#86efac; background:rgba(34,197,94,0.1); border:1px solid rgba(74,222,128,0.32); border-radius:7px; padding:0.35rem 0.5rem;">
+                        {% for vm in qitem.valid_matches %}
+                        <div>✓ Covered by: <a href="/mylibrary/?q={{ vm.isbn|default:vm.title|urlencode }}" style="color:#4ade80; font-weight:700; text-decoration:underline;">{{ vm.title }}</a> ({{ vm.formats|join:', ' }})</div>
+                        {% endfor %}
+                    </div>
+                    {% elif qitem.owned_sources %}
+                    <div style="font-size:0.73rem; color:#6ee7b7; background:rgba(16,185,129,0.12); border:1px solid rgba(52,211,153,0.35); border-radius:7px; padding:0.35rem 0.5rem;">
+                        🏛️ {{ qitem.owned_sources|join:' & ' }}
+                    </div>
+                    {% elif qitem.other_editions %}
+                    <div style="font-size:0.72rem; color:#fde68a; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.32); border-radius:7px; padding:0.32rem 0.5rem;">
+                        {% for oe in qitem.other_editions %}
+                        <div>ℹ️ Other edition in library: <a href="/mylibrary/?q={{ oe.isbn|default:oe.title|urlencode }}" style="color:#fbbf24; text-decoration:underline;">{{ oe.title }}</a>{% if oe.note %} ({{ oe.note }}){% endif %}</div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <div style="margin-top:auto; padding-top:0.35rem; display:flex; flex-direction:column; gap:0.38rem;">
+                        <div style="display:flex; gap:0.38rem; align-items:center; width:100%;">
+                            <a class="btn-annas-card-link"
+                                href="{{ qitem.annas_url }}"
+                                target="_blank" rel="noopener"
+                                data-title="{{ qitem.title }}"
+                                data-authors="{{ qitem.authors|default:qitem.publisher_hint }}"
+                                data-isbn="{{ qitem.isbn }}"
+                                data-asin=""
+                                title="Search &amp; download replacement on Anna's Archive"
+                                style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.32rem; padding:0.42rem 0.55rem; border-radius:8px; font-size:0.75rem; font-weight:700; text-decoration:none; background:rgba(16,185,129,0.2); border:1px solid rgba(52,211,153,0.55); color:#6ee7b7;">
+                                <i class="fa-solid fa-magnifying-glass"></i> <span class="annas-btn-label">Anna's Archive ↗</span>
+                            </a>
+                            <a href="{{ qitem.amazon_search_url }}" target="_blank" rel="noopener"
+                                title="Search this book on Amazon"
+                                style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.42rem 0.52rem; border-radius:8px; font-size:0.74rem; font-weight:700; text-decoration:none; background:rgba(251,146,60,0.16); border:1px solid rgba(251,146,60,0.45); color:#fdba74;">
+                                <i class="fa-brands fa-amazon"></i>
+                            </a>
+                        </div>
+                        <div style="display:flex; gap:0.38rem; align-items:center; width:100%;">
+                            <a href="{{ qitem.mylibrary_search_url }}"
+                                title="Search MyLibrary manually for alternate titles/editions"
+                                style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.28rem; padding:0.38rem 0.5rem; border-radius:8px; font-size:0.73rem; font-weight:600; text-decoration:none; background:rgba(56,189,248,0.14); border:1px solid rgba(56,189,248,0.4); color:#7dd3fc;">
+                                <i class="fa-solid fa-book"></i> Search Library
+                            </a>
+                            {% if qitem.is_dismissed %}
+                            <button type="button"
+                                onclick="window.toggleDismissQuarantined('{{ qitem.quar_key|escapejs }}', false, this);"
+                                title="Restore this book to the Quarantined (Missing) shelf"
+                                style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.38rem 0.55rem; border-radius:8px; font-size:0.73rem; font-weight:600; cursor:pointer; background:rgba(74,222,128,0.16); border:1px solid rgba(74,222,128,0.45); color:#86efac;">
+                                <i class="fa-solid fa-rotate-left"></i> Restore
+                            </button>
+                            {% elif not qitem.has_valid_copy %}
+                            <button type="button"
+                                onclick="window.toggleDismissQuarantined('{{ qitem.quar_key|escapejs }}', true, this);"
+                                title="Don't need to replace this book — hide from Quarantined (Missing) shelf"
+                                style="display:inline-flex; align-items:center; justify-content:center; gap:0.25rem; padding:0.38rem 0.55rem; border-radius:8px; font-size:0.73rem; font-weight:600; cursor:pointer; background:rgba(148,163,184,0.14); border:1px solid rgba(148,163,184,0.35); color:#cbd5e1;">
+                                <i class="fa-solid fa-eye-slash"></i> Dismiss
+                            </button>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+
+        {% if is_paginated %}
+        <nav class="pagination">
+            {% if page_obj.has_previous %}
+            <a href="?page={{ page_obj.previous_page_number }}{% if query_params %}&{{ query_params }}{% endif %}"
+                class="page-link">&laquo; Previous</a>
+            {% endif %}
+            <span class="page-info">
+                Page <strong>{{ page_obj.number|intcomma }}</strong> of <strong>{{ paginator.num_pages|intcomma }}</strong>
+            </span>
+            {% if page_obj.has_next %}
+            <a href="?page={{ page_obj.next_page_number }}{% if query_params %}&{{ query_params }}{% endif %}"
+                class="page-link">Next &raquo;</a>
+            {% endif %}
+        </nav>
+        {% endif %}
+        {% else %}
+        <div class="empty-state">
+            <i class="fa-solid fa-circle-check" style="color:#4ade80;"></i>
+            <h2>No missing quarantined books!</h2>
+            <p>Every quarantined book either already has a valid copy in your library or has been dismissed.</p>
+        </div>
+        {% endif %}
+        {% elif items %}
         <div class="catalog-grid">
             {% for item in items %}
             <article class="media-card" id="card-{{ item.id }}" data-item-id="{{ item.id }}"
@@ -938,15 +1322,33 @@
                         title="Enriched book is missing cover artwork — click Find Cover to pick one">
                         <i class="fa-regular fa-image"></i> NO COVER
                     </span>
+                    {% elif item.cover_issue == 'generic' %}
+                    <span class="card-cover-issue-badge"
+                        style="position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(168,85,247,0.78); color:#d8b4fe; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Enriched book has a generic template/placeholder cover — click Find Cover to pick a cover or Keep Cover to dismiss">
+                        <i class="fa-solid fa-shapes"></i> GENERIC COVER
+                    </span>
                     {% elif item.cover_issue == 'text_only' %}
                     <span class="card-cover-issue-badge"
                         style="position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(245,158,11,0.75); color:#fcd34d; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
                         title="Enriched book cover appears to be a text-only title page — click Find Cover to pick a cover or Keep Cover to dismiss">
                         <i class="fa-solid fa-font"></i> TEXT COVER
                     </span>
+                    {% elif item.has_custom_cover %}
+                    <span class="card-cover-updated-badge"
+                        style="position:absolute; top:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(45,212,191,0.75); color:#5eead4; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Cover manually updated &amp; saved to BookDB">
+                        <i class="fa-solid fa-image"></i> COVER UPDATED
+                    </span>
                     {% endif %}
                     {% if item.amazon_ownership_info %}
-                    {% if item.amazon_ownership_info.item_type == 'AUDIBLE' %}
+                    {% if item.amazon_ownership_info.is_missing_owned %}
+                    <span
+                        style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(244,63,94,0.75); color:#fda4af; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="{{ item.amazon_ownership_info.badge_label }} (ASIN: {{ item.amazon_ownership_info.asin }})">
+                        <i class="fa-solid fa-ghost"></i> {{ item.amazon_ownership_info.short_badge }}
+                    </span>
+                    {% elif item.amazon_ownership_info.item_type == 'AUDIBLE' %}
                     <span
                         style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(192,132,252,0.65); color:#c084fc; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
                         title="{{ item.amazon_ownership_info.badge_label }} (ASIN: {{ item.amazon_ownership_info.asin }})">
@@ -969,6 +1371,58 @@
                             style="color:#f8fafc; margin-left:3px;">&middot; {{ item.amazon_ownership_info.percentage_read }}%</span>{% endif %}
                     </span>
                     {% endif %}
+                    {% elif item.publisher_ownership_info %}
+                    <span
+                        style="position:absolute; top:8px; left:8px; background:rgba(15,23,42,0.92); border:1px solid {% if item.publisher_ownership_info.is_missing_owned %}rgba(244,63,94,0.75){% elif item.publisher_ownership_info.source == 'SPRINGER' %}rgba(56,189,248,0.65){% else %}rgba(251,146,60,0.65){% endif %}; color:{% if item.publisher_ownership_info.is_missing_owned %}#fda4af{% elif item.publisher_ownership_info.source == 'SPRINGER' %}#38bdf8{% else %}#fb923c{% endif %}; font-size:0.68rem; font-weight:700; padding:0.18rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="{{ item.publisher_ownership_info.badge_label }}{% if item.publisher_ownership_info.isbn %} (ISBN: {{ item.publisher_ownership_info.isbn }}){% endif %}">
+                        <i
+                            class="fa-solid {% if item.publisher_ownership_info.is_missing_owned %}fa-ghost{% elif item.publisher_ownership_info.source == 'SPRINGER' %}fa-graduation-cap{% else %}fa-building-columns{% endif %}"></i>
+                        {{ item.publisher_ownership_info.short_badge }}
+                    </span>
+                    {% endif %}
+                    {% if item.amazon_ownership_info %}
+                    {% if item.amazon_ownership_info.has_local_file or item.files.all %}
+                    {% if item.latest_edition_info and item.latest_edition_info.has_newer %}
+                    <a href="?q={{ item.latest_edition_info.latest_search_q|urlencode }}"
+                        onclick="event.stopPropagation();"
+                        style="position:absolute; bottom:34px; right:8px; text-decoration:none; background:rgba(15,23,42,0.95); border:1px solid rgba(56,189,248,0.85); color:#38bdf8; font-size:0.65rem; font-weight:800; padding:0.16rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="A newer edition is in your library: {{ item.latest_edition_info.latest_title }} ({{ item.latest_edition_info.latest_label }}) — Click to view all editions">
+                        <i class="fa-solid fa-arrow-up-right-dots"></i> Latest: {{ item.latest_edition_info.latest_short_label }} ↗
+                    </a>
+                    {% elif item.amazon_ownership_info.nas_match_kind == 'newer_edition' %}
+                    <span
+                        style="position:absolute; bottom:34px; right:8px; background:rgba(15,23,42,0.94); border:1px solid rgba(56,189,248,0.78); color:#38bdf8; font-size:0.65rem; font-weight:800; padding:0.16rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Newer / Updated Edition on NAS: {{ item.amazon_ownership_info.nas_matched_title|default:item.title }} (Amazon Purchase: {{ item.amazon_ownership_info.title }})">
+                        <i class="fa-solid fa-sparkles"></i> Latest: {{ item.amazon_ownership_info.nas_edition_label|default:'Newer Ed.' }}
+                    </span>
+                    {% elif selected_shelf in 'amazon,kindle_plus,amazon_bookmarked,audible,amazon_matched,amazon_all' %}
+                    <span
+                        style="position:absolute; bottom:34px; right:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(74,222,128,0.68); color:#4ade80; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Matched to physical book on NAS ({{ item.files.all|length }} file(s))">
+                        <i class="fa-solid fa-hard-drive"></i> On NAS{% if item.amazon_ownership_info.nas_edition_label %} &middot; {{ item.amazon_ownership_info.nas_edition_label }}{% endif %}
+                    </span>
+                    {% endif %}
+                    {% elif selected_shelf in 'amazon,kindle_plus,amazon_bookmarked,audible,amazon_only,amazon_all' %}
+                    <span
+                        style="position:absolute; bottom:34px; right:8px; background:rgba(15,23,42,0.92); border:1px solid rgba(251,146,60,0.65); color:#fdba74; font-size:0.65rem; font-weight:700; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Amazon Cloud Only — No local copy on NAS yet">
+                        <i class="fa-solid fa-cloud"></i> Amazon Cloud Only
+                    </span>
+                    {% endif %}
+                    {% elif item.latest_edition_info and item.latest_edition_info.has_newer %}
+                    <a href="?q={{ item.latest_edition_info.latest_search_q|urlencode }}"
+                        onclick="event.stopPropagation();"
+                        style="position:absolute; bottom:34px; right:8px; text-decoration:none; background:rgba(15,23,42,0.95); border:1px solid rgba(56,189,248,0.85); color:#38bdf8; font-size:0.65rem; font-weight:800; padding:0.16rem 0.5rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="Newer edition in MyLibrary: {{ item.latest_edition_info.latest_title }} ({{ item.latest_edition_info.latest_label }}) — Click to view all editions">
+                        <i class="fa-solid fa-arrow-up-right-dots"></i> Latest: {{ item.latest_edition_info.latest_short_label }} ↗
+                    </a>
+                    {% elif item.latest_edition_info and item.latest_edition_info.is_latest %}
+                    <a href="?q={{ item.latest_edition_info.latest_search_q|urlencode }}"
+                        onclick="event.stopPropagation();"
+                        style="position:absolute; bottom:34px; right:8px; text-decoration:none; background:rgba(15,23,42,0.94); border:1px solid rgba(74,222,128,0.75); color:#4ade80; font-size:0.65rem; font-weight:800; padding:0.15rem 0.48rem; border-radius:999px; backdrop-filter:blur(4px);"
+                        title="This is the latest edition in your library ({{ item.latest_edition_info.latest_label }}) — Click to see all editions">
+                        <i class="fa-solid fa-sparkles"></i> Latest: {{ item.latest_edition_info.latest_short_label }}
+                    </a>
                     {% endif %}
                     {% if item.moon_bookmark_info %}
                     <span
@@ -1012,6 +1466,27 @@
                             {% else %}
                             <span class="pubdate-pill no-date" title="Publication date not set">
                                 <i class="fa-regular fa-calendar"></i> &mdash;
+                            </span>
+                            {% endif %}
+                            {% if item.latest_edition_info and item.latest_edition_info.has_newer %}
+                            <a href="?q={{ item.latest_edition_info.latest_search_q|urlencode }}"
+                                onclick="event.stopPropagation();" class="pubdate-pill"
+                                style="text-decoration:none; color:#38bdf8; border-color:rgba(56,189,248,0.55); background:rgba(56,189,248,0.16); font-weight:700;"
+                                title="{% if item.latest_edition_info.current_label %}This copy: {{ item.latest_edition_info.current_label }} — {% endif %}Newer edition in MyLibrary: {{ item.latest_edition_info.latest_title }} ({{ item.latest_edition_info.latest_label }}). Click to view all editions.">
+                                <i class="fa-solid fa-arrow-up-right-dots"></i> {% if item.edition_label %}{{ item.edition_label }} &rarr; {% endif %}Latest: {{ item.latest_edition_info.latest_label }}
+                            </a>
+                            {% elif item.latest_edition_info and item.latest_edition_info.is_latest %}
+                            <a href="?q={{ item.latest_edition_info.latest_search_q|urlencode }}"
+                                onclick="event.stopPropagation();" class="pubdate-pill"
+                                style="text-decoration:none; color:#4ade80; border-color:rgba(74,222,128,0.5); background:rgba(74,222,128,0.14); font-weight:700;"
+                                title="Latest edition in your library ({{ item.latest_edition_info.latest_label }}) — Click to compare all editions">
+                                <i class="fa-solid fa-check-double"></i> Latest: {{ item.latest_edition_info.latest_short_label }}
+                            </a>
+                            {% elif item.edition_label %}
+                            <span class="pubdate-pill"
+                                style="color:#cbd5e1; border-color:rgba(148,163,184,0.35); background:rgba(148,163,184,0.1);"
+                                title="Edition: {{ item.edition_label }}">
+                                <i class="fa-solid fa-layer-group"></i> {{ item.edition_label }}
                             </span>
                             {% endif %}
                             {% if item.top_folder %}
@@ -1074,7 +1549,7 @@
                             {% endif %}
                         </div>
 
-                        <p class="card-description">
+                        <p class="card-description" {% if item.description %}data-full-desc="{{ item.description|striptags }}"{% endif %}>
                             {% if item.description %}
                             {{ item.description|striptags }}
                             {% else %}
@@ -1179,6 +1654,33 @@
                                             class="{% if item.is_bad_metadata %}fa-solid{% else %}fa-regular{% endif %} fa-flag"></i>
                                     </button>
                                 </div>
+
+                                {% if selected_shelf == 'amazon_only' and item.item_type != 'AUDIBLE' and item.amazon_ownership_info.item_type != 'AUDIBLE' %}
+                                <div style="display:flex; gap:0.4rem; align-items:center; width:100%; flex-wrap:wrap;">
+                                    <button type="button" class="btn-send-single-kindle"
+                                        onclick="event.stopPropagation(); if(window.sendSingleCardToKindle) window.sendSingleCardToKindle(this);"
+                                        data-item-id="{{ item.id }}"
+                                        data-asin="{{ item.asin|default:item.amazon_ownership_info.asin|default:'' }}"
+                                        data-title="{{ item.title }}" data-authors="{{ item.author_list|join:', ' }}"
+                                        data-isbn="{{ item.isbn|default:'' }}"
+                                        data-origin-type="{{ item.amazon_ownership_info.origin_type|default:'Purchase' }}"
+                                        title="Deliver this Kindle book directly to the selected Kindle device"
+                                        style="flex:1; display:inline-flex; align-items:center; justify-content:center; gap:0.35rem; padding:0.4rem 0.5rem; border-radius:8px; font-size:0.73rem; font-weight:700; cursor:pointer; white-space:nowrap; background:rgba(251,146,60,0.18); border:1px solid rgba(251,146,60,0.52); color:#fdba74; transition:all 0.2s;">
+                                        <i class="fa-solid fa-paper-plane"></i> Send to Kindle
+                                    </button>
+                                    <a class="btn-annas-card-link"
+                                        href="https://annas-archive.pk/search?q={{ item.title|urlencode }}"
+                                        target="_blank" rel="noopener"
+                                        data-asin="{{ item.asin|default:item.amazon_ownership_info.asin|default:'' }}"
+                                        data-title="{{ item.title }}" data-authors="{{ item.author_list|join:', ' }}"
+                                        data-isbn="{{ item.isbn|default:'' }}"
+                                        title="Search or download this book on Anna's Archive"
+                                        style="display:inline-flex; align-items:center; justify-content:center; gap:0.3rem; padding:0.4rem 0.55rem; border-radius:8px; font-size:0.73rem; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:none; background:rgba(16,185,129,0.18); border:1px solid rgba(52,211,153,0.52); color:#6ee7b7; transition:all 0.2s;">
+                                        <i class="fa-solid fa-book-open"></i> <span class="annas-btn-label">Anna's
+                                            ↗</span>
+                                    </a>
+                                </div>
+                                {% endif %}
 
                                 <!-- Row 2: Enrichment & Magazine Actions -->
                                 {% if item.has_tomags_file %}
@@ -2207,8 +2709,7 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
 
 {% block extra_js %}
 <script>window.VX_UNLOCKED = {% if vx_unlocked %}true{% else %} false{% endif %};</script>
-<script src="{% static 'js/search.js' %}?v=20261114c"></script>
-<script src="{% static 'js/search.js' %}?v=20261115a"></script>
+<script src="{% static 'js/search.js' %}?v=20261124d"></script>
 <script>
     (function () {
         const BASE_PREFIX = window.location.pathname.startsWith('/mylibrary') ? '/mylibrary' : '';
@@ -2490,62 +2991,754 @@ python calibre_moon_sync.py pass2 --apply   # Replace Calibre books &amp; write 
                         st.style.display = 'block';
                         st.style.background = 'rgba(74,222,128,0.18)';
                         st.style.color = '#4ade80';
-                        st.textContent = `Moved ${filesCnt} file(s) across ${itemsCnt} item(s) to "${data.target_folder}". Reloading...`;
-                        st.textContent = `✓ Moved ${filesCnt} file(s) across ${itemsCnt} item(s) to "${finalFolder}".`;
+                        st.textContent = `✓ Moved ${filesCnt} file(s) across ${itemsCnt} item(s) to "${finalFolder}". Reloading...`;
                     }
                     setTimeout(() => {
+                        window.closeRetagModal();
                         window.location.reload();
                     }, 550);
-                    window.closeRetagModal();
-                }, 350);
-        })
-                .catch (err => {
-            if (btn) btn.disabled = false;
-            if (st) {
-                st.style.display = 'block';
-                st.style.background = 'rgba(239,68,68,0.18)';
-                st.style.color = '#fca5a5';
-                st.textContent = 'Network error: ' + err;
-            }
-        });
-    };
-
-    window.quickRetagItem = function (itemId, targetFolder, btnEl) {
-        if (!itemId || !targetFolder) return;
-        if (btnEl) {
-            btnEl.disabled = true;
-            btnEl.textContent = '...';
-        }
-        fetch(`${BASE_PREFIX}/api/retag-folder/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                item_ids: [itemId],
-                target_folder: targetFolder
-            })
-        })
-            .then(r => r.json())
-            .then(data => {
-                if (data && data.ok) {
-                    const card = document.getElementById(`card-${itemId}`);
-                    if (card) {
-                        card.style.opacity = '0.45';
-                        const lbl = card.querySelector('.card-folder-label');
-                        if (lbl) lbl.textContent = targetFolder;
+                })
+                .catch(err => {
+                    if (btn) btn.disabled = false;
+                    if (st) {
+                        st.style.display = 'block';
+                        st.style.background = 'rgba(239,68,68,0.18)';
+                        st.style.color = '#fca5a5';
+                        st.textContent = 'Network error: ' + err;
                     }
-                    if (btnEl) btnEl.textContent = '✓';
+                });
+        };
+
+        window.quickRetagItem = function (itemId, targetFolder, btnEl) {
+            if (!itemId || !targetFolder) return;
+            if (btnEl) {
+                btnEl.disabled = true;
+                btnEl.textContent = '...';
+            }
+            fetch(`${BASE_PREFIX}/api/retag-folder/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    item_ids: [itemId],
+                    target_folder: targetFolder
+                })
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data && data.ok) {
+                        const card = document.getElementById(`card-${itemId}`);
+                        if (card) {
+                            card.style.opacity = '0.45';
+                            const lbl = card.querySelector('.card-folder-label');
+                            if (lbl) lbl.textContent = targetFolder;
+                        }
+                        if (btnEl) btnEl.textContent = '✓';
+                    } else if (btnEl) {
+                        btnEl.disabled = false;
+                        btnEl.textContent = 'Err';
+                    }
+                })
+                .catch(() => {
+                    if (btnEl) {
+                        btnEl.disabled = false;
+                        btnEl.textContent = 'Err';
+                    }
+                });
+        };
+
+        // 5. Send to Kindle & Empty Kindle PC Downloads (Amazon Only / Not on NAS shelf)
+        let _cachedMycdCsrfToken = '';
+        const KINDLE_DEVICE_STORAGE_KEY = 'mylibrary_selected_kindle_device_id';
+        const ACTIVE_KINDLE_DEVICE_LABELS = {
+            'A101329625FBGFO0QECXO': "JAMES's Kindle for Windows (Default - PC)",
+            'A015285311F3W73S7EA31': "Jimmy's Tab S11",
+            'A018607231PVOX7INFXHE': "Jimmy's Galaxy S25 Ultra",
+            'A0440102192GKG2EE19T3': "Jimmy's Tab S8 Ultra",
+            'A02063483UBXG3PKOGGOX': "Jimmy's Tab A8",
+            'A05507311ZARZZO8ORYGN': "JAMES's Kindle for Web"
+        };
+        const ACTIVE_KINDLE_KEEP_IDS = Object.keys(ACTIVE_KINDLE_DEVICE_LABELS);
+        const ACTIVE_KINDLE_KEEP_NAMES = [
+            "JAMES's Kindle for Windows",
+            "Jimmy's Tab S11",
+            "Jimmy's Galaxy S25 Ultra",
+            "Jimmy's Tab S8 Ultra",
+            "Jimmy's Tab A8",
+            "JAMES's Kindle for Web",
+            "PC",
+            "Tab S11",
+            "Galaxy S25 Ultra",
+            "Tab S8 Ultra",
+            "Tab A8",
+            "Cloud Reader"
+        ];
+
+        function formatKindleDeviceOptionLabel(d) {
+            if (!d) return 'Kindle Device';
+            if (d.deviceAccountID && ACTIVE_KINDLE_DEVICE_LABELS[d.deviceAccountID]) {
+                return ACTIVE_KINDLE_DEVICE_LABELS[d.deviceAccountID];
+            }
+            const dn = (d.deviceName || '').trim();
+            if (dn === "JAMES's Kindle for Windows" || /kindle for windows/i.test(dn)) return "JAMES's Kindle for Windows (Default - PC)";
+            if (/tab a8|tab s11|galaxy s25|tab s8|kindle for web/i.test(dn)) return dn;
+            return `${dn} (${d.deviceTypeString || d.deviceFamily || 'Kindle'})`;
+        }
+
+        function getSelectedKindleDevice() {
+            const sel = document.getElementById('kindle-target-device-select');
+            if (!sel) {
+                return {
+                    deviceAccountID: 'A101329625FBGFO0QECXO',
+                    deviceSerialNumber: 'C36839180E3E566C07FCEF7DEFD96D32',
+                    deviceName: "JAMES's Kindle for Windows"
+                };
+            }
+            const opt = sel.options[sel.selectedIndex] || sel.options[0];
+            return {
+                deviceAccountID: opt ? opt.value : 'A101329625FBGFO0QECXO',
+                deviceSerialNumber: (opt && opt.getAttribute('data-dsn')) || 'C36839180E3E566C07FCEF7DEFD96D32',
+                deviceName: opt ? opt.textContent.replace(/\s*\(Default.*?\)\s*$/i, '').trim() : "JAMES's Kindle for Windows"
+            };
+        }
+
+        window.onKindleTargetDeviceChange = function (selEl) {
+            if (!selEl) return;
+            try {
+                localStorage.setItem(KINDLE_DEVICE_STORAGE_KEY, selEl.value);
+            } catch (_) { }
+        };
+
+        (function restoreSavedKindleDevice() {
+            const sel = document.getElementById('kindle-target-device-select');
+            if (!sel) return;
+            try {
+                const saved = localStorage.getItem(KINDLE_DEVICE_STORAGE_KEY);
+                if (saved && Array.from(sel.options).some(o => o.value === saved)) {
+                    sel.value = saved;
+                }
+            } catch (_) { }
+        })();
+
+        function showKindleStatus(msgHtml, borderColor, actionsHtml) {
+            const bar = document.getElementById('kindle-delivery-status-bar');
+            const txt = document.getElementById('kindle-delivery-status-text');
+            const act = document.getElementById('kindle-delivery-status-actions');
+            if (!bar || !txt) return;
+            bar.style.display = 'flex';
+            bar.style.borderColor = borderColor || 'rgba(56,189,248,0.45)';
+            txt.innerHTML = msgHtml;
+            if (act) act.innerHTML = actionsHtml || '';
+        }
+
+        function sendExtensionBridgeRequest(action, payload, timeoutMs) {
+            return new Promise((resolve) => {
+                const reqId = 'kreq_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+                let done = false;
+                const timer = setTimeout(() => {
+                    if (done) return;
+                    done = true;
+                    window.removeEventListener('message', onMsg);
+                    resolve({
+                        ok: false,
+                        timeout: true,
+                        error: 'MyLibrary Chrome Extension did not respond. Make sure the MyLibrary Chrome Extension is reloaded in chrome://extensions and refresh this page.'
+                    });
+                }, timeoutMs || 15000);
+
+                function onMsg(ev) {
+                    if (!ev || !ev.data || ev.data.source !== 'MYLIBRARY_EXTENSION' || ev.data.reqId !== reqId) return;
+                    if (done) return;
+                    done = true;
+                    clearTimeout(timer);
+                    window.removeEventListener('message', onMsg);
+                    resolve(ev.data);
+                }
+                window.addEventListener('message', onMsg);
+                window.postMessage({
+                    source: 'MYLIBRARY_WEB_UI',
+                    reqId,
+                    action,
+                    ...(payload || {})
+                }, '*');
+            });
+        }
+
+        window.refreshKindleDevicesFromAmazon = async function (btnEl) {
+            if (btnEl) btnEl.disabled = true;
+            showKindleStatus('<i class="fa-solid fa-spinner fa-spin" style="color:#38bdf8;"></i> Fetching your registered Kindle devices from Amazon Content &amp; Devices...', 'rgba(56,189,248,0.5)');
+            const resp = await sendExtensionBridgeRequest('FETCH_MYCD_DEVICES', { csrfToken: _cachedMycdCsrfToken }, 15000);
+            if (btnEl) btnEl.disabled = false;
+            if (!resp || !resp.ok || !Array.isArray(resp.devices)) {
+                const errMsg = (resp && resp.error) || 'Could not fetch devices from Amazon.';
+                showKindleStatus(
+                    `<i class="fa-solid fa-triangle-exclamation" style="color:#fbbf24;"></i> ${errMsg}`,
+                    'rgba(251,191,36,0.55)',
+                    `<a href="https://www.amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/" target="_blank" style="color:#38bdf8; font-weight:700; text-decoration:none;">Open Amazon MYCD ↗</a>`
+                );
+                return;
+            }
+            if (resp.csrfToken) _cachedMycdCsrfToken = resp.csrfToken;
+            const sel = document.getElementById('kindle-target-device-select');
+            const currentVal = sel ? sel.value : 'A101329625FBGFO0QECXO';
+            if (sel && resp.devices.length > 0) {
+                sel.innerHTML = '';
+                resp.devices.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d.deviceAccountID;
+                    opt.setAttribute('data-dsn', d.deviceSerialNumber || '');
+                    const isWin = d.deviceAccountID === 'A101329625FBGFO0QECXO' || /Kindle for Windows/i.test(d.deviceName || '');
+                    opt.textContent = formatKindleDeviceOptionLabel(d);
+                    if (d.deviceAccountID === currentVal || (isWin && !currentVal)) {
+                        opt.selected = true;
+                    }
+                    sel.appendChild(opt);
+                });
+            }
+            fetch(`${BASE_PREFIX}/api/kindle-pc/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'save_devices', devices: resp.devices })
+            }).catch(() => { });
+            showKindleStatus(`<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Loaded <strong>${resp.devices.length}</strong> registered Kindle device(s) from your Amazon account.`, 'rgba(74,222,128,0.5)');
+        };
+
+        window.sendSingleCardToKindle = async function (btnEl) {
+            if (!btnEl) return;
+            const asin = (btnEl.getAttribute('data-asin') || '').trim();
+            const title = (btnEl.getAttribute('data-title') || 'Untitled').trim();
+            const originType = (btnEl.getAttribute('data-origin-type') || 'Purchase').trim();
+            if (!asin) {
+                showKindleStatus('<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> This item does not have an Amazon ASIN.', 'rgba(248,113,113,0.55)');
+                return;
+            }
+            const dev = getSelectedKindleDevice();
+            const origHtml = btnEl.innerHTML;
+            btnEl.disabled = true;
+            btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
+            showKindleStatus(`<i class="fa-solid fa-spinner fa-spin" style="color:#fb923c;"></i> Sending <strong>${title}</strong> (<code>${asin}</code>) to <strong>${dev.deviceName}</strong>...`, 'rgba(251,146,60,0.5)');
+
+            const resp = await sendExtensionBridgeRequest('DELIVER_TO_KINDLE_BATCH', {
+                csrfToken: _cachedMycdCsrfToken,
+                deviceAccountID: dev.deviceAccountID,
+                deviceSerialNumber: dev.deviceSerialNumber,
+                items: [{ asin, title, originType }]
+            }, 18000);
+
+            if (resp && resp.csrfToken) _cachedMycdCsrfToken = resp.csrfToken;
+            if (resp && resp.ok) {
+                btnEl.innerHTML = '<i class="fa-solid fa-check"></i> Sent to Kindle';
+                btnEl.style.background = 'rgba(74,222,128,0.2)';
+                btnEl.style.borderColor = 'rgba(74,222,128,0.55)';
+                btnEl.style.color = '#4ade80';
+                showKindleStatus(`<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Delivered <strong>${title}</strong> to <strong>${dev.deviceName}</strong>!`, 'rgba(74,222,128,0.55)');
+            } else {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origHtml;
+                const errMsg = (resp && resp.error) || 'Amazon MYCD delivery failed.';
+                showKindleStatus(
+                    `<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> Failed to send <strong>${title}</strong>: ${errMsg}`,
+                    'rgba(248,113,113,0.55)',
+                    `<a href="https://www.amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/" target="_blank" style="color:#38bdf8; font-weight:700; text-decoration:none;">Sign in to Amazon MYCD ↗</a>`
+                );
+            }
+        };
+
+        window.sendBooksToKindle = async function (scope, btnEl) {
+            const dev = getSelectedKindleDevice();
+            let booksToDeliver = [];
+
+            if (scope === 'page') {
+                const cardBtns = Array.from(document.querySelectorAll('button.btn-send-single-kindle[data-asin]'));
+                cardBtns.forEach(b => {
+                    const asin = (b.getAttribute('data-asin') || '').trim();
+                    if (asin) {
+                        booksToDeliver.push({
+                            asin,
+                            title: b.getAttribute('data-title') || 'Untitled',
+                            originType: b.getAttribute('data-origin-type') || 'Purchase',
+                            btnEl: b
+                        });
+                    }
+                });
+            } else {
+                showKindleStatus('<i class="fa-solid fa-spinner fa-spin" style="color:#fb923c;"></i> Loading all Amazon Only (Not on NAS) Kindle books...', 'rgba(251,146,60,0.5)');
+                try {
+                    const r = await fetch(`${BASE_PREFIX}/api/kindle-pc/`);
+                    const d = await r.json();
+                    if (d && Array.isArray(d.missing_kindle)) {
+                        booksToDeliver = d.missing_kindle;
+                    }
+                } catch (e) {
+                    showKindleStatus(`<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> Could not load missing Kindle list: ${e}`, 'rgba(248,113,113,0.55)');
+                    return;
+                }
+            }
+
+            if (booksToDeliver.length === 0) {
+                showKindleStatus('<i class="fa-solid fa-circle-info" style="color:#38bdf8;"></i> No eligible Kindle eBooks found to send.', 'rgba(56,189,248,0.5)');
+                return;
+            }
+
+            if (scope === 'all_missing' && !window.confirm(`Send all ${booksToDeliver.length} Amazon-Only Kindle books to "${dev.deviceName}"?`)) {
+                showKindleStatus('Cancelled.', 'rgba(148,163,184,0.35)');
+                return;
+            }
+
+            const origBtnHtml = btnEl ? btnEl.innerHTML : '';
+            if (btnEl) btnEl.disabled = true;
+
+            const batchSize = 10;
+            let sentCount = 0;
+            let failCount = 0;
+
+            for (let i = 0; i < booksToDeliver.length; i += batchSize) {
+                const batch = booksToDeliver.slice(i, i + batchSize);
+                showKindleStatus(
+                    `<i class="fa-solid fa-spinner fa-spin" style="color:#fb923c;"></i> Sending batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(booksToDeliver.length / batchSize)} (${sentCount}/${booksToDeliver.length} delivered) to <strong>${dev.deviceName}</strong>...`,
+                    'rgba(251,146,60,0.55)'
+                );
+                const resp = await sendExtensionBridgeRequest('DELIVER_TO_KINDLE_BATCH', {
+                    csrfToken: _cachedMycdCsrfToken,
+                    deviceAccountID: dev.deviceAccountID,
+                    deviceSerialNumber: dev.deviceSerialNumber,
+                    items: batch.map(x => ({ asin: x.asin, title: x.title, originType: x.originType }))
+                }, 20000);
+
+                if (resp && resp.csrfToken) _cachedMycdCsrfToken = resp.csrfToken;
+                if (resp && (resp.timeout || resp.needSignIn)) {
+                    if (btnEl) {
+                        btnEl.disabled = false;
+                        btnEl.innerHTML = origBtnHtml;
+                    }
+                    showKindleStatus(
+                        `<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> ${resp.error || 'Cannot reach Amazon MYCD.'}`,
+                        'rgba(248,113,113,0.55)',
+                        `<a href="https://www.amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/" target="_blank" style="color:#38bdf8; font-weight:700; text-decoration:none;">Sign in to Amazon MYCD ↗</a>`
+                    );
+                    return;
+                }
+
+                if (resp && resp.ok) {
+                    sentCount += batch.length;
+                    batch.forEach(item => {
+                        if (item.btnEl) {
+                            item.btnEl.innerHTML = '<i class="fa-solid fa-check"></i> Sent';
+                            item.btnEl.style.background = 'rgba(74,222,128,0.2)';
+                            item.btnEl.style.borderColor = 'rgba(74,222,128,0.55)';
+                            item.btnEl.style.color = '#4ade80';
+                        }
+                    });
+                } else {
+                    for (const item of batch) {
+                        const sResp = await sendExtensionBridgeRequest('DELIVER_TO_KINDLE_BATCH', {
+                            csrfToken: _cachedMycdCsrfToken,
+                            deviceAccountID: dev.deviceAccountID,
+                            deviceSerialNumber: dev.deviceSerialNumber,
+                            items: [{ asin: item.asin, title: item.title, originType: item.originType }]
+                        }, 15000);
+                        if (sResp && sResp.csrfToken) _cachedMycdCsrfToken = sResp.csrfToken;
+                        if (sResp && sResp.ok) {
+                            sentCount += 1;
+                            if (item.btnEl) {
+                                item.btnEl.innerHTML = '<i class="fa-solid fa-check"></i> Sent';
+                                item.btnEl.style.background = 'rgba(74,222,128,0.2)';
+                                item.btnEl.style.borderColor = 'rgba(74,222,128,0.55)';
+                                item.btnEl.style.color = '#4ade80';
+                            }
+                        } else {
+                            failCount += 1;
+                        }
+                    }
+                }
+                await new Promise(r => setTimeout(r, 220));
+            }
+
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.innerHTML = origBtnHtml;
+            }
+            showKindleStatus(
+                `<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Finished! Triggered <strong>${sentCount}</strong> Kindle book(s) to <strong>${dev.deviceName}</strong>${failCount > 0 ? ` (${failCount} ineligible/failed)` : ''}.`,
+                'rgba(74,222,128,0.55)'
+            );
+        };
+
+        window.checkAllMissingOnAnnas = async function (btnEl) {
+            const links = Array.from(document.querySelectorAll('a.btn-annas-card-link'));
+            if (links.length === 0) {
+                showKindleStatus('<i class="fa-solid fa-circle-info" style="color:#38bdf8;"></i> No Kindle cards on this page to check.', 'rgba(56,189,248,0.5)');
+                return;
+            }
+            if (btnEl) btnEl.disabled = true;
+            let foundCount = 0;
+            let checkedCount = 0;
+            const foundSummaries = [];
+
+            for (const aEl of links) {
+                const title = (aEl.getAttribute('data-title') || '').trim();
+                const rawAuthors = (aEl.getAttribute('data-authors') || '').trim();
+                const firstAuthor = rawAuthors.split(/[:;,]/)[0].trim();
+                const asin = (aEl.getAttribute('data-asin') || '').trim();
+                const isbn = (aEl.getAttribute('data-isbn') || '').trim();
+                const baseTitle = title.split(/[:(\-–—]/)[0].trim();
+                const qClean = `${baseTitle.length >= 4 ? baseTitle : title} ${firstAuthor}`.trim();
+                aEl.href = `https://annas-archive.pk/search?q=${encodeURIComponent(qClean)}`;
+
+                const lbl = aEl.querySelector('.annas-btn-label');
+                if (lbl) lbl.textContent = 'Checking...';
+                showKindleStatus(
+                    `<i class="fa-solid fa-spinner fa-spin" style="color:#34d399;"></i> Checking Anna's Archive (${checkedCount + 1}/${links.length}): <strong>${baseTitle || title}</strong>...`,
+                    'rgba(52,211,153,0.55)'
+                );
+
+                const resp = await sendExtensionBridgeRequest('CHECK_ANNAS_SINGLE', {
+                    book: {
+                        title,
+                        base_title: baseTitle,
+                        author: firstAuthor,
+                        asin,
+                        isbn
+                    }
+                }, 15000);
+
+                checkedCount += 1;
+                if (resp && resp.needsTabSession) {
+                    if (lbl) lbl.textContent = "Anna's ↗";
+                    if (btnEl) btnEl.disabled = false;
+                    showKindleStatus(
+                        `<i class="fa-solid fa-shield-halved" style="color:#fbbf24;"></i> Anna's Archive requires an open browser tab session (Cloudflare protection). Click <strong>Open Anna's Archive Tab ↗</strong> once, then click <strong>Check All on Anna's Archive</strong> again.`,
+                        'rgba(251,191,36,0.55)',
+                        `<a href="https://annas-archive.pk" target="_blank" style="color:#34d399; font-weight:800; text-decoration:none;">Open Anna's Archive Tab ↗</a>`
+                    );
+                    return;
+                }
+                if (resp && resp.timeout) {
+                    if (lbl) lbl.textContent = "Anna's ↗";
+                    if (btnEl) btnEl.disabled = false;
+                    showKindleStatus(
+                        `<i class="fa-solid fa-triangle-exclamation" style="color:#fbbf24;"></i> Reload the MyLibrary Chrome Extension in <code>chrome://extensions</code> and refresh this page, or click the green <strong>Anna's ↗</strong> button on any card to open its search directly.`,
+                        'rgba(251,191,36,0.55)'
+                    );
+                    return;
+                }
+
+                if (resp && resp.found) {
+                    foundCount += 1;
+                    const fmts = Array.isArray(resp.formats) && resp.formats.length ? resp.formats.slice(0, 2).join('/') : 'Found';
+                    if (lbl) lbl.textContent = `✓ On Anna's (${fmts})`;
+                    aEl.style.background = 'rgba(16,185,129,0.32)';
+                    aEl.style.borderColor = '#10b981';
+                    aEl.style.color = '#a7f3d0';
+                    if (resp.topMatch && resp.topMatch.url) {
+                        aEl.href = resp.topMatch.url;
+                    } else if (resp.searchUrl) {
+                        aEl.href = resp.searchUrl;
+                    }
+                    foundSummaries.push(`<strong>${baseTitle || title}</strong> (${fmts})`);
+                } else {
+                    if (lbl) lbl.textContent = 'Not Found ↗';
+                    aEl.style.background = 'rgba(148,163,184,0.12)';
+                    aEl.style.borderColor = 'rgba(148,163,184,0.35)';
+                    aEl.style.color = '#94a3b8';
+                    if (resp && resp.searchUrl) aEl.href = resp.searchUrl;
+                }
+            }
+
+            if (btnEl) btnEl.disabled = false;
+            showKindleStatus(
+                `<i class="fa-solid fa-circle-check" style="color:#34d399;"></i> Found <strong>${foundCount} of ${checkedCount}</strong> remaining Amazon books on Anna's Archive!${foundSummaries.length ? ' — ' + foundSummaries.join(', ') : ''}`,
+                'rgba(52,211,153,0.55)'
+            );
+        };
+
+        let _switchedPollTimer = null;
+
+        function renderSwitchedBatchBanner(st) {
+            const banner = document.getElementById('switched-batch-banner');
+            const btn = document.getElementById('btn-fix-switched-nomatch');
+            if (!banner) return;
+            if (!st || (!st.running && !st.finished && !(st.checked > 0))) {
+                banner.style.display = 'none';
+                return;
+            }
+            banner.style.display = 'block';
+            const checked = Number(st.checked || 0);
+            const total = Number(st.candidates_total || 0);
+            const fixed = Number(st.dry_run ? (st.matched_count || 0) : (st.fixed_count || 0));
+            const pct = total > 0 ? Math.min(100, Math.round((checked / total) * 100)) : 0;
+            const fixes = Array.isArray(st.recent_fixes) ? st.recent_fixes.slice(0, 5) : [];
+            const fixesHtml = fixes.length
+                ? `<div style="margin-top:0.4rem; font-size:0.73rem; color:#cbd5e1; display:flex; flex-wrap:wrap; gap:0.35rem;">` +
+                  fixes.map(fx => `<span style="background:rgba(16,185,129,0.16); border:1px solid rgba(52,211,153,0.4); border-radius:6px; padding:0.1rem 0.45rem; color:#a7f3d0;">✓ <strong>${(fx.new_title || '').replace(/</g, '&lt;')}</strong> by ${(fx.new_authors || '').replace(/</g, '&lt;')}</span>`).join('') +
+                  `</div>`
+                : '';
+
+            if (st.running) {
+                if (btn) {
+                    btn.disabled = true;
+                    btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Checking (${checked.toLocaleString()}/${total.toLocaleString()} • Fixed ${fixed.toLocaleString()})</span>`;
+                }
+                banner.innerHTML = `
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:0.6rem; flex-wrap:wrap;">
+                        <div>
+                            <i class="fa-solid fa-spinner fa-spin" style="color:#34d399;"></i>
+                            <strong>Switched Title/Author Batch Running:</strong>
+                            Checked <strong>${checked.toLocaleString()}</strong> of <strong>${total.toLocaleString()}</strong> candidate(s) (${pct}%) &bull;
+                            <span style="color:#4ade80; font-weight:700;">${st.dry_run ? 'Matched' : 'Fixed &amp; Enriched'}: ${fixed.toLocaleString()}</span>
+                            ${st.current_item ? `<span style="color:#94a3b8; margin-left:0.4rem;">(${String(st.current_item).replace(/</g, '&lt;')})</span>` : ''}
+                        </div>
+                        <button type="button" onclick="window.stopSwitchedNoMatchBatch()"
+                            style="background:rgba(239,68,68,0.2); border:1px solid rgba(239,68,68,0.55); color:#fca5a5; border-radius:7px; padding:0.2rem 0.58rem; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                            <i class="fa-solid fa-stop"></i> Stop
+                        </button>
+                    </div>
+                    ${fixesHtml}
+                `;
+            } else {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = `<i class="fa-solid fa-right-left"></i> <span>Check &amp; Fix Switched</span>`;
+                }
+                banner.innerHTML = `
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:0.6rem; flex-wrap:wrap;">
+                        <div>
+                            <i class="fa-solid fa-circle-check" style="color:#4ade80;"></i>
+                            <strong>Switched Title/Author Batch ${st.stop_requested ? 'Stopped' : 'Complete'}:</strong>
+                            Checked <strong>${checked.toLocaleString()}</strong> / <strong>${total.toLocaleString()}</strong> candidate(s) &bull;
+                            <span style="color:#4ade80; font-weight:700;">${st.dry_run ? 'Matched' : 'Fixed &amp; Enriched'}: ${fixed.toLocaleString()}</span>
+                            ${st.error ? `<span style="color:#f87171; margin-left:0.4rem;">(${String(st.error).replace(/</g, '&lt;')})</span>` : ''}
+                        </div>
+                        <button type="button" onclick="window.location.reload()"
+                            style="background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.55); color:#7dd3fc; border-radius:7px; padding:0.2rem 0.58rem; font-size:0.72rem; font-weight:700; cursor:pointer;">
+                            <i class="fa-solid fa-arrows-rotate"></i> Refresh Shelf
+                        </button>
+                    </div>
+                    ${fixesHtml}
+                `;
+            }
+        }
+
+        async function pollSwitchedNoMatchBatch() {
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/enrich/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'fix_switched_status' })
+                });
+                const st = await r.json();
+                renderSwitchedBatchBanner(st);
+                if (st && st.running) {
+                    if (_switchedPollTimer) clearTimeout(_switchedPollTimer);
+                    _switchedPollTimer = setTimeout(pollSwitchedNoMatchBatch, 2000);
+                }
+            } catch (_) { }
+        }
+
+        window.startSwitchedNoMatchBatch = async function (dryRun) {
+            const btn = document.getElementById('btn-fix-switched-nomatch');
+            if (btn) btn.disabled = true;
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/enrich/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'batch_fix_switched', sub_action: 'start', dry_run: Boolean(dryRun) })
+                });
+                const st = await r.json();
+                renderSwitchedBatchBanner(st);
+                if (st && st.running) {
+                    if (_switchedPollTimer) clearTimeout(_switchedPollTimer);
+                    _switchedPollTimer = setTimeout(pollSwitchedNoMatchBatch, 1500);
+                }
+            } catch (err) {
+                if (btn) btn.disabled = false;
+            }
+        };
+
+        window.stopSwitchedNoMatchBatch = async function () {
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/enrich/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'stop_fix_switched' })
+                });
+                const st = await r.json();
+                renderSwitchedBatchBanner(st);
+            } catch (_) { }
+        };
+
+        if (document.getElementById('btn-fix-switched-nomatch')) {
+            setTimeout(pollSwitchedNoMatchBatch, 300);
+        }
+
+        window.processToBooksNow = async function (btnEl) {
+            if (btnEl) btnEl.disabled = true;
+            showKindleStatus('<i class="fa-solid fa-spinner fa-spin" style="color:#38bdf8;"></i> Ingesting books in <code>/toBooks</code> and relinking against Amazon library (including newer editions)...', 'rgba(56,189,248,0.55)');
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/kindle-pc/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'ingest_tobooks' })
+                });
+                const data = await r.json();
+                if (btnEl) btnEl.disabled = false;
+                if (data && data.ok) {
+                    const ing = data.ingest || {};
+                    const cnts = data.counts || {};
+                    showKindleStatus(
+                        `<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Processed <strong>${ing.processed_count || 0}</strong> file(s) from <code>/toBooks</code>! Matched to NAS: <strong>${cnts.amazon_matched || 0}</strong> (Amazon Only remaining: <strong>${cnts.amazon_only || 0}</strong>). Reloading...`,
+                        'rgba(74,222,128,0.55)'
+                    );
+                    setTimeout(() => window.location.reload(), 900);
+                } else {
+                    showKindleStatus(`<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> ${(data && data.error) || 'Failed to ingest /toBooks.'}`, 'rgba(248,113,113,0.55)');
+                }
+            } catch (err) {
+                if (btnEl) btnEl.disabled = false;
+                showKindleStatus(`<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> Error: ${err}`, 'rgba(248,113,113,0.55)');
+            }
+        };
+
+        window.toggleDismissQuarantined = async function (quarKey, dismiss, btnEl) {
+            if (!quarKey) return;
+            if (btnEl) btnEl.disabled = true;
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/quarantined-missing/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: dismiss ? 'dismiss' : 'restore',
+                        quar_key: quarKey
+                    })
+                });
+                const data = await r.json();
+                if (data && data.ok) {
+                    const card = btnEl ? btnEl.closest('article.media-card') : null;
+                    if (card) {
+                        card.style.transition = 'opacity 0.22s ease, transform 0.22s ease';
+                        card.style.opacity = '0';
+                        card.style.transform = 'scale(0.96)';
+                        setTimeout(() => card.remove(), 230);
+                    }
+                    const sideCnt = document.getElementById('sidebar-quarantined-missing-count');
+                    if (sideCnt && data.counts && typeof data.counts.missing === 'number') {
+                        sideCnt.textContent = data.counts.missing.toLocaleString();
+                    }
                 } else if (btnEl) {
                     btnEl.disabled = false;
-                    btnEl.textContent = 'Err';
                 }
-            })
-            .catch(() => {
-                if (btnEl) {
-                    btnEl.disabled = false;
-                    btnEl.textContent = 'Err';
+            } catch (_) {
+                if (btnEl) btnEl.disabled = false;
+            }
+        };
+
+        window.emptyKindlePCDownloads = async function (btnEl) {
+            if (btnEl) btnEl.disabled = true;
+            showKindleStatus('<i class="fa-solid fa-spinner fa-spin" style="color:#f43f5e;"></i> Emptying Kindle for Windows downloaded books (Classic\\Content &amp; book_asset.db)...', 'rgba(244,63,94,0.5)');
+            try {
+                const r = await fetch(`${BASE_PREFIX}/api/kindle-pc/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'empty_local', close_app: true })
+                });
+                const data = await r.json();
+                if (btnEl) btnEl.disabled = false;
+
+                if (data && data.ran_locally) {
+                    showKindleStatus(
+                        `<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Emptied <strong>${data.removed_folders}</strong> downloaded book folder(s) from Kindle for Windows and vacuumed <code>book_asset.db</code> (${data.remaining_books_in_db} remaining)!`,
+                        'rgba(74,222,128,0.55)'
+                    );
+                    return;
                 }
-            });
-    };
-    }) ();
+
+                const psCmd = (data && data.powershell_empty_cmd) || '';
+                let copied = false;
+                if (psCmd && navigator.clipboard && navigator.clipboard.writeText) {
+                    try {
+                        await navigator.clipboard.writeText(psCmd);
+                        copied = true;
+                    } catch (_) { }
+                }
+                window._lastEmptyKindlePsCmd = psCmd;
+                showKindleStatus(
+                    `<i class="fa-solid fa-terminal" style="color:#fda4af;"></i> <strong>Empty Kindle for Windows PC Downloads:</strong> ${copied ? '<span style="color:#4ade80; font-weight:700;">(PowerShell command copied to clipboard!)</span> ' : ''}Run <code>.\\empty_kindle_pc.bat</code> in your repo or paste into PowerShell while Kindle is closed.`,
+                    'rgba(244,63,94,0.55)',
+                    `<button type="button" onclick="if(window._lastEmptyKindlePsCmd){navigator.clipboard.writeText(window._lastEmptyKindlePsCmd); this.textContent='✓ Copied Command';}" style="background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.55); color:#7dd3fc; border-radius:7px; padding:0.25rem 0.6rem; font-size:0.74rem; font-weight:700; cursor:pointer;">Copy PowerShell Command</button>
+                 <a href="${BASE_PREFIX}/api/kindle-pc/?download_script=1" style="background:rgba(244,63,94,0.22); border:1px solid rgba(244,63,94,0.55); color:#fda4af; border-radius:7px; padding:0.25rem 0.6rem; font-size:0.74rem; font-weight:700; text-decoration:none;">Download empty_kindle_pc.ps1</a>`
+                );
+            } catch (err) {
+                if (btnEl) btnEl.disabled = false;
+                showKindleStatus(`<i class="fa-solid fa-triangle-exclamation" style="color:#f87171;"></i> Error: ${err}`, 'rgba(248,113,113,0.55)');
+            }
+        };
+
+        window.deregisterOtherKindleDevices = async function (btnEl) {
+            const keepSummary = [
+                "• JAMES's Kindle for Windows (PC)",
+                "• JAMES's 18th Android Device (Tab S11)",
+                "• JAMES's 12th Android Device (Galaxy S25 Ultra)",
+                "• JAMES's 8th Android Device (Tab S8 Ultra)",
+                "• Jimmy's tablet (Tab A8)",
+                "• JAMES's Main (Cloud Reader)"
+            ].join('\n');
+            if (!window.confirm(`Deregister all old/unused Kindle devices on your Amazon account while KEEPING your 6 active devices:\n\n${keepSummary}\n\nProceed?`)) {
+                return;
+            }
+            if (btnEl) btnEl.disabled = true;
+            showKindleStatus(`<i class="fa-solid fa-spinner fa-spin" style="color:#c084fc;"></i> Deregistering all unused Kindle devices on Amazon (keeping your 6 active devices: PC, Tab S11, Galaxy S25 Ultra, Tab S8 Ultra, Tab A8, Cloud Reader)...`, 'rgba(168,85,247,0.55)');
+            const resp = await sendExtensionBridgeRequest('DEREGISTER_MYCD_DEVICES', {
+                csrfToken: _cachedMycdCsrfToken,
+                keepDeviceAccountIDs: ACTIVE_KINDLE_KEEP_IDS,
+                keepDeviceNames: ACTIVE_KINDLE_KEEP_NAMES
+            }, 45000);
+            if (btnEl) btnEl.disabled = false;
+            if (resp && resp.csrfToken) _cachedMycdCsrfToken = resp.csrfToken;
+            if (!resp || (!resp.ok && resp.needSignIn)) {
+                const errMsg = (resp && resp.error) || 'Please sign in to Amazon Content & Devices first.';
+                showKindleStatus(
+                    `<i class="fa-solid fa-triangle-exclamation" style="color:#fbbf24;"></i> ${errMsg}`,
+                    'rgba(251,191,36,0.55)',
+                    `<a href="https://www.amazon.com/hz/mycd/digital-console/alldevices" target="_blank" style="color:#38bdf8; font-weight:700; text-decoration:none;">Open Amazon Devices ↗</a>`
+                );
+                return;
+            }
+            if (Array.isArray(resp.devices) && resp.devices.length > 0) {
+                const sel = document.getElementById('kindle-target-device-select');
+                const curVal = sel ? sel.value : 'A101329625FBGFO0QECXO';
+                if (sel) {
+                    sel.innerHTML = '';
+                    resp.devices.forEach(d => {
+                        const opt = document.createElement('option');
+                        opt.value = d.deviceAccountID;
+                        opt.setAttribute('data-dsn', d.deviceSerialNumber || '');
+                        opt.textContent = formatKindleDeviceOptionLabel(d);
+                        if (d.deviceAccountID === curVal) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                }
+                fetch(`${BASE_PREFIX}/api/kindle-pc/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'save_devices', devices: resp.devices })
+                }).catch(() => { });
+            }
+            if (resp.deregisteredCount > 0) {
+                showKindleStatus(
+                    `<i class="fa-solid fa-circle-check" style="color:#4ade80;"></i> Deregistered <strong>${resp.deregisteredCount}</strong> old Kindle device(s)! Kept your 6 active devices registered (${(resp.devices || []).length} total remaining).`,
+                    'rgba(74,222,128,0.55)'
+                );
+            } else {
+                let sampleErr = '';
+                if (Array.isArray(resp.failed) && resp.failed.length > 0 && resp.failed[0].resp) {
+                    try { sampleErr = ' — Response: <code>' + JSON.stringify(resp.failed[0].resp).slice(0, 140) + '</code>'; } catch (_) { }
+                }
+                showKindleStatus(
+                    `<i class="fa-solid fa-circle-info" style="color:#fbbf24;"></i> Amazon MYCD returned (${resp.failedCount || 0} blocked)${sampleErr}. Reload the MyLibrary Chrome Extension (v1.3.9), open Amazon Devices, and click the purple <strong>Deregister 18 Unused Devices</strong> banner at the bottom-right of the Amazon Devices page.`,
+                    'rgba(251,191,36,0.55)',
+                    `<a href="https://www.amazon.com/hz/mycd/digital-console/alldevices" target="_blank" style="color:#38bdf8; font-weight:700; text-decoration:none;">Open Amazon Devices ↗</a>`
+                );
+            }
+        };
+    })();
 </script>
 {% endblock %}

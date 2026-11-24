@@ -89,6 +89,21 @@ def parse_and_normalize_authors(raw: str) -> list[str]:
     raw = (raw or '').strip()
     if not raw:
         return ['Unknown Author']
+    raw = re.sub(
+        r'\s*[\(\[]\s*(?:ed|eds|editor|editors|edited\s+by|compiled\s+by|comp|auth|author|tr|trans|translated\s+by|illustrator|illus)[_.:]?\s*[\)\]]',
+        ' ',
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = re.sub(
+        r'\s+[-–—]\s*(?:editor|editors|ed\.?|eds\.?|compiled\s+by|translated\s+by|illustrator)(?=\s*(?:,|;|&|$))',
+        '',
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = re.sub(r'\s+', ' ', raw).strip()
+    if not raw:
+        return ['Unknown Author']
 
     segments = []
     for semi in raw.split(';'):
@@ -325,6 +340,16 @@ def exclude_vx_restricted_queryset(qs, vx_unlocked: bool = False):
     """Strictly exclude restricted Archive-X items from a CatalogItem queryset unless session is unlocked."""
     if vx_unlocked:
         return qs
+    from django.db import connection
+    if connection.vendor != 'postgresql':
+        return qs.exclude(
+            id__in=FileLocation.objects.filter(
+                Q(file_path__istartswith='/xadult/')
+                | Q(file_path__istartswith='/xtoadult/')
+                | Q(file_path__istartswith='/volume1/jims_documents/media/xadult/')
+                | Q(file_path__istartswith='/volume1/jims_documents/media/xtoadult/')
+            ).values('catalog_item_id')
+        )
     from django.db.models.expressions import RawSQL
     return qs.exclude(
         id__in=RawSQL(
@@ -501,6 +526,8 @@ def _resolve_local_nas_path(file_path: str) -> str:
         ('/xAdult/', '/volume1/jims_documents/Media/xAdult/'),
         ('/volume1/jims_documents/Media/xtoAdult/', '/xtoAdult/'),
         ('/xtoAdult/', '/volume1/jims_documents/Media/xtoAdult/'),
+        ('/volume1/common/Media/Videos/', '/videos/'),
+        ('/videos/', '/volume1/common/Media/Videos/'),
     ]
     for src_prefix, dst_prefix in mappings:
         if fp.startswith(src_prefix):

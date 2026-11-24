@@ -469,6 +469,167 @@ async function checkBookOnAnnasArchive(book) {
 const packtSummaryCache = new Map();
 const packtAuthorCache = new Map();
 
+function normalizeOwnedTitleKey(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/\s*\[(?:video|ebook|print|book|audio)\]\s*$/i, '')
+    .replace(/[:\-–—].*$/, '')
+    .replace(/\(.*?\)|\[.*?\]/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getOwnedStore() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ ownedPublisherTitles: { items: {} } }, (res) => {
+      const store = (res && res.ownedPublisherTitles) || { items: {} };
+      if (!store.items || typeof store.items !== 'object') store.items = {};
+      resolve(store);
+    });
+  });
+}
+
+function saveOwnedStore(store) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ ownedPublisherTitles: store }, () => resolve());
+  });
+}
+
+async function importOwnedPublisherTitles(source, rawBooks) {
+  const store = await getOwnedStore();
+  const srcName = String(source || 'Packt').trim();
+  const pubSource = /springer/i.test(srcName) ? 'SPRINGER' : 'PACKT';
+  let added = 0;
+  let updated = 0;
+
+  const enrichedList = await Promise.all(
+    (Array.isArray(rawBooks) ? rawBooks : []).map((b) =>
+      enrichPacktBookIfNeeded({ ...b, wishlist_name: srcName })
+    )
+  );
+
+  const serverPayloadItems = [];
+
+  for (const b of enrichedList) {
+    if (!b) continue;
+    const rawIsbn = String(b.isbn || b.isbnDigits || b.primary_isbn || '').replace(/[^0-9Xx]/g, '').toUpperCase();
+    const isbn13 = rawIsbn.length === 10 ? isbn10ToIsbn13(rawIsbn) : (rawIsbn.length === 13 ? rawIsbn : '');
+    const isbn10 = isbn13 ? isbn13ToIsbn10(isbn13) : (rawIsbn.length === 10 ? rawIsbn : '');
+    const rawTitle = String(b.title || '').replace(/\s+/g, ' ').trim();
+    const is_video = Boolean(b.is_video) || /\[video\]/i.test(rawTitle);
+    const title = rawTitle.replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '').trim();
+    const author = String(b.author || '').replace(/\s+/g, ' ').trim();
+    const pub_year = b.pub_year || null;
+
+    const primaryKey = isbn13 || isbn10 || (title ? `title:${normalizeOwnedTitleKey(title)}` : '');
+    if (!primaryKey) continue;
+
+    const existing = store.items[primaryKey];
+    const sources = new Set(existing && Array.isArray(existing.sources) ? existing.sources : []);
+    sources.add(srcName);
+
+    store.items[primaryKey] = {
+      key: primaryKey,
+      isbn13: isbn13 || (existing && existing.isbn13) || '',
+      isbn10: isbn10 || (existing && existing.isbn10) || '',
+      title: title || (existing && existing.title) || '',
+      normTitle: normalizeOwnedTitleKey(title || (existing && existing.title) || ''),
+      author: author || (existing && existing.author) || '',
+      pub_year: pub_year || (existing && existing.pub_year) || null,
+      is_video,
+      sources: Array.from(sources),
+      importedAt: new Date().toISOString()
+    };
+
+    serverPayloadItems.push({
+      source: pubSource,
+      isbn: isbn13 || isbn10 || '',
+      title: title || (existing && existing.title) || 'Untitled',
+      authors: author || (existing && existing.author) || 'Unknown Author',
+      is_video,
+      cover_image_url: b.cover_image_url || '',
+      web_reader_url: b.web_reader_url || ''
+    });
+
+    if (existing) updated += 1;
+    else added += 1;
+  }
+
+  store.lastSyncAt = new Date().toISOString();
+  await saveOwnedStore(store);
+
+  // Also push to MyLibrary server (/api/sync/owned/) so it updates the Owned on Packt / Springer shelves in BookDB
+  let serverRes = null;
+  if (serverPayloadItems.length > 0) {
+    try {
+      const settings = await getSettings();
+      const syncedSources = Array.from(new Set(serverPayloadItems.map((x) => x.source)));
+      const resp = await fetch(`${settings.mylibraryBaseUrl}/api/sync/owned/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: serverPayloadItems,
+          synced_sources: syncedSources,
+          is_final_chunk: serverPayloadItems.length >= 20
+        })
+      });
+      if (resp.ok) {
+        serverRes = await resp.json();
+      }
+    } catch (_) { }
+  }
+
+  const allItems = Object.values(store.items);
+  const packtCount = allItems.filter((it) => Array.isArray(it.sources) && it.sources.some((s) => /packt/i.test(s))).length;
+  const springerCount = allItems.filter((it) => Array.isArray(it.sources) && it.sources.some((s) => /springer/i.test(s))).length;
+
+  return {
+    ok: true,
+    added,
+    updated,
+    totalCount: allItems.length,
+    packtCount: (serverRes && serverRes.packt_owned) || packtCount,
+    springerCount: (serverRes && serverRes.springer_owned) || springerCount,
+    serverSynced: Boolean(serverRes && serverRes.ok)
+  };
+}
+
+function matchOwnedSourcesForBook(book, resultObj, store) {
+  if (!store || !store.items) return [];
+  const itemsMap = store.items;
+  const matchedSources = new Set();
+
+  const candIsbns = collectBookIsbns({
+    ...(book || {}),
+    ...(resultObj || {})
+  });
+
+  for (const code of candIsbns) {
+    if (itemsMap[code] && Array.isArray(itemsMap[code].sources)) {
+      itemsMap[code].sources.forEach((s) => matchedSources.add(s));
+    }
+  }
+  if (matchedSources.size > 0) return Array.from(matchedSources);
+
+  const normBookTitle = normalizeOwnedTitleKey(
+    (resultObj && (resultObj.cleaned_title || resultObj.base_title)) || (book && book.title) || ''
+  );
+  if (!normBookTitle || normBookTitle.length < 4) return [];
+
+  const titleEntry = itemsMap[`title:${normBookTitle}`];
+  if (titleEntry && Array.isArray(titleEntry.sources)) {
+    titleEntry.sources.forEach((s) => matchedSources.add(s));
+  }
+
+  for (const it of Object.values(itemsMap)) {
+    if (it && it.normTitle && it.normTitle === normBookTitle && Array.isArray(it.sources)) {
+      it.sources.forEach((s) => matchedSources.add(s));
+    }
+  }
+  return Array.from(matchedSources);
+}
+
 async function enrichPacktBookIfNeeded(b) {
   if (!b || !/packt/i.test(b.wishlist_name || '')) return b;
   const isbn = String(b.isbn || '').replace(/[^0-9]/g, '');
@@ -540,28 +701,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const apiUrl = `${settings.mylibraryBaseUrl}/api/wishlist/check/`;
       try {
         const inputBooks = Array.isArray(msg.books) ? msg.books : [];
-        const enrichedBooks = await Promise.all(inputBooks.map((b) => enrichPacktBookIfNeeded(b)));
+        const [enrichedBooks, ownedStore] = await Promise.all([
+          Promise.all(inputBooks.map((b) => enrichPacktBookIfNeeded(b))),
+          getOwnedStore()
+        ]);
         const resp = await fetch(apiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ books: enrichedBooks })
         });
         const data = await resp.json();
+        if (data && Array.isArray(data.results)) {
+          data.results.forEach((r, idx) => {
+            const eb = enrichedBooks[idx] || inputBooks[idx] || {};
+            const localOwned = matchOwnedSourcesForBook(eb, r, ownedStore);
+            const serverOwned = Array.isArray(r.owned_sources) ? r.owned_sources : [];
+            r.owned_sources = Array.from(new Set([...serverOwned, ...localOwned]));
+          });
+        }
         sendResponse({
           ok: Boolean(data && data.ok),
           mylibraryBaseUrl: settings.mylibraryBaseUrl,
           annasBaseUrl: settings.annasBaseUrl,
+          enrichedBooks,
           data
         });
       } catch (err) {
+        const ownedStore = await getOwnedStore();
+        const inputBooks = Array.isArray(msg.books) ? msg.books : [];
+        const fallbackResults = inputBooks.map((b, idx) => ({
+          key: b.key || String(idx),
+          in_library: false,
+          error: err ? err.message : 'Could not reach MyLibrary server',
+          owned_sources: matchOwnedSourcesForBook(b, {}, ownedStore)
+        }));
         sendResponse({
           ok: false,
           mylibraryBaseUrl: settings.mylibraryBaseUrl,
           annasBaseUrl: settings.annasBaseUrl,
+          data: { ok: false, results: fallbackResults },
           error: err ? err.message : 'Could not reach MyLibrary server'
         });
       }
     })();
+    return true;
+  }
+
+  if (msg.type === 'IMPORT_OWNED_TITLES') {
+    importOwnedPublisherTitles(msg.source || 'Packt', msg.books || []).then((res) => sendResponse(res));
+    return true;
+  }
+
+  if (msg.type === 'GET_OWNED_STATS') {
+    getOwnedStore().then((store) => {
+      const allItems = Object.values(store.items || {});
+      const packtCount = allItems.filter((it) => Array.isArray(it.sources) && it.sources.some((s) => /packt/i.test(s))).length;
+      const springerCount = allItems.filter((it) => Array.isArray(it.sources) && it.sources.some((s) => /springer/i.test(s))).length;
+      sendResponse({
+        ok: true,
+        totalCount: allItems.length,
+        packtCount,
+        springerCount,
+        lastSyncAt: store.lastSyncAt || null,
+        items: allItems
+      });
+    });
+    return true;
+  }
+
+  if (msg.type === 'CLEAR_OWNED_TITLES') {
+    getOwnedStore().then(async (store) => {
+      const targetSource = msg.source ? String(msg.source).toLowerCase() : '';
+      if (!targetSource) {
+        await saveOwnedStore({ items: {}, lastSyncAt: null });
+      } else {
+        const nextItems = {};
+        for (const [k, it] of Object.entries(store.items || {})) {
+          const rem = (it.sources || []).filter((s) => !s.toLowerCase().includes(targetSource));
+          if (rem.length > 0) {
+            nextItems[k] = { ...it, sources: rem };
+          }
+        }
+        await saveOwnedStore({ items: nextItems, lastSyncAt: store.lastSyncAt });
+      }
+      sendResponse({ ok: true });
+    });
     return true;
   }
 
@@ -576,6 +800,356 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, tabId: tab ? tab.id : null });
       });
     });
+    return true;
+  }
+
+  if (msg.type === 'FETCH_MYCD_DEVICES' || msg.type === 'DELIVER_TO_KINDLE_BATCH' || msg.type === 'DEREGISTER_MYCD_DEVICES') {
+    (async () => {
+      try {
+        // Fetch https://www.amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/ with credentials to extract csrfToken
+        let csrfToken = msg.csrfToken || '';
+        if (!csrfToken) {
+          const pageResp = await fetch('https://www.amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/', {
+            method: 'GET',
+            credentials: 'include'
+          });
+          const html = await pageResp.text();
+          const m = html.match(/csrfToken\s*[=:]\s*["']([^"']+)["']/i);
+          if (m && m[1]) {
+            csrfToken = m[1];
+          }
+        }
+        if (!csrfToken) {
+          sendResponse({
+            ok: false,
+            needSignIn: true,
+            error: 'Not signed in to Amazon Content & Devices (csrfToken not found). Please sign in at amazon.com/hz/mycd/digital-console/contentlist/booksAll/dateDsc/.'
+          });
+          return;
+        }
+
+        const fetchLiveKindleDevices = async () => {
+          const body1 = new URLSearchParams({
+            activity: 'GetDevicesOverview',
+            activityInput: JSON.stringify({ surfaceType: 'Desktop' }),
+            clientId: 'MYCD_WebService',
+            csrfToken
+          });
+          const r1 = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+            body: body1.toString(),
+            credentials: 'include'
+          });
+          const j1 = await r1.json();
+          const rawDevs = ((j1.GetDevicesOverview || {}).deviceList || []);
+          return rawDevs
+            .filter((d) => ['KINDLE_APP', 'FIRE_TABLET', 'KINDLE'].includes(d.deviceFamily))
+            .map((d) => ({
+              deviceName: d.deviceName,
+              deviceAccountID: d.deviceAccountID,
+              deviceSerialNumber: d.deviceSerialNumber,
+              deviceTypeID: d.deviceTypeID,
+              deviceFamily: d.deviceFamily,
+              deviceTypeString: d.deviceTypeString,
+              customerID: d.customerID || '',
+              isDefault: d.deviceAccountID === 'A101329625FBGFO0QECXO' || /Kindle for Windows/i.test(d.deviceName || '')
+            }));
+        };
+
+        if (msg.type === 'FETCH_MYCD_DEVICES') {
+          const kindleDevs = await fetchLiveKindleDevices();
+          sendResponse({ ok: true, csrfToken, devices: kindleDevs });
+          return;
+        }
+
+        if (msg.type === 'DEREGISTER_MYCD_DEVICES') {
+          const defaultKeepIds = [
+            'A101329625FBGFO0QECXO', // JAMES's Kindle for Windows (PC) - _8YLYgU
+            'A015285311F3W73S7EA31', // JAMES's 18th Android Device (Tab S11) - _RfOPZk
+            'A018607231PVOX7INFXHE', // JAMES's 12th Android Device (Galaxy S25 Ultra) - _GNgiXh
+            'A0440102192GKG2EE19T3', // JAMES's 8th Android Device (Tab S8 Ultra) - _vlEewv
+            'A02063483UBXG3PKOGGOX', // Jimmy's tablet (Tab A8)
+            'A05507311ZARZZO8ORYGN'  // JAMES's Main (Cloud Reader)
+          ];
+          const defaultKeepNames = [
+            "JAMES's Kindle for Windows",
+            "Jimmy's Tab S11",
+            "Jimmy's Galaxy S25 Ultra",
+            "Jimmy's Tab S8 Ultra",
+            "Jimmy's Tab A8",
+            "JAMES's Kindle for Web",
+            "PC",
+            "Tab S11",
+            "Galaxy S25 Ultra",
+            "Tab S8 Ultra",
+            "Tab A8",
+            "Cloud Reader"
+          ];
+          const keepIdsSet = new Set(
+            Array.isArray(msg.keepDeviceAccountIDs) && msg.keepDeviceAccountIDs.length > 0
+              ? msg.keepDeviceAccountIDs
+              : defaultKeepIds
+          );
+          if (msg.keepDeviceAccountID) keepIdsSet.add(String(msg.keepDeviceAccountID).trim());
+          const keepNamesSet = new Set(
+            (Array.isArray(msg.keepDeviceNames) && msg.keepDeviceNames.length > 0 ? msg.keepDeviceNames : defaultKeepNames)
+              .map((n) => String(n || '').trim().toLowerCase())
+          );
+
+          const isProtectedDevice = (d) => {
+            if (!d) return false;
+            if (d.deviceAccountID && keepIdsSet.has(String(d.deviceAccountID).trim())) return true;
+            const dn = String(d.deviceName || '').trim().toLowerCase();
+            if (dn && keepNamesSet.has(dn)) return true;
+            const dtStr = String(d.deviceTypeString || '').trim().toLowerCase();
+            if (dtStr.includes('cloud reader')) return true;
+            return false;
+          };
+
+          const liveDevs = await fetchLiveKindleDevices();
+          const targets = Array.isArray(msg.devicesToRemove) && msg.devicesToRemove.length > 0
+            ? msg.devicesToRemove
+            : liveDevs.filter((d) => !isProtectedDevice(d));
+
+          const deregistered = [];
+          const failed = [];
+          const keptDevices = liveDevs.filter((d) => isProtectedDevice(d));
+
+          for (const d of targets) {
+            if (isProtectedDevice(d)) continue;
+            const dsn = String(d.deviceSerialNumber || '').trim();
+            const devType = String(d.deviceTypeID || '').trim();
+            const acctId = String(d.deviceAccountID || '').trim();
+            let success = false;
+            let lastResp = null;
+
+            // 1. Try MYCD digital-console/ajax DeregisterDevice activity
+            try {
+              const actInput = {
+                deviceSerialNumber: dsn,
+                deviceType: devType,
+                deviceTypeID: devType,
+                deviceAccountId: acctId,
+                deviceAccountID: acctId,
+                surfaceType: 'Desktop'
+              };
+              const b1 = new URLSearchParams({
+                activity: 'DeregisterDevice',
+                activityInput: JSON.stringify(actInput),
+                clientId: 'MYCD_WebService',
+                csrfToken
+              });
+              const r1 = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                body: b1.toString(),
+                credentials: 'include'
+              });
+              const j1 = await r1.json();
+              lastResp = j1;
+              const dd1 = j1.DeregisterDevice || j1;
+              if (r1.status === 200 && (dd1.success === true || j1.success === true)) {
+                success = true;
+              }
+            } catch (_) {}
+
+            // 2. Fallback: MYCD /hz/mycd/ajax param.DeregisterDevice or param.Deregister
+            if (!success) {
+              for (const paramKey of ['DeregisterDevice', 'Deregister']) {
+                try {
+                  const p2 = {
+                    param: {
+                      [paramKey]: {
+                        deviceSerialNumber: dsn,
+                        deviceType: devType,
+                        deviceTypeID: devType,
+                        deviceAccountId: acctId,
+                        deviceAccountID: acctId
+                      }
+                    }
+                  };
+                  const b2 = new URLSearchParams({
+                    clientId: 'MYCD_WebService',
+                    csrfToken,
+                    data: JSON.stringify(p2)
+                  });
+                  const r2 = await fetch('https://www.amazon.com/hz/mycd/ajax', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                    body: b2.toString(),
+                    credentials: 'include'
+                  });
+                  const j2 = await r2.json();
+                  lastResp = j2;
+                  const dd2 = j2[paramKey] || j2;
+                  if (r2.status === 200 && (dd2.success === true || j2.success === true)) {
+                    success = true;
+                    break;
+                  }
+                } catch (_) {}
+              }
+            }
+
+            if (success) {
+              deregistered.push(d);
+            } else {
+              failed.push({ device: d, resp: lastResp });
+            }
+          }
+
+          // Also remove delivered book downloads from the kept active devices (without deregistering them!)
+          let removedDownloadsCount = 0;
+          try {
+            const activeAccountIds = new Set(keptDevices.map((d) => String(d.deviceAccountID || '').trim()).filter(Boolean));
+            const activeDsns = keptDevices.map((d) => String(d.deviceSerialNumber || '').trim()).filter(Boolean);
+            if (activeAccountIds.size > 0) {
+              const ownBody = new URLSearchParams({
+                activity: 'GetContentOwnershipData',
+                activityInput: JSON.stringify({
+                  contentType: 'Ebook',
+                  contentCategoryReference: 'booksAll',
+                  itemStatusList: ['Active'],
+                  originTypeList: ['Purchase', 'KOLL', 'Ku', 'Prime', 'Pottermore', 'Sample', 'Comixology'],
+                  sortOrder: 'DESCENDING',
+                  sortIndex: 'DATE',
+                  startIndex: 0,
+                  batchSize: 600,
+                  surfaceType: 'Desktop'
+                }),
+                clientId: 'MYCD_WebService',
+                csrfToken
+              });
+              const ownResp = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                body: ownBody.toString(),
+                credentials: 'include'
+              });
+              const ownJson = await ownResp.json();
+              const itemsList = ((ownJson.GetContentOwnershipData || {}).items || []);
+              for (const item of itemsList) {
+                const asin = item.asin || (item.targetEntity && item.targetEntity.asin);
+                if (!asin) continue;
+                const orders = item.orders || [];
+                const dlDevices = [];
+                for (const ord of orders) {
+                  for (const devId of (ord.downloadedDevices || ord.devices || [])) {
+                    const idStr = typeof devId === 'string' ? devId : (devId.deviceAccountID || devId.deviceSerialNumber || '');
+                    if (activeAccountIds.has(idStr)) dlDevices.push(idStr);
+                  }
+                }
+                if (dlDevices.length > 0) {
+                  for (const rmKey of ['RemoveFromDevice', 'DeleteFromDevice']) {
+                    try {
+                      const rmPayload = {
+                        param: {
+                          [rmKey]: {
+                            asin,
+                            category: 'KindleEBook',
+                            deviceList: dlDevices,
+                            dsnList: activeDsns
+                          }
+                        }
+                      };
+                      const rmB = new URLSearchParams({
+                        clientId: 'MYCD_WebService',
+                        csrfToken,
+                        data: JSON.stringify(rmPayload)
+                      });
+                      const rmR = await fetch('https://www.amazon.com/hz/mycd/ajax', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                        body: rmB.toString(),
+                        credentials: 'include'
+                      });
+                      const rmJ = await rmR.json();
+                      if ((rmJ[rmKey] || rmJ).success === true) {
+                        removedDownloadsCount += 1;
+                        break;
+                      }
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+
+          const remainingDevs = await fetchLiveKindleDevices();
+          sendResponse({
+            ok: deregistered.length > 0 || targets.length === 0 || removedDownloadsCount > 0,
+            csrfToken,
+            deregisteredCount: deregistered.length,
+            deregistered,
+            removedDownloadsCount,
+            failedCount: failed.length,
+            failed,
+            devices: remainingDevs
+          });
+          return;
+        }
+
+        // DELIVER_TO_KINDLE_BATCH
+        const items = Array.isArray(msg.items) ? msg.items : [];
+        const deviceAccountID = String(msg.deviceAccountID || 'A101329625FBGFO0QECXO').trim();
+        const deviceSerialNumber = String(msg.deviceSerialNumber || 'C36839180E3E566C07FCEF7DEFD96D32').trim();
+
+        const asinDetails = {};
+        for (const b of items) {
+          const asin = String(b.asin || '').trim();
+          if (!asin) continue;
+          let originType = String(b.originType || b.origin_type || 'Purchase').trim();
+          const up = originType.toUpperCase();
+          if (up === 'KINDLE_UNLIMITED' || up === 'KU') originType = 'Ku';
+          else if (up === 'PRIME_READING' || up === 'PRIME' || up === 'KOLL') originType = 'Prime';
+          else if (up === 'COMIXOLOGY' || up === 'COMIXOLOGY_UNLIMITED') originType = 'Comixology';
+          else if (up === 'SAMPLE') originType = 'Sample';
+          else if (!['Purchase', 'Ku', 'Prime', 'Comixology', 'Sample'].includes(originType)) originType = 'Purchase';
+
+          asinDetails[asin] = {
+            category: 'KindleEBook',
+            title: String(b.title || 'Untitled'),
+            originType,
+            eligibleDeviceList: [deviceAccountID]
+          };
+        }
+
+        const payload = {
+          param: {
+            DeliverToKindle: {
+              asinDetails,
+              dsnList: [deviceSerialNumber]
+            }
+          }
+        };
+        const body = new URLSearchParams({
+          clientId: 'MYCD_WebService',
+          csrfToken,
+          data: JSON.stringify(payload)
+        });
+        const r = await fetch('https://www.amazon.com/hz/mycd/ajax', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: body.toString(),
+          credentials: 'include'
+        });
+        const j = await r.json();
+        const dtk = (j && j.DeliverToKindle) || {};
+        const ok = r.status === 200 && (dtk.success === true || j.success === true);
+        sendResponse({
+          ok,
+          status: r.status,
+          csrfToken,
+          resultMap: dtk.resultMap || {},
+          raw: dtk
+        });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err ? err.message : 'Failed to communicate with Amazon MYCD'
+        });
+      }
+    })();
     return true;
   }
 

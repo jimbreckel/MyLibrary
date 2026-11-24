@@ -217,6 +217,30 @@ class MyLibraryClient:
             json_body={"action": "requeue", "file_path": container_path},
         )
 
+    def fix_switched_batch(
+        self,
+        action: str = "start",
+        dry_run: bool = False,
+        limit: int = 0,
+        only_likely: bool = False,
+    ) -> Dict[str, Any]:
+        api_action = (
+            "stop_fix_switched"
+            if action == "stop"
+            else ("fix_switched_status" if action == "status" else "batch_fix_switched")
+        )
+        return self._request(
+            "/api/enrich/",
+            method="POST",
+            json_body={
+                "action": api_action,
+                "sub_action": action,
+                "dry_run": bool(dry_run),
+                "limit": int(limit or 0),
+                "only_likely": bool(only_likely),
+            },
+        )
+
     # --- Time-Series History & Logs ---
     def get_history(self, granularity: str = "hour") -> Dict[str, Any]:
         return self._request("/api/status/history/", params={"granularity": granularity})
@@ -463,6 +487,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_logs.add_argument("--lines", type=int, default=50, help="Number of lines to tail (default: 50)")
     p_logs.add_argument("--grep", default="", help="Optional case-insensitive filter keyword")
 
+    # 11b. fix-switched
+    p_sw = sub.add_parser(
+        "fix-switched",
+        help="Batch check No Match items for switched Title/Author and enrich/fix verified matches",
+    )
+    p_sw.add_argument("--dry-run", action="store_true", help="Only check & report matches without modifying files/DB")
+    p_sw.add_argument("--limit", type=int, default=0, help="Optional max candidates to check (0 = all)")
+    p_sw.add_argument("--only-likely", action="store_true", help="Only check high-probability switched candidates")
+    p_sw.add_argument("--status", action="store_true", help="Check current/last batch status without starting a new run")
+    p_sw.add_argument("--stop", action="store_true", help="Request a running batch to stop cleanly")
+    p_sw.add_argument("--wait", action="store_true", help="Poll and display live progress until batch finishes")
+
     # 12. help
     sub.add_parser("help", help="Show complete CLI, REST API, and MCP Server guide with examples")
 
@@ -687,6 +723,47 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print("=== epubmeta.log ===")
                     for ln in res["epubmeta_log"]:
                         print(ln)
+
+        elif args.command == "fix-switched":
+            import time as _time_sw
+            sub_act = "stop" if args.stop else ("status" if args.status else "start")
+            res = client.fix_switched_batch(
+                action=sub_act,
+                dry_run=args.dry_run,
+                limit=args.limit,
+                only_likely=args.only_likely,
+            )
+            if args.wait and not args.status and not args.stop:
+                while res.get("running"):
+                    checked = res.get("checked", 0)
+                    tot = res.get("candidates_total", 0)
+                    fixed = res.get("matched_count" if res.get("dry_run") else "fixed_count", 0)
+                    cur_it = res.get("current_item", "")
+                    if not args.json:
+                        print(
+                            f"\r[Switched Batch] Checked {checked}/{tot} | Fixed/Matched: {fixed} | {cur_it[:55]:<55}",
+                            end="",
+                            flush=True,
+                        )
+                    _time_sw.sleep(2.0)
+                    res = client.fix_switched_batch(action="status")
+                if not args.json:
+                    print()
+            if args.json:
+                print(json.dumps(res, indent=2))
+            else:
+                mode_lbl = "DRY RUN" if res.get("dry_run") else "LIVE"
+                state_lbl = "RUNNING" if res.get("running") else ("FINISHED" if res.get("finished") else "IDLE")
+                print(f"Switched Title/Author Batch [{mode_lbl}] — State: {state_lbl}")
+                print(f"  Candidates : {res.get('checked', 0):,} / {res.get('candidates_total', 0):,} checked ({res.get('likely_switched_total', 0):,} high-probability)")
+                print(f"  Matched    : {res.get('matched_count', 0):,} | Fixed: {res.get('fixed_count', 0):,}")
+                if res.get("current_item"):
+                    print(f"  Note       : {res.get('current_item')}")
+                for fx in (res.get("recent_fixes") or [])[:15]:
+                    print(
+                        f"  ✓ '{fx.get('orig_title')}' by '{fx.get('orig_authors')}'  ==>  "
+                        f"'{fx.get('new_title')}' by {fx.get('new_authors')} ({fx.get('confidence', 0)}%)"
+                    )
 
         return 0
     except Exception as exc:

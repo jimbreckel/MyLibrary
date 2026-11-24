@@ -10,7 +10,7 @@ import time
 from typing import Any, Dict, List, Optional
 import requests
 
-from ..models import BookMetadata
+from ..models import BookMetadata, is_non_english_for_book
 from ..isbn.validator import clean_isbn, normalize_isbn
 from .base import BaseProvider
 
@@ -90,6 +90,8 @@ class GoogleBooksProvider(BaseProvider):
 
         authors = [a.strip() for a in info.get("authors", []) if a.strip()]
         description = _clean_description(info.get("description"))
+        if description and is_non_english_for_book(description, title):
+            description = None
         subjects = [c.strip() for c in info.get("categories", []) if c.strip()]
         publisher = info.get("publisher")
         published_date = info.get("publishedDate")
@@ -194,9 +196,18 @@ class GoogleBooksProvider(BaseProvider):
         if not title:
             return None
 
-        q = f'intitle:"{title}"'
-        if author:
-            q += f' inauthor:"{author}"'
+        from ..filename_parser import strip_trailing_year_tag
+        from ..authors import strip_author_role_tags
+        clean_title = strip_trailing_year_tag(title) or title
+        clean_author = strip_author_role_tags(author) if author else author
+        if clean_author and "," in clean_author and len(clean_author.split(",")) == 2:
+            p_last, p_first = [p.strip() for p in clean_author.split(",", 1)]
+            if p_first and p_last:
+                clean_author = f"{p_first} {p_last}"
+
+        q = f'intitle:"{clean_title}"'
+        if clean_author:
+            q += f' inauthor:"{clean_author}"'
 
         url = "https://www.googleapis.com/books/v1/volumes"
         params: Dict[str, str] = {"q": q}
@@ -209,6 +220,15 @@ class GoogleBooksProvider(BaseProvider):
                 from ..matcher import score_title, score_authors
                 data = resp.json()
                 items = data.get("items", [])
+                if not items and clean_author:
+                    # Retry without strict exact-phrase quotes around intitle (handles 'Way Of the Lawless' vs 'The Way of the Lawless')
+                    loose_q = f'intitle:{clean_title} inauthor:"{clean_author}"'
+                    loose_params: Dict[str, str] = {"q": loose_q}
+                    if self.api_key:
+                        loose_params["key"] = self.api_key
+                    resp_loose = self.session.get(url, params=loose_params, timeout=self.timeout)
+                    if resp_loose.status_code == 200:
+                        items = resp_loose.json().get("items", [])
                 if items:
                     merged: Optional[BookMetadata] = None
                     for item_vol in items[:5]:

@@ -35,7 +35,7 @@
     if (pageObserver) {
       try {
         pageObserver.disconnect();
-      } catch (_) {}
+      } catch (_) { }
       pageObserver = null;
     }
   }
@@ -163,6 +163,7 @@
     const lib = book.libResult;
     const dismissed = isBookDismissed(book);
     const inLib = Boolean(lib.in_library && !dismissed);
+    const ownedSources = Array.isArray(lib.owned_sources) ? lib.owned_sources : [];
     const searchQ = lib.search_query || book.isbnDigits || book.title;
     const mylibUrl = `${currentSettings.mylibraryBaseUrl}/?q=${encodeURIComponent(searchQ)}`;
 
@@ -174,9 +175,14 @@
 
     if (inLib) {
       const fmts = (lib.formats && lib.formats.length > 0) ? lib.formats.join(', ') : 'BOOK';
+      const ownedExtra = ownedSources.length > 0 ? ` + Owned on ${ownedSources.join(' & ')}` : '';
       pill.className = 'mylib-title-pill mylib-title-pill-owned';
-      pill.textContent = `✅ In MyLibrary (${fmts})`;
+      pill.textContent = `✅ In MyLibrary (${fmts})${ownedExtra}`;
       pill.title = 'This book is in your MyLibrary catalog! Click to open in MyLibrary.';
+    } else if (ownedSources.length > 0) {
+      pill.className = 'mylib-title-pill mylib-title-pill-owned';
+      pill.textContent = `🏛️ Owned on ${ownedSources.join(' & ')}`;
+      pill.title = `You own this title on ${ownedSources.join(' & ')}! Click to search in MyLibrary.`;
     } else {
       const hasOtherEd = Array.isArray(lib.other_editions) && lib.other_editions.length > 0;
       pill.className = 'mylib-title-pill mylib-title-pill-missing';
@@ -247,6 +253,11 @@
     let detailsHtml = '';
 
     if (lib) {
+      const ownedSources = Array.isArray(lib.owned_sources) ? lib.owned_sources : [];
+      const ownedBadgeHtml = ownedSources.length > 0
+        ? `<span class="mylib-badge" style="background:rgba(16,185,129,0.22); border:1px solid rgba(52,211,153,0.65); color:#6ee7b7; font-size:13px; padding:5px 11px;" title="Imported from your ${escapeHtml(ownedSources.join(' & '))} Owned Titles library">🏛️ Owned on ${escapeHtml(ownedSources.join(' & '))}</span>`
+        : '';
+
       if (lib.in_library && !dismissed) {
         container.classList.add('mylib-owned');
         const fmts = (lib.formats && lib.formats.length > 0) ? lib.formats.join(', ') : (lib.item_types || ['BOOK']).join(', ');
@@ -260,6 +271,7 @@
             <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-in-lib" style="font-size:13px; padding:5px 11px;">
               ✅ In MyLibrary (${escapeHtml(fmts)}${enrTag} · ${escapeHtml(matchViaLabel)}) ↗
             </a>
+            ${ownedBadgeHtml}
             <button type="button" class="mylib-badge mylib-badge-annas-none" id="mylib-bp-dismiss-fp" title="Mark as False Positive (e.g. different edition)">
               ✕ False Positive
             </button>
@@ -282,9 +294,14 @@
           detailsHtml = `<div class="mylib-match-details">${matchLines.join('')}</div>`;
         }
       } else {
-        container.classList.add('mylib-missing');
+        if (ownedSources.length > 0) {
+          container.classList.add('mylib-owned');
+        } else {
+          container.classList.add('mylib-missing');
+        }
         libStatusHtml = `
           <div class="mylib-bp-status-row">
+            ${ownedBadgeHtml}
             <a href="${escapeHtml(mylibSearchUrl)}" target="_blank" rel="noopener" class="mylib-badge mylib-badge-not-in-lib" style="font-size:13px; padding:5px 11px;">
               ❌ Not in MyLibrary${dismissed ? ' (Dismissed False Positive)' : ''} ↗
             </a>
@@ -483,6 +500,12 @@
       }
       if (resp.mylibraryBaseUrl) currentSettings.mylibraryBaseUrl = resp.mylibraryBaseUrl;
       if (resp.annasBaseUrl) currentSettings.annasBaseUrl = resp.annasBaseUrl;
+      if (Array.isArray(resp.enrichedBooks) && resp.enrichedBooks[0]) {
+        const eb = resp.enrichedBooks[0];
+        if (!book.title && eb.title) book.title = eb.title;
+        if (!book.author && eb.author) book.author = eb.author;
+        if (!book.pub_year && eb.pub_year) book.pub_year = eb.pub_year;
+      }
 
       book.libResult = resp.data.results[0];
       renderBookPageWidget(book);
@@ -534,9 +557,15 @@
     const mylibAuthorUrl = firstAuthor ? `${mylibBase}/?q=${encodeURIComponent('author:"' + firstAuthor + '"')}` : '';
 
     let statusHtml = `<span style="color:#94a3b8; font-weight:600;">⏳ Checking MyLibrary...</span>`;
+    let ownedCardHtml = '';
     let borderColor = 'rgba(56,189,248,0.35)';
     if (lib) {
-      if (lib.error) {
+      const ownedSources = Array.isArray(lib.owned_sources) ? lib.owned_sources : [];
+      if (ownedSources.length > 0) {
+        borderColor = 'rgba(16,185,129,0.65)';
+        ownedCardHtml = `<span style="border:1px solid rgba(52,211,153,0.6); background:rgba(16,185,129,0.22); color:#6ee7b7; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;" title="Owned on ${escapeHtml(ownedSources.join(' & '))}">🏛️ Owned (${escapeHtml(ownedSources.join(' & '))})</span>`;
+      }
+      if (lib.error && !ownedSources.length) {
         borderColor = 'rgba(250,204,21,0.5)';
         statusHtml = `<button type="button" data-retry-card="1" style="cursor:pointer; border:1px solid rgba(250,204,21,0.5); background:rgba(234,179,8,0.2); color:#fde047; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">⚠️ Retry Check ↻</button>`;
       } else if (lib.in_library) {
@@ -544,10 +573,10 @@
         borderColor = 'rgba(34,197,94,0.6)';
         statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" style="cursor:pointer; border:1px solid rgba(74,222,128,0.5); background:rgba(34,197,94,0.22); color:#4ade80; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">✅ In MyLibrary (${escapeHtml(fmts)}) ↗</button>`;
       } else if (Array.isArray(lib.other_editions) && lib.other_editions.length > 0) {
-        borderColor = 'rgba(250,204,21,0.55)';
+        if (!ownedSources.length) borderColor = 'rgba(250,204,21,0.55)';
         statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" title="A different edition/year with this title is in MyLibrary" style="cursor:pointer; border:1px solid rgba(250,204,21,0.5); background:rgba(234,179,8,0.2); color:#fde047; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">⚠️ Diff. Edition in MyLibrary ↗</button>`;
       } else {
-        borderColor = 'rgba(248,113,113,0.45)';
+        if (!ownedSources.length) borderColor = 'rgba(248,113,113,0.45)';
         statusHtml = `<button type="button" data-open-url="${escapeHtml(mylibUrl)}" style="cursor:pointer; border:1px solid rgba(248,113,113,0.4); background:rgba(239,68,68,0.16); color:#fca5a5; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">❌ Not in MyLibrary ↗</button>`;
       }
     }
@@ -560,7 +589,7 @@
     const shortAuthor = firstAuthor ? (firstAuthor.length > 18 ? firstAuthor.slice(0, 16) + '…' : firstAuthor) : '';
     const authorBtnHtml = firstAuthor
       ? `<button type="button" data-open-url="${escapeHtml(annasAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) on Anna's Archive" style="cursor:pointer; border:1px solid rgba(192,132,252,0.45); background:rgba(168,85,247,0.18); color:#d8b4fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">👤 ${escapeHtml(shortAuthor)} (Anna's) ↗</button>` +
-        `<button type="button" data-open-url="${escapeHtml(mylibAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) in MyLibrary" style="cursor:pointer; border:1px solid rgba(129,140,248,0.45); background:rgba(99,102,241,0.18); color:#c7d2fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">📚 ${escapeHtml(shortAuthor)} (MyLib) ↗</button>`
+      `<button type="button" data-open-url="${escapeHtml(mylibAuthorUrl)}" title="Search Author (${escapeHtml(firstAuthor)}) in MyLibrary" style="cursor:pointer; border:1px solid rgba(129,140,248,0.45); background:rgba(99,102,241,0.18); color:#c7d2fe; border-radius:4px; padding:2px 6px; font-size:10.5px; font-weight:700;">📚 ${escapeHtml(shortAuthor)} (MyLib) ↗</button>`
       : '';
 
     const badgeBoxClass = 'mylib-search-card-bar';
@@ -575,7 +604,7 @@
         mountEl.appendChild(bar);
       }
       bar.style.borderColor = borderColor;
-      bar.innerHTML = `${statusHtml}${annasBtnHtml}${annasTitleBtnHtml}${authorBtnHtml}`;
+      bar.innerHTML = `${statusHtml}${ownedCardHtml}${annasBtnHtml}${annasTitleBtnHtml}${authorBtnHtml}`;
       bar.querySelectorAll('button[data-open-url]').forEach((btn) => {
         btn.addEventListener('click', (e) => {
           e.preventDefault();
@@ -651,9 +680,15 @@
           if (resp.mylibraryBaseUrl) currentSettings.mylibraryBaseUrl = resp.mylibraryBaseUrl;
           if (resp.annasBaseUrl) currentSettings.annasBaseUrl = resp.annasBaseUrl;
 
-          resp.data.results.forEach((r) => {
+          resp.data.results.forEach((r, idx) => {
             const cardEntry = searchCardStateMap.get(String(r.key));
             if (cardEntry) {
+              const eb = Array.isArray(resp.enrichedBooks) ? resp.enrichedBooks[idx] : null;
+              if (eb) {
+                if (!cardEntry.title && eb.title) cardEntry.title = eb.title;
+                if (!cardEntry.author && eb.author) cardEntry.author = eb.author;
+                if (!cardEntry.pub_year && eb.pub_year) cardEntry.pub_year = eb.pub_year;
+              }
               cardEntry.libResult = r;
               renderSearchCardBadge(cardEntry);
             }
@@ -661,6 +696,248 @@
         });
       }
     }
+  }
+
+  let isAutoSyncingOwnedPage = false;
+
+  async function tryPacktEntitlementsApiFetch() {
+    const foundBooks = [];
+    try {
+      // 1. First try Packt's same-origin cookie-authenticated endpoint on subscription.packtpub.com
+      if (/^subscription\.packtpub\.com$/i.test(window.location.hostname)) {
+        let totalCount = 1500;
+        const limit = 100;
+        for (let offset = 0; offset < totalCount + limit; offset += limit) {
+          const url = `https://subscription.packtpub.com/api/entitlements/users/me/owned?sort=createdAt%3Adesc&search=&limit=${limit}&offset=${offset}`;
+          const r = await fetch(url, { credentials: 'include' });
+          if (!r.ok) break;
+          const d = await r.json();
+          if (typeof d.count === 'number' && d.count > 0) totalCount = d.count;
+          const rows = Array.isArray(d.data) ? d.data : [];
+          if (rows.length === 0) break;
+          rows.forEach((row) => {
+            const sp = row.simplifiedProduct || {};
+            const isbnsObj = sp.isbns || {};
+            const isbn13 = String(sp.isbn13 || isbnsObj.print || isbnsObj.ebook || row.productId || '').replace(/[^0-9Xx]/g, '');
+            const linkAuthors = Array.isArray(sp.linkAuthors) ? sp.linkAuthors.map((a) => a && a.author).filter(Boolean) : [];
+            const pType = String(sp.type || sp.defaultType || '').toLowerCase();
+            const is_video = pType.includes('video');
+            const readUrl = sp.readUrl ? (sp.readUrl.startsWith('http') ? sp.readUrl : `https://subscription.packtpub.com${sp.readUrl}`) : '';
+            foundBooks.push({
+              isbn: isbn13,
+              title: sp.title || row.productName || 'Untitled',
+              author: linkAuthors.join(', ') || '',
+              is_video,
+              cover_image_url: sp.coverImage || sp.smallImage || '',
+              web_reader_url: readUrl
+            });
+          });
+          if (foundBooks.length >= totalCount || rows.length < limit) break;
+        }
+        if (foundBooks.length > 0) return foundBooks;
+      }
+    } catch (_) { }
+    return foundBooks;
+  }
+
+  function collectOwnedBooksFromDom(sourceLabel) {
+    const url = new URL(window.location.href);
+    const cards = (window.MyLibSiteAdapters && window.MyLibSiteAdapters.extractSearchCardsFromPage(document, url)) || [];
+    const byKey = new Map();
+
+    cards.forEach((c) => {
+      const k = c.isbnDigits || c.title;
+      if (!k) return;
+      byKey.set(k, {
+        isbn: c.isbnDigits || c.isbnRaw || '',
+        title: c.title || '',
+        author: c.author || '',
+        pub_year: c.pub_year || null
+      });
+    });
+
+    // Also fallback-scan any links/rows on subscription.packtpub.com/owned or library.springer.com
+    if (/packt/i.test(sourceLabel)) {
+      document.querySelectorAll('a[href*="/product/"], a[href*="/book/"], a[href*="/video/"], img[src*="static.packt-cdn.com/products/"]').forEach((el) => {
+        const srcOrHref = el.getAttribute('href') || el.getAttribute('src') || '';
+        const m = srcOrHref.match(/(97[89][0-9]{10})/);
+        const isbn = m ? m[1] : '';
+        const row = el.closest('tr, li, article, .product-card, [class*="card"], [class*="owned"]') || el.parentElement;
+        const titleEl = row && row.querySelector('h2, h3, h4, h5, [class*="title"], strong');
+        const title =
+          (titleEl && titleEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          (el.getAttribute('alt') || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const k = isbn || title;
+        if (k && !byKey.has(k)) {
+          byKey.set(k, { isbn, title });
+        }
+      });
+    } else if (/springer/i.test(sourceLabel)) {
+      document.querySelectorAll('a[href*="link.springer.com"], a[href*="/book/"], a[href*="978-"], [data-test*="book"]').forEach((el) => {
+        const href = el.getAttribute('href') || '';
+        const m = href.match(/(97[89][0-9\-]{10,14})/);
+        const isbn = m ? m[1].replace(/[^0-9]/g, '') : '';
+        const row = el.closest('tr, li, article, .c-card, [class*="card"], [class*="book"]') || el.parentElement;
+        const titleEl = (row && row.querySelector('h2, h3, h4, [class*="title"]')) || el;
+        const title = (titleEl && titleEl.textContent.replace(/\s+/g, ' ').trim()) || '';
+        if ((isbn || title.length >= 4) && !/download\s+pdf|download\s+epub/i.test(title)) {
+          const k = isbn || title;
+          if (!byKey.has(k)) {
+            byKey.set(k, { isbn, title });
+          }
+        }
+      });
+    }
+
+    return Array.from(byKey.values());
+  }
+
+  function ensureOwnedLibrarySyncToolbar(url) {
+    const isPacktOwned = /(^|\.)packtpub\.com$/i.test(url.hostname) && /^\/owned/i.test(url.pathname);
+    const isSpringerLibrary = /^library\.springer\.com$/i.test(url.hostname);
+    if (!isPacktOwned && !isSpringerLibrary) return;
+
+    const sourceLabel = isPacktOwned ? 'Packt' : 'Springer';
+    let bar = document.getElementById('mylib-owned-sync-toolbar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'mylib-owned-sync-toolbar';
+      bar.style.cssText =
+        'position:sticky; top:0; z-index:9999; margin:10px auto; max-width:1280px; padding:11px 16px; border-radius:10px; background:linear-gradient(135deg,#0f172a 0%,#064e3b 100%); color:#f8fafc; border:1px solid rgba(52,211,153,0.6); box-shadow:0 8px 24px rgba(2,6,23,0.45); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px;';
+
+      bar.innerHTML = `
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px;">
+          <span style="font-weight:800; font-size:14px; color:#6ee7b7;">🏛️ MyLibrary · ${escapeHtml(sourceLabel)} Owned Titles Importer</span>
+          <span id="mylib-owned-sync-status" style="font-size:12px; color:#d1fae5; background:rgba(6,78,59,0.75); border:1px solid rgba(52,211,153,0.4); padding:3px 9px; border-radius:999px;">
+            Scanning page...
+          </span>
+        </div>
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:8px;">
+          <button type="button" id="mylib-btn-import-owned-now" style="cursor:pointer; padding:6px 12px; border-radius:6px; border:1px solid #34d399; background:rgba(16,185,129,0.28); color:#ecfdf5; font-weight:700; font-size:12px;">
+            📥 Import Visible Owned Titles
+          </button>
+          <button type="button" id="mylib-btn-autopage-owned" style="cursor:pointer; padding:6px 12px; border-radius:6px; border:1px solid #38bdf8; background:rgba(56,189,248,0.22); color:#e0f2fe; font-weight:700; font-size:12px;" title="Automatically scroll and click through all pagination pages to import every owned title">
+            ⏬ Auto-Scan All Pages &amp; Import
+          </button>
+        </div>
+      `;
+
+      const hostTarget = document.querySelector('main, #main, .container, body') || document.body;
+      hostTarget.insertBefore(bar, hostTarget.firstChild);
+
+      bar.querySelector('#mylib-btn-import-owned-now').addEventListener('click', () => {
+        runOwnedPageImport(sourceLabel, false);
+      });
+      bar.querySelector('#mylib-btn-autopage-owned').addEventListener('click', () => {
+        runOwnedPageImport(sourceLabel, true);
+      });
+    }
+
+    // Automatically import any visible owned titles on the current page
+    const visibleBooks = collectOwnedBooksFromDom(sourceLabel);
+    if (visibleBooks.length > 0 && Number(bar.dataset.lastImportedCount || '0') !== visibleBooks.length) {
+      bar.dataset.lastImportedCount = String(visibleBooks.length);
+      safeSendMessage({ type: 'IMPORT_OWNED_TITLES', source: sourceLabel, books: visibleBooks }, (resp) => {
+        const statusEl = document.getElementById('mylib-owned-sync-status');
+        if (statusEl && resp && resp.ok) {
+          const srcTotal = isPacktOwned ? resp.packtCount : resp.springerCount;
+          statusEl.textContent = `✅ Auto-Imported ${visibleBooks.length} on page · Total ${sourceLabel} Owned: ${srcTotal}`;
+        }
+        scanSearchCardsOnPage(url);
+      });
+    } else if (visibleBooks.length === 0 && !bar.dataset.checkedInitialStats) {
+      bar.dataset.checkedInitialStats = '1';
+      safeSendMessage({ type: 'GET_OWNED_STATS' }, (resp) => {
+        const statusEl = document.getElementById('mylib-owned-sync-status');
+        if (statusEl && resp && resp.ok) {
+          const srcTotal = isPacktOwned ? resp.packtCount : resp.springerCount;
+          statusEl.textContent = `Total ${sourceLabel} Owned Saved: ${srcTotal} — click Import when titles load`;
+        }
+      });
+    }
+  }
+
+  async function runOwnedPageImport(sourceLabel, autoPaginate = false) {
+    const statusEl = document.getElementById('mylib-owned-sync-status');
+    const autoBtn = document.getElementById('mylib-btn-autopage-owned');
+    if (autoPaginate && isAutoSyncingOwnedPage) {
+      isAutoSyncingOwnedPage = false;
+      if (autoBtn) autoBtn.textContent = '⏬ Auto-Scan All Pages & Import';
+      return;
+    }
+
+    if (autoPaginate) {
+      isAutoSyncingOwnedPage = true;
+      if (autoBtn) autoBtn.textContent = '⏹ Stop Auto-Scan';
+    }
+
+    const accumulated = new Map();
+    const addBooks = (list) => {
+      list.forEach((b) => {
+        const k = b.isbn || b.title;
+        if (k && !accumulated.has(k)) accumulated.set(k, b);
+      });
+    };
+
+    if (/packt/i.test(sourceLabel)) {
+      if (statusEl) statusEl.textContent = '⏳ Checking Packt account entitlements & page DOM...';
+      const apiBooks = await tryPacktEntitlementsApiFetch();
+      addBooks(apiBooks);
+    }
+
+    let pageNum = 1;
+    while (true) {
+      // Scroll to bottom to trigger any lazy-loaded cards
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      await new Promise((r) => setTimeout(r, 850));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+
+      const domBooks = collectOwnedBooksFromDom(sourceLabel);
+      addBooks(domBooks);
+
+      if (statusEl) {
+        statusEl.textContent = `⏳ Importing ${accumulated.size} ${sourceLabel} owned titles (page ${pageNum})...`;
+      }
+
+      await new Promise((resolve) => {
+        safeSendMessage(
+          { type: 'IMPORT_OWNED_TITLES', source: sourceLabel, books: Array.from(accumulated.values()) },
+          (resp) => {
+            if (statusEl && resp && resp.ok) {
+              const srcTotal = /packt/i.test(sourceLabel) ? resp.packtCount : resp.springerCount;
+              statusEl.textContent = `✅ Synced ${accumulated.size} titles (Total ${sourceLabel} Owned: ${srcTotal})`;
+            }
+            resolve();
+          }
+        );
+      });
+
+      if (!autoPaginate || !isAutoSyncingOwnedPage) break;
+
+      // Look for an active "Next" pagination button or link
+      const nextBtn = Array.from(
+        document.querySelectorAll(
+          'a[rel="next"], button[aria-label*="Next" i], a[aria-label*="Next" i], .pagination-next a, .page-item:not(.disabled) a.page-link, [class*="pagination"] button:not([disabled])'
+        )
+      ).find((el) => {
+        const txt = (el.textContent || el.getAttribute('aria-label') || '').trim();
+        const isDisabled =
+          el.hasAttribute('disabled') ||
+          el.getAttribute('aria-disabled') === 'true' ||
+          /\bdisabled\b/i.test(el.className || '') ||
+          (el.parentElement && /\bdisabled\b/i.test(el.parentElement.className || ''));
+        return !isDisabled && (/^(?:next|›|»|>)$/i.test(txt) || /next\s*page/i.test(txt));
+      });
+
+      if (!nextBtn || pageNum >= 50) break;
+      pageNum += 1;
+      nextBtn.click();
+      await new Promise((r) => setTimeout(r, 1800));
+    }
+
+    isAutoSyncingOwnedPage = false;
+    if (autoBtn) autoBtn.textContent = '⏬ Auto-Scan All Pages & Import';
+    scanSearchCardsOnPage(new URL(window.location.href));
   }
 
   function tryMountBookPage() {
@@ -671,7 +948,10 @@
     if (!window.MyLibSiteAdapters) return;
     const url = new URL(window.location.href);
 
-    // Also scan multi-card search / catalog pages (Pearson+, McGraw-Hill, Cengage, Wiley, Manning)
+    // Mount Owned Titles Importer toolbar if on subscription.packtpub.com/owned or library.springer.com
+    ensureOwnedLibrarySyncToolbar(url);
+
+    // Also scan multi-card search / catalog pages (Pearson+, McGraw-Hill, Cengage, Wiley, Manning, Packt, Springer Library)
     scanSearchCardsOnPage(url);
 
     const adapter = window.MyLibSiteAdapters.findMatchingSiteAdapter(document, url, currentSettings.customSites);
@@ -702,6 +982,20 @@
     await loadSettingsAndDismissed();
     tryMountBookPage();
 
+    // Support automatic background sync when opened with ?mylib_autosync=1 from the extension popup
+    try {
+      const initUrl = new URL(window.location.href);
+      if (initUrl.searchParams.get('mylib_autosync') === '1') {
+        const isPacktOwned = /(^|\.)packtpub\.com$/i.test(initUrl.hostname) && /^\/owned/i.test(initUrl.pathname);
+        const isSpringerLib = /^library\.springer\.com$/i.test(initUrl.hostname);
+        if (isPacktOwned || isSpringerLib) {
+          setTimeout(() => {
+            runOwnedPageImport(isPacktOwned ? 'Packt' : 'Springer', true);
+          }, 1800);
+        }
+      }
+    } catch (_) { }
+
     // Listen for live setting changes from the extension popup (e.g. switching Anna's Archive URL)
     try {
       if (isExtensionContextValid() && chrome.storage && chrome.storage.onChanged) {
@@ -721,7 +1015,7 @@
           }
         });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // Observe SPA / format-switcher updates (e.g. switching Hardcover <-> Kindle <-> eBook on B&N or Amazon)
     let debounceTimer = null;
@@ -743,6 +1037,455 @@
     if (document.body) {
       pageObserver.observe(document.body, { childList: true, subtree: true });
     }
+
+    // Bridge messages from the MyLibrary web UI (e.g. Amazon Only (Not on NAS) -> Send to Kindle)
+    window.addEventListener('message', (ev) => {
+      if (!ev || !ev.data || ev.data.source !== 'MYLIBRARY_WEB_UI') return;
+      const reqId = ev.data.reqId || '';
+      const action = ev.data.action || '';
+      if (action === 'PING_EXTENSION') {
+        window.postMessage({ source: 'MYLIBRARY_EXTENSION', reqId, ok: true, version: '1.4.0' }, '*');
+        return;
+      }
+      if (action === 'CHECK_ANNAS_SINGLE' || action === 'OPEN_ANNAS_SESSION_TAB') {
+        safeSendMessage(
+          {
+            type: action,
+            book: ev.data.book || {}
+          },
+          (resp) => {
+            window.postMessage(
+              {
+                source: 'MYLIBRARY_EXTENSION',
+                reqId,
+                ...(resp || { ok: false, error: 'No response from MyLibrary extension background worker' })
+              },
+              '*'
+            );
+          }
+        );
+        return;
+      }
+      if (action === 'FETCH_MYCD_DEVICES' || action === 'DELIVER_TO_KINDLE_BATCH' || action === 'DEREGISTER_MYCD_DEVICES') {
+        safeSendMessage(
+          {
+            type: action,
+            csrfToken: ev.data.csrfToken || '',
+            items: ev.data.items || [],
+            devicesToRemove: ev.data.devicesToRemove || [],
+            keepDeviceAccountID: ev.data.keepDeviceAccountID || '',
+            keepDeviceAccountIDs: ev.data.keepDeviceAccountIDs || [],
+            keepDeviceNames: ev.data.keepDeviceNames || [],
+            deviceAccountID: ev.data.deviceAccountID || '',
+            deviceSerialNumber: ev.data.deviceSerialNumber || ''
+          },
+          (resp) => {
+            window.postMessage(
+              {
+                source: 'MYLIBRARY_EXTENSION',
+                reqId,
+                ...(resp || { ok: false, error: 'No response from MyLibrary extension background worker' })
+              },
+              '*'
+            );
+          }
+        );
+      }
+    });
+
+    // If we are on Amazon Manage Your Content & Devices (/hz/mycd/digital-console/alldevices or /device-details),
+    // mount a floating "MyLibrary Device & Download Cleaner" banner that drives the real page!
+    if (/amazon\.com\/hz\/mycd\/digital-console/i.test(location.href)) {
+      mountMycdDeviceCleanerBanner();
+    }
+  }
+
+  function mountMycdDeviceCleanerBanner() {
+    if (document.getElementById('mylibrary-mycd-cleaner-bar')) return;
+
+    const KEEP_IDS = new Set([
+      'A101329625FBGFO0QECXO', // JAMES's Kindle for Windows = PC (_8YLYgU)
+      'A015285311F3W73S7EA31', // JAMES's 18th Android Device = Tab S11 (_RfOPZk)
+      'A018607231PVOX7INFXHE', // JAMES's 12th Android Device = Galaxy S25 Ultra (_GNgiXh)
+      'A0440102192GKG2EE19T3', // JAMES's 8th Android Device = Tab S8 Ultra (_vlEewv)
+      'A02063483UBXG3PKOGGOX', // Jimmy's tablet = Tab A8
+      'A05507311ZARZZO8ORYGN'  // JAMES's Main = Cloud Reader
+    ]);
+    const KEEP_NAMES = new Set([
+      "james's kindle for windows",
+      "jimmy's tab s11",
+      "jimmy's galaxy s25 ultra",
+      "jimmy's tab s8 ultra",
+      "jimmy's tab a8",
+      "james's kindle for web",
+      "pc",
+      "tab s11",
+      "galaxy s25 ultra",
+      "tab s8 ultra",
+      "tab a8",
+      "cloud reader"
+    ]);
+
+    const RENAME_BY_ID = {
+      'A101329625FBGFO0QECXO': 'PC',
+      'A015285311F3W73S7EA31': 'Tab S11',
+      'A018607231PVOX7INFXHE': 'Galaxy S25 Ultra',
+      'A0440102192GKG2EE19T3': 'Tab S8 Ultra',
+      'A02063483UBXG3PKOGGOX': 'Tab A8',
+      'A05507311ZARZZO8ORYGN': 'Cloud Reader'
+    };
+    const RENAME_BY_OLD_NAME = {
+      "james's kindle for windows": 'PC',
+      "james's 19th android device": 'Tab A8',
+      "james's 12th android device": 'Galaxy S25 Ultra',
+      "james's 8th android device": 'Tab S8 Ultra',
+      "jimmy's tablet": 'Tab A8',
+      "james's main": 'Cloud Reader'
+    };
+
+    const bar = document.createElement('div');
+    bar.id = 'mylibrary-mycd-cleaner-bar';
+    bar.style.cssText = 'position:fixed; bottom:18px; right:18px; z-index:2147483647; width:440px; background:linear-gradient(135deg,#0f172a,#1e293b); color:#f8fafc; border:2px solid #a855f7; border-radius:14px; padding:14px 16px; box-shadow:0 16px 40px rgba(0,0,0,0.65); font-family:system-ui,-apple-system,sans-serif; font-size:13px;';
+    bar.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <strong style="color:#d8b4fe; font-size:14px;">📚 MyLibrary Kindle Device Manager</strong>
+        <button id="ml-mycd-close" style="background:transparent; border:none; color:#94a3b8; cursor:pointer; font-size:16px;">✕</button>
+      </div>
+      <div style="color:#cbd5e1; font-size:12px; line-height:1.45; margin-bottom:10px;">
+        <strong>Active Devices Mapping:</strong><br>
+        • <code>PC</code> (JAMES's Kindle for Windows)<br>
+        • <code>Tab S11</code> (18th Android) &nbsp;• <code>Galaxy S25 Ultra</code> (12th Android)<br>
+        • <code>Tab S8 Ultra</code> (8th Android) &nbsp;• <code>Tab A8</code> (Jimmy's tablet) &nbsp;• <code>Cloud Reader</code>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="ml-mycd-rename-btn" style="flex:1; background:linear-gradient(135deg,#0284c7,#0369a1); color:#fff; border:none; border-radius:8px; padding:8px 10px; font-weight:700; cursor:pointer; font-size:12px;">
+          ✏️ Rename Active Devices on Amazon
+        </button>
+        <button id="ml-mycd-run-btn" style="flex:1; background:linear-gradient(135deg,#9333ea,#7e22ce); color:#fff; border:none; border-radius:8px; padding:8px 10px; font-weight:700; cursor:pointer; font-size:12px;">
+          🚀 Deregister Unused Devices
+        </button>
+      </div>
+      <div id="ml-mycd-status" style="margin-top:9px; font-size:12px; color:#38bdf8; display:none; max-height:160px; overflow-y:auto;"></div>
+    `;
+    document.body.appendChild(bar);
+    document.getElementById('ml-mycd-close').onclick = () => bar.remove();
+
+    document.getElementById('ml-mycd-rename-btn').onclick = async () => {
+      const btn = document.getElementById('ml-mycd-rename-btn');
+      const st = document.getElementById('ml-mycd-status');
+      btn.disabled = true;
+      st.style.display = 'block';
+      st.innerHTML = '⏳ Renaming active devices on Amazon...';
+
+      let csrf = window.csrfToken || '';
+      if (!csrf) {
+        const m = document.documentElement.innerHTML.match(/csrfToken\s*[=:]\s*["']([^"']+)["']/i);
+        if (m) csrf = m[1];
+      }
+
+      try {
+        const b1 = new URLSearchParams({
+          activity: 'GetDevicesOverview',
+          activityInput: JSON.stringify({ surfaceType: 'Desktop' }),
+          clientId: 'MYCD_WebService',
+          csrfToken: csrf
+        });
+        const r1 = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: b1.toString(),
+          credentials: 'include'
+        });
+        const j1 = await r1.json();
+        const rawDevs = ((j1.GetDevicesOverview || {}).deviceList || []);
+        const kindleDevs = rawDevs.filter(d => ['KINDLE_APP', 'FIRE_TABLET', 'KINDLE'].includes(d.deviceFamily));
+
+        let renamedCount = 0;
+        const logs = [];
+
+        for (const d of kindleDevs) {
+          const aid = String(d.deviceAccountID || '').trim();
+          const oldName = String(d.deviceName || '').trim();
+          const targetName = RENAME_BY_ID[aid] || RENAME_BY_OLD_NAME[oldName.toLowerCase()];
+          if (!targetName || oldName === targetName) continue;
+
+          const dsn = d.deviceSerialNumber || '';
+          const dt = d.deviceTypeID || '';
+          let ok = false;
+
+          // 1. Try MYCD ajax EditDeviceName / RenameDevice / UpdateDeviceName
+          for (const actName of ['EditDeviceName', 'UpdateDeviceName', 'RenameDevice', 'SetDeviceName']) {
+            try {
+              const b = new URLSearchParams({
+                activity: actName,
+                activityInput: JSON.stringify({
+                  deviceSerialNumber: dsn,
+                  deviceType: dt,
+                  deviceTypeID: dt,
+                  deviceAccountId: aid,
+                  deviceAccountID: aid,
+                  deviceName: targetName,
+                  newDeviceName: targetName,
+                  surfaceType: 'Desktop'
+                }),
+                clientId: 'MYCD_WebService',
+                csrfToken: csrf
+              });
+              const r = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                body: b.toString(),
+                credentials: 'include'
+              });
+              const j = await r.json();
+              const sub = j[actName] || j;
+              if (r.status === 200 && (sub.success === true || j.success === true)) {
+                ok = true;
+                break;
+              }
+            } catch (_) {}
+          }
+
+          // 2. Fallback: click the "Edit" link next to the device name in the DOM table!
+          if (!ok) {
+            const rows = Array.from(document.querySelectorAll('tr, div, li')).filter(el => {
+              const t = (el.innerText || '');
+              return t.includes(oldName) && /edit/i.test(t) && t.length < 600;
+            }).sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+
+            if (rows.length > 0) {
+              const row = rows[0];
+              const editLink = Array.from(row.querySelectorAll('a, button, span[role="button"], div[role="button"]'))
+                .find(el => /^edit$/i.test((el.innerText || '').trim()));
+              if (editLink) {
+                editLink.click();
+                await new Promise(r => setTimeout(r, 450));
+                const input = row.querySelector('input[type="text"], input:not([type="hidden"]):not([type="checkbox"])')
+                  || document.querySelector('input[value*="' + oldName.slice(0, 8) + '"], input[type="text"]');
+                if (input) {
+                  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                  nativeSetter.call(input, targetName);
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                  await new Promise(r => setTimeout(r, 250));
+                  const saveBtn = Array.from(document.querySelectorAll('button, a, span[role="button"], div[role="button"], input[type="submit"]'))
+                    .find(el => /^(save|submit|update|confirm)$/i.test((el.innerText || el.value || '').trim()) && el.offsetParent !== null);
+                  if (saveBtn) {
+                    saveBtn.click();
+                    ok = true;
+                    await new Promise(r => setTimeout(r, 700));
+                  }
+                }
+              }
+            }
+          }
+
+          if (ok) {
+            renamedCount++;
+            logs.push(`✓ ${oldName} → <strong>${targetName}</strong>`);
+          } else {
+            logs.push(`⚠ Could not auto-rename ${oldName} (click Edit next to it to paste "${targetName}")`);
+          }
+        }
+
+        st.innerHTML = `<strong style="color:#4ade80;">✅ Renamed ${renamedCount} device(s)!</strong><br>` + logs.join('<br>');
+      } catch (err) {
+        st.innerHTML = `❌ Error: ${err}`;
+      }
+      btn.disabled = false;
+    };
+
+    document.getElementById('ml-mycd-run-btn').onclick = async () => {
+      const btn = document.getElementById('ml-mycd-run-btn');
+      const st = document.getElementById('ml-mycd-status');
+      btn.disabled = true;
+      st.style.display = 'block';
+      st.innerHTML = '⏳ Extracting CSRF token and querying registered Kindle devices...';
+
+      let csrf = window.csrfToken || '';
+      if (!csrf) {
+        const m = document.documentElement.innerHTML.match(/csrfToken\s*[=:]\s*["']([^"']+)["']/i);
+        if (m) csrf = m[1];
+      }
+      if (!csrf) {
+        st.innerHTML = '❌ Could not find csrfToken on page. Please refresh the page and sign in if prompted.';
+        btn.disabled = false;
+        return;
+      }
+
+      try {
+        const b1 = new URLSearchParams({
+          activity: 'GetDevicesOverview',
+          activityInput: JSON.stringify({ surfaceType: 'Desktop' }),
+          clientId: 'MYCD_WebService',
+          csrfToken: csrf
+        });
+        const r1 = await fetch('https://www.amazon.com/hz/mycd/digital-console/ajax', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: b1.toString(),
+          credentials: 'include'
+        });
+        const j1 = await r1.json();
+        const rawDevs = ((j1.GetDevicesOverview || {}).deviceList || []);
+        const kindleDevs = rawDevs.filter(d => ['KINDLE_APP', 'FIRE_TABLET', 'KINDLE'].includes(d.deviceFamily));
+
+        const toRemove = kindleDevs.filter(d => {
+          const aid = String(d.deviceAccountID || '').trim();
+          const dn = String(d.deviceName || '').trim().toLowerCase();
+          const dtStr = String(d.deviceTypeString || '').trim().toLowerCase();
+          if (dtStr.includes('cloud reader')) return false;
+          return !KEEP_IDS.has(aid) && !KEEP_NAMES.has(dn);
+        });
+
+        st.innerHTML = `Found ${kindleDevs.length} Kindle devices (${toRemove.length} unused to deregister, ${kindleDevs.length - toRemove.length} active to keep)...`;
+
+        // Also inspect loaded scripts on this MYCD page to find exact activity name for deregistering
+        let discoveredActivity = 'DeregisterDevice';
+        const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
+        for (const u of scripts) {
+          try {
+            const txt = await (await fetch(u)).text();
+            const actMatches = txt.match(/["']([A-Za-z0-9_]*[Dd]eregister[A-Za-z0-9_]*)["']/g);
+            if (actMatches && actMatches.length) {
+              console.log('[MyLibrary MYCD] Discovered deregister strings in bundle:', actMatches);
+            }
+          } catch (_) { }
+        }
+
+        let deregCount = 0;
+        const logs = [];
+        for (const d of toRemove) {
+          const dsn = d.deviceSerialNumber || '';
+          const dt = d.deviceTypeID || '';
+          const aid = d.deviceAccountID || '';
+          let ok = false;
+          let lastErr = '';
+
+          // Try candidate MYCD activity / param formats
+          const attempts = [
+            {
+              url: 'https://www.amazon.com/hz/mycd/digital-console/ajax',
+              body: new URLSearchParams({
+                activity: 'DeregisterDevice',
+                activityInput: JSON.stringify({
+                  deviceSerialNumber: dsn,
+                  deviceType: dt,
+                  deviceTypeID: dt,
+                  deviceAccountId: aid,
+                  deviceAccountID: aid,
+                  surfaceType: 'Desktop'
+                }),
+                clientId: 'MYCD_WebService',
+                csrfToken: csrf
+              })
+            },
+            {
+              url: 'https://www.amazon.com/hz/mycd/ajax',
+              body: new URLSearchParams({
+                clientId: 'MYCD_WebService',
+                csrfToken: csrf,
+                data: JSON.stringify({
+                  param: {
+                    DeregisterDevice: {
+                      deviceSerialNumber: dsn,
+                      deviceType: dt,
+                      deviceTypeID: dt,
+                      deviceAccountId: aid,
+                      deviceAccountID: aid
+                    }
+                  }
+                })
+              })
+            },
+            {
+              url: 'https://www.amazon.com/hz/mycd/ajax',
+              body: new URLSearchParams({
+                clientId: 'MYCD_WebService',
+                csrfToken: csrf,
+                data: JSON.stringify({
+                  param: {
+                    Deregister: {
+                      deviceSerialNumber: dsn,
+                      deviceType: dt,
+                      deviceAccountId: aid
+                    }
+                  }
+                })
+              })
+            }
+          ];
+
+          for (const att of attempts) {
+            try {
+              const r = await fetch(att.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                body: att.body.toString(),
+                credentials: 'include'
+              });
+              const j = await r.json();
+              const sub = j.DeregisterDevice || j.Deregister || j;
+              if (r.status === 200 && (sub.success === true || j.success === true)) {
+                ok = true;
+                break;
+              } else {
+                lastErr = JSON.stringify(j).slice(0, 120);
+              }
+            } catch (e) {
+              lastErr = String(e);
+            }
+          }
+
+          if (ok) {
+            deregCount++;
+            logs.push(`✓ Deregistered: ${d.deviceName}`);
+          } else {
+            logs.push(`⚠ ${d.deviceName}: ${lastErr}`);
+          }
+          st.innerHTML = `Processed ${logs.length}/${toRemove.length} (${deregCount} deregistered)...<br>` + logs.slice(-5).join('<br>');
+        }
+
+        // If API attempts returned an error, auto-click the DOM Deregister buttons on /devicedetails!
+        if (deregCount === 0 && toRemove.length > 0) {
+          st.innerHTML += `<br>🔍 Clicking Deregister buttons on page for unused devices...`;
+          let domClicked = 0;
+          const allEls = Array.from(document.querySelectorAll('div, tr, li, section, article'));
+          for (const d of toRemove) {
+            const dn = (d.deviceName || '').trim();
+            if (!dn) continue;
+            // Find the smallest container holding this deviceName AND a Deregister button
+            const matchingContainers = allEls.filter(el => {
+              const t = (el.innerText || '');
+              return t.includes(dn) && /deregister/i.test(t) && t.length < 900;
+            }).sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+
+            if (matchingContainers.length > 0) {
+              const box = matchingContainers[0];
+              const dBtn = Array.from(box.querySelectorAll('button, a, span[role="button"], div[role="button"], input[type="button"], input[type="submit"]'))
+                .find(b => /^deregister$/i.test((b.innerText || b.value || '').trim()));
+              if (dBtn) {
+                dBtn.click();
+                await new Promise(r => setTimeout(r, 650));
+                const confirmBtn = Array.from(document.querySelectorAll('button, a, span[role="button"], div[role="button"], input[type="button"], input[type="submit"]'))
+                  .find(b => b !== dBtn && /^deregister$/i.test((b.innerText || b.value || '').trim()) && b.offsetParent !== null);
+                if (confirmBtn) {
+                  confirmBtn.click();
+                  domClicked++;
+                  await new Promise(r => setTimeout(r, 900));
+                }
+              }
+            }
+          }
+          st.innerHTML = `<strong style="color:#4ade80;">✅ Done! Deregistered ${deregCount + domClicked} unused devices. Kept your 6 active devices!</strong><br>` + logs.join('<br>');
+        } else {
+          st.innerHTML = `<strong style="color:#4ade80;">✅ Done! Deregistered ${deregCount} unused devices. Kept your 6 active devices!</strong><br>` + logs.join('<br>');
+        }
+      } catch (err) {
+        st.innerHTML = `❌ Error: ${err}`;
+      }
+      btn.disabled = false;
+    };
   }
 
   if (document.readyState === 'loading') {

@@ -13,7 +13,10 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-import pymupdf
+try:
+    import pymupdf
+except ImportError:
+    pymupdf = None  # type: ignore[assignment]
 
 from ..models import BookMetadata
 from ..isbn.validator import normalize_isbn

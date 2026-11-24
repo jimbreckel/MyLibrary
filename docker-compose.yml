@@ -15,6 +15,7 @@ services:
       - /volume1/jims_documents/Media/xAdult:/xAdult
       - /volume1/jims_documents/Media/xtoAdult:/xtoAdult
       - /volume1/common/Media/Audiobooks:/audiobooks:ro
+      - /volume1/common/Media/Videos:/videos:ro
       - /volume1/common/webdav:/webdav
     ports:
       - "8000:8000"

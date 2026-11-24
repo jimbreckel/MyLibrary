@@ -780,6 +780,12 @@ class DashboardView(ListView):
         raw_query = self.request.GET.get('q', '').strip()
         query = re.sub(r'(?:^|\s)[+!]enrich\b', '', raw_query, flags=re.IGNORECASE).strip()
         shelf = self.request.GET.get('shelf', '').strip().lower()
+        if not shelf and query:
+            parsed_q_shelf = parse_search_query(query)
+            if ('quarantined', False) in (parsed_q_shelf.get('status_flags') or []):
+                shelf = 'quarantined_missing'
+        if shelf in ('quarantined', 'quarantined_missing', 'quarantined_covered', 'quarantined_dismissed', 'quarantined_all'):
+            return CatalogItem.objects.none()
         selected_tags = [t.strip() for t in self.request.GET.getlist('tag') if t.strip()]
         selected_tag = selected_tags[0] if selected_tags else ''
         selected_folders = [
@@ -791,6 +797,10 @@ class DashboardView(ListView):
         selected_series = [s.strip() for s in self.request.GET.getlist('series') if s.strip()]
         selected_author = self.request.GET.get('author', '').strip()
         sort_by = self.request.GET.get('sort', '').strip().lower()
+        if not sort_by and query:
+            parsed_for_sort = parse_search_query(query)
+            if parsed_for_sort.get('sort_override'):
+                sort_by = parsed_for_sort['sort_override']
         if (selected_author or selected_series) and not sort_by:
             sort_by = 'pubdate_desc'
         read_status = self.request.GET.get('read_status', '').strip().lower()
@@ -833,7 +843,7 @@ class DashboardView(ListView):
                     output_field=IntegerField(),
                 )
                 qs = qs.annotate(_bm_order=order_expr).order_by('_bm_order')
-        elif shelf in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_all'):
+        elif shelf in ('amazon', 'kindle_plus', 'amazon_bookmarked', 'audible', 'amazon_only', 'amazon_matched', 'amazon_newer_edition', 'amazon_all'):
             amz_data = get_dynamic_amazon_shelf()
             if shelf == 'amazon':
                 amz_ids = amz_data.get('kindle_purchased_ids', [])
@@ -847,6 +857,8 @@ class DashboardView(ListView):
                 amz_ids = amz_data.get('amazon_only_ids', [])
             elif shelf == 'amazon_matched':
                 amz_ids = amz_data.get('amazon_matched_ids', [])
+            elif shelf == 'amazon_newer_edition':
+                amz_ids = amz_data.get('amazon_newer_edition_ids', [])
             else:
                 amz_ids = amz_data.get('all_ids', [])
             qs = qs.filter(id__in=amz_ids)
@@ -857,6 +869,44 @@ class DashboardView(ListView):
                     output_field=IntegerField(),
                 )
                 qs = qs.annotate(_amz_order=order_expr).order_by('_amz_order')
+        elif shelf in ('packt_owned', 'springer_owned', 'publisher_owned', 'packt_only', 'springer_only', 'publisher_only', 'missing_owned', 'packt_missing_owned', 'springer_missing_owned', 'amazon_missing_owned'):
+            from .opds import get_dynamic_publisher_owned_shelf
+            pub_data = get_dynamic_publisher_owned_shelf()
+            if shelf == 'packt_owned':
+                pub_ids = pub_data.get('packt_ids', [])
+            elif shelf == 'springer_owned':
+                pub_ids = pub_data.get('springer_ids', [])
+            elif shelf == 'packt_only':
+                pub_ids = pub_data.get('packt_only_ids', [])
+            elif shelf == 'springer_only':
+                pub_ids = pub_data.get('springer_only_ids', [])
+            elif shelf == 'publisher_only':
+                pub_ids = pub_data.get('publisher_only_ids', [])
+            elif shelf == 'packt_missing_owned':
+                pub_ids = pub_data.get('packt_missing_owned_ids', [])
+            elif shelf == 'springer_missing_owned':
+                pub_ids = pub_data.get('springer_missing_owned_ids', [])
+            elif shelf == 'amazon_missing_owned':
+                if amz_data is None:
+                    amz_data = get_dynamic_amazon_shelf()
+                pub_ids = amz_data.get('amazon_missing_owned_ids', [])
+            elif shelf == 'missing_owned':
+                if amz_data is None:
+                    amz_data = get_dynamic_amazon_shelf()
+                pub_ids = list(dict.fromkeys(
+                    list(amz_data.get('amazon_missing_owned_ids', []))
+                    + list(pub_data.get('publisher_missing_owned_ids', []))
+                ))
+            else:
+                pub_ids = pub_data.get('all_ids', [])
+            qs = qs.filter(id__in=pub_ids)
+            if pub_ids and not query and not sort_by:
+                order_expr = Case(
+                    *[When(id=pk, then=pos) for pos, pk in enumerate(pub_ids)],
+                    default=len(pub_ids),
+                    output_field=IntegerField(),
+                )
+                qs = qs.annotate(_pub_owned_order=order_expr).order_by('_pub_owned_order')
         elif shelf == 'enriched':
             enr_idx = get_enriched_item_ids_index()
             qs = qs.filter(id__in=enr_idx['enriched_ids'])
@@ -967,8 +1017,10 @@ class DashboardView(ListView):
         elif shelf in ('missing_cover', 'missing_covers', 'needs_cover'):
             nc_data = get_needs_cover_enriched_shelf()
             cov_issue_filter = self.request.GET.get('cover_issue', '').strip().lower()
+            if cov_issue_filter in ('generic_cover', 'generic_covers', 'template'):
+                cov_issue_filter = 'generic'
             issue_map = nc_data.get('issue_by_id') or {}
-            if cov_issue_filter in ('missing', 'text_only'):
+            if cov_issue_filter in ('missing', 'text_only', 'generic'):
                 nc_ids = [cid for cid in nc_data.get('item_ids', []) if issue_map.get(cid) == cov_issue_filter]
             else:
                 nc_ids = nc_data.get('item_ids', [])
@@ -1251,6 +1303,31 @@ class DashboardView(ListView):
             elif shelf in ('recent_added', 'recently_added') and not item_types and not enrich_status:
                 from .opds import get_recently_added_books_shelf_ids
                 precomputed_count = len(get_recently_added_books_shelf_ids(limit=1200))
+            elif shelf in ('packt_owned', 'springer_owned', 'publisher_owned', 'packt_only', 'springer_only', 'publisher_only', 'missing_owned', 'packt_missing_owned', 'springer_missing_owned', 'amazon_missing_owned') and not item_types and not enrich_status:
+                from .opds import get_dynamic_amazon_shelf, get_dynamic_publisher_owned_shelf
+                pub_d = get_dynamic_publisher_owned_shelf()
+                if shelf == 'packt_owned':
+                    precomputed_count = len(pub_d.get('packt_ids') or [])
+                elif shelf == 'springer_owned':
+                    precomputed_count = len(pub_d.get('springer_ids') or [])
+                elif shelf == 'packt_only':
+                    precomputed_count = len(pub_d.get('packt_only_ids') or [])
+                elif shelf == 'springer_only':
+                    precomputed_count = len(pub_d.get('springer_only_ids') or [])
+                elif shelf == 'publisher_only':
+                    precomputed_count = len(pub_d.get('publisher_only_ids') or [])
+                elif shelf == 'packt_missing_owned':
+                    precomputed_count = len(pub_d.get('packt_missing_owned_ids') or [])
+                elif shelf == 'springer_missing_owned':
+                    precomputed_count = len(pub_d.get('springer_missing_owned_ids') or [])
+                elif shelf == 'amazon_missing_owned':
+                    amz_d = get_dynamic_amazon_shelf()
+                    precomputed_count = len(amz_d.get('amazon_missing_owned_ids') or [])
+                elif shelf == 'missing_owned':
+                    amz_d = get_dynamic_amazon_shelf()
+                    precomputed_count = len(set(amz_d.get('amazon_missing_owned_ids') or []) | set(pub_d.get('publisher_missing_owned_ids') or []))
+                else:
+                    precomputed_count = len(pub_d.get('all_ids') or [])
 
         return _PrecomputedCountPaginator(
             queryset,
@@ -1269,6 +1346,7 @@ class DashboardView(ListView):
             get_bad_metadata_item_ids,
             get_dynamic_amazon_shelf,
             get_dynamic_bookmarked_shelf,
+            get_dynamic_publisher_owned_shelf,
             get_enriched_item_ids_index,
             get_enriched_tags_and_folders_index,
             get_file_enrich_diagnostic,
@@ -1280,6 +1358,7 @@ class DashboardView(ListView):
             is_file_enriched,
             ENRICHABLE_FORMATS,
             lookup_amazon_info_for_item,
+            lookup_publisher_owned_info_for_item,
         )
 
         context = super().get_context_data(**kwargs)
@@ -1306,6 +1385,10 @@ class DashboardView(ListView):
         context['search_keywords_spec'] = SEARCH_KEYWORDS_SPEC
         context['active_search_badges'] = parsed_q['active_badges']
         context['selected_shelf'] = self.request.GET.get('shelf', '').strip().lower()
+        if not context['selected_shelf'] and ('quarantined', False) in (parsed_q.get('status_flags') or []):
+            context['selected_shelf'] = 'quarantined_missing'
+        if context['selected_shelf'] == 'quarantined':
+            context['selected_shelf'] = 'quarantined_missing'
         selected_tags = [t.strip() for t in self.request.GET.getlist('tag') if t.strip()]
         context['selected_tags'] = selected_tags
         context['selected_tag'] = selected_tags[0] if selected_tags else ''
@@ -1323,6 +1406,8 @@ class DashboardView(ListView):
         context['selected_types'] = [t for t in self.request.GET.getlist('type') if t]
         context['selected_formats'] = [f for f in self.request.GET.getlist('format') if f]
         raw_sort = self.request.GET.get('sort', '').strip().lower()
+        if not raw_sort and parsed_q.get('sort_override'):
+            raw_sort = parsed_q['sort_override']
         if (context['selected_author'] or context['selected_series']) and not raw_sort:
             raw_sort = 'pubdate_desc'
         context['selected_sort'] = raw_sort
@@ -1333,7 +1418,10 @@ class DashboardView(ListView):
             pass
         context['selected_read_status'] = self.request.GET.get('read_status', '').strip().lower()
         context['selected_enrich_status'] = self.request.GET.get('enrich_status', '').strip().lower()
-        context['selected_cover_issue'] = self.request.GET.get('cover_issue', '').strip().lower()
+        raw_cov_issue = self.request.GET.get('cover_issue', '').strip().lower()
+        if raw_cov_issue in ('generic_cover', 'generic_covers', 'template'):
+            raw_cov_issue = 'generic'
+        context['selected_cover_issue'] = raw_cov_issue
         context['selected_review_type'] = self.request.GET.get('review_type', '').strip().lower()
 
         raw_stats, available_formats = _get_cached_dashboard_meta()
@@ -1379,6 +1467,7 @@ class DashboardView(ListView):
         context['missing_cover_count'] = nc_cnt
         context['missing_cover_only_count'] = int(nc_shelf.get('missing_count') or 0)
         context['text_only_cover_count'] = int(nc_shelf.get('text_only_count') or 0)
+        context['generic_cover_count'] = int(nc_shelf.get('generic_count') or 0)
         context['enrich_status_counts'] = {
             'enriched': enr_cnt,
             'needs_enriching': needs_enr_cnt,
@@ -1403,6 +1492,12 @@ class DashboardView(ListView):
 
         amz_data = get_dynamic_amazon_shelf()
         context['amazon_counts'] = amz_data.get('counts', {})
+        pub_owned_data = get_dynamic_publisher_owned_shelf()
+        context['publisher_owned_counts'] = pub_owned_data.get('counts', {})
+        context['missing_owned_total_count'] = len(
+            set(amz_data.get('amazon_missing_owned_ids') or [])
+            | set(pub_owned_data.get('publisher_missing_owned_ids') or [])
+        )
 
         bm_groups = self._compute_bookmark_progress_groups(
             bm_data, amz_data, shelf=context['selected_shelf']
@@ -1434,14 +1529,19 @@ class DashboardView(ListView):
                         pass
 
         # Attach Moon+ reading progress badge, Amazon ownership/bookmark info, Interesting flag, and Enrichment flags
+        from .opds import get_user_selected_cover_item_ids
+        user_custom_cover_ids = get_user_selected_cover_item_ids([it.id for it in page_items]) if page_items else set()
         enr_excl_set = enr_idx.get('excluded_from_needs_enriching_ids_set') or set()
         for it in page_items:
             it.is_interesting = str(it.id) in interesting_ids_set
             it.is_bad_metadata = str(it.id) in bad_metadata_ids_set
+            it.has_custom_cover = str(it.id) in user_custom_cover_ids
             m_info = moon_meta_by_id.get(str(it.id))
             it.moon_bookmark_info = m_info if m_info else None
             amz_info = lookup_amazon_info_for_item(it)
             it.amazon_ownership_info = amz_info if amz_info else None
+            pub_info = lookup_publisher_owned_info_for_item(it)
+            it.publisher_ownership_info = pub_info if pub_info else None
             f_list = list(it.files.all())
             if (
                 it.item_type == 'BOOK'
@@ -1491,7 +1591,87 @@ class DashboardView(ListView):
                         it.enrich_diag_json = json.dumps(diag_copy)
                         break
 
-        from .opds import get_periodical_series_summary, get_virtual_folders_summary
+        from .opds import (
+            attach_latest_edition_info_to_items,
+            get_periodical_series_summary,
+            get_quarantined_missing_shelf,
+            get_virtual_folders_summary,
+        )
+        quar_shelves = ('quarantined_missing', 'quarantined_covered', 'quarantined_dismissed', 'quarantined_all')
+        context['quarantined_shelf_active'] = context['selected_shelf'] in quar_shelves
+        quar_shelf_data = get_quarantined_missing_shelf(
+            vx_unlocked=vx_unlocked,
+            allow_blocking=bool(context['quarantined_shelf_active']),
+        )
+        context['quarantined_missing_counts'] = quar_shelf_data.get('counts', {})
+        if context['quarantined_shelf_active']:
+            from django.core.paginator import Paginator as _QuarPaginator
+            if context['selected_shelf'] == 'quarantined_covered':
+                quar_list = list(quar_shelf_data.get('covered_items') or [])
+            elif context['selected_shelf'] == 'quarantined_dismissed':
+                quar_list = list(quar_shelf_data.get('dismissed_items') or [])
+            elif context['selected_shelf'] == 'quarantined_all':
+                quar_list = list(quar_shelf_data.get('all_items') or [])
+            else:
+                quar_list = list(quar_shelf_data.get('missing_items') or [])
+
+            # Filter quarantined entries by search terms, folder tags, formats, and author
+            q_terms = [
+                t.lower() for t in (parsed_q.get('free_terms') or []) + (parsed_q.get('whole_word_terms') or [])
+                if t and str(t).strip()
+            ]
+            for fld_k, fld_v, fld_neg in (parsed_q.get('field_filters') or []):
+                if not fld_neg and fld_v:
+                    q_terms.append(str(fld_v).lower())
+            if q_terms:
+                quar_list = [
+                    qe for qe in quar_list
+                    if all(
+                        qt in f"{qe.get('title', '')} {qe.get('authors', '')} {qe.get('publisher_hint', '')} {qe.get('isbn', '')} {qe.get('file_name', '')}".lower()
+                        for qt in q_terms
+                    )
+                ]
+            if selected_folders:
+                fld_set_low = {f.lower() for f in selected_folders}
+                quar_list = [qe for qe in quar_list if (qe.get('top_folder') or '').lower() in fld_set_low]
+            if context['selected_formats']:
+                fmt_set_up = {f.upper() for f in context['selected_formats']}
+                quar_list = [qe for qe in quar_list if (qe.get('file_format') or '').upper() in fmt_set_up]
+            if context['selected_author']:
+                auth_low = context['selected_author'].lower()
+                quar_list = [
+                    qe for qe in quar_list
+                    if auth_low in f"{qe.get('authors', '')} {qe.get('publisher_hint', '')}".lower()
+                ]
+
+            if raw_sort == 'title_asc':
+                quar_list.sort(key=lambda x: (x.get('title') or '').lower())
+            elif raw_sort == 'title_desc':
+                quar_list.sort(key=lambda x: (x.get('title') or '').lower(), reverse=True)
+            elif raw_sort == 'author_asc':
+                quar_list.sort(key=lambda x: ((x.get('authors') or x.get('publisher_hint') or 'zzz').lower(), (x.get('title') or '').lower()))
+            elif raw_sort == 'author_desc':
+                quar_list.sort(key=lambda x: ((x.get('authors') or x.get('publisher_hint') or '').lower(), (x.get('title') or '').lower()), reverse=True)
+            elif raw_sort in ('filedate_asc', 'added_asc'):
+                quar_list.reverse()
+
+            q_paginator = _QuarPaginator(quar_list, self.paginate_by)
+            try:
+                q_page_num = int(self.request.GET.get('page') or 1)
+            except ValueError:
+                q_page_num = 1
+            q_page_obj = q_paginator.get_page(q_page_num)
+            context['quarantined_items'] = list(q_page_obj.object_list)
+            context['items'] = context['quarantined_items']
+            context['paginator'] = q_paginator
+            context['page_obj'] = q_page_obj
+            context['is_paginated'] = q_page_obj.has_other_pages()
+
+        try:
+            if page_items:
+                attach_latest_edition_info_to_items(page_items)
+        except Exception:
+            pass
         tags_idx = get_enriched_tags_and_folders_index()
         context['enriched_tags'] = tags_idx.get('tag_counts', [])[:60]
         context['enriched_folders'] = get_virtual_folders_summary(vx_unlocked=vx_unlocked)
@@ -1530,13 +1710,22 @@ class SuggestAPIView(APIView):
         if request.GET.get('repair_covers') in ('start', 'status'):
             from .opds import start_or_get_cover_repair_status
             return Response(start_or_get_cover_repair_status(start=(request.GET.get('repair_covers') == 'start')))
+        if request.GET.get('fix_switched') in ('start', 'status', 'stop', 'dry_run'):
+            from .opds import start_or_get_switched_no_match_batch
+            sw_act = str(request.GET.get('fix_switched') or 'status').strip()
+            sw_lim = int(request.GET.get('limit') or 0)
+            sw_likely = str(request.GET.get('only_likely') or '').lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sw_act, limit=sw_lim, only_likely=sw_likely))
         if request.GET.get('split_bundles') == 'run':
             import threading
             from .opds import split_all_multi_book_catalog_items
             threading.Thread(target=split_all_multi_book_catalog_items, daemon=True).start()
             return Response({'ok': True, 'started_background_split': True})
         if request.GET.get('purge_orphans') == '1':
-            deleted_cnt, _ = CatalogItem.objects.filter(item_type__in=['BOOK', 'MAGAZINE'], files__isnull=True).delete()
+            from .opds import get_dynamic_publisher_owned_shelf
+            _pub_d = get_dynamic_publisher_owned_shelf()
+            _pub_protected_ids = list((_pub_d.get('all_ids') or [])) + list((_pub_d.get('publisher_missing_owned_ids') or []))
+            deleted_cnt, _ = CatalogItem.objects.filter(item_type__in=['BOOK', 'MAGAZINE'], files__isnull=True).exclude(id__in=_pub_protected_ids).delete()
             if deleted_cnt:
                 adjust_cached_books_count(-deleted_cnt)
             return Response({'ok': True, 'orphans_deleted': deleted_cnt})
@@ -3321,9 +3510,11 @@ class ConversionItemsAPIView(APIView):
 
                     cat_item = None
                     req_item_id = (request.data.get('item_id') or '').strip()
+                    req_file_id = (request.data.get('file_id') or '').strip()
                     from .opds import resolve_catalog_item_by_id_or_fallback
                     cat_item = resolve_catalog_item_by_id_or_fallback(
                         item_or_id=req_item_id,
+                        file_id=req_file_id,
                         file_path=file_path,
                         isbn=final_isbn,
                         title=final_title,
@@ -3434,13 +3625,14 @@ class ConversionItemsAPIView(APIView):
                     'ok': True,
                     'action': 'approve',
                     'item_id': str(cat_item.id) if 'cat_item' in locals() and cat_item else (request.data.get('item_id') or ''),
+                    'requested_item_id': (request.data.get('item_id') or ''),
                     'file_path': file_path,
                     'title': final_title,
                     'authors': final_author,
                     'publisher': final_pub,
                     'isbn': final_isbn,
                     'description': final_desc,
-                    'cover_url': (cat_item.cover_thumbnail or final_cover) if 'cat_item' in locals() and cat_item else final_cover,
+                    'cover_url': (cat_item.cover_thumbnail or cat_item.cover_image_url or final_cover) if 'cat_item' in locals() and cat_item else final_cover,
                     'merged_item_ids': merged_item_ids if 'merged_item_ids' in locals() else [],
                 })
             elif action == 'ignore':
@@ -3646,6 +3838,8 @@ def _serialize_catalog_item(item: CatalogItem, include_cover: bool = False, path
         'cover_image_url': item.cover_image_url or '',
         'created_at': item.created_at.isoformat() if item.created_at else None,
         'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+        'edition_label': getattr(item, 'edition_label', '') or '',
+        'latest_edition_info': getattr(item, 'latest_edition_info', None),
         'files': files_list,
     }
     if include_cover:
@@ -3702,6 +3896,11 @@ class CatalogSearchAPIView(APIView):
             total = qs.count()
 
         page_items = list(qs[offset:offset + limit])
+        try:
+            from .opds import attach_latest_edition_info_to_items
+            attach_latest_edition_info_to_items(page_items)
+        except Exception:
+            pass
         serialized = [
             _serialize_catalog_item(it, include_cover=include_cover, path_prefix=path_prefix)
             for it in page_items
@@ -3762,6 +3961,11 @@ class CatalogItemDetailAPIView(APIView):
 
         path_prefix = (request.GET.get('path_prefix') or 'U:\\Media').strip()
         include_cover = (request.GET.get('include_cover') or 'true').lower() in ('1', 'true', 'yes')
+        try:
+            from .opds import attach_latest_edition_info_to_items
+            attach_latest_edition_info_to_items([item])
+        except Exception:
+            pass
         data = _serialize_catalog_item(item, include_cover=include_cover, path_prefix=path_prefix)
 
         # Look up any epubmeta enrichment history for this item's files in scanner_state.db / BookDB
@@ -4182,6 +4386,13 @@ class OnDemandEnrichAPIView(APIView):
                 str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
             )
             return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
+        if action in ('batch_fix_switched', 'fix_switched_status', 'stop_fix_switched'):
+            from .opds import start_or_get_switched_no_match_batch
+            sub_act = 'stop' if action == 'stop_fix_switched' else ('status' if action == 'fix_switched_status' else str(body.get('sub_action') or 'start'))
+            sw_dry = str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            sw_lim = int(body.get('limit') or request.GET.get('limit') or 0)
+            sw_likely = str(body.get('only_likely', request.GET.get('only_likely', 'false'))).lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sub_act, dry_run=sw_dry, limit=sw_lim, only_likely=sw_likely))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
@@ -4290,6 +4501,13 @@ class RevertEnrichAPIView(APIView):
                 str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
             )
             return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
+        if action in ('batch_fix_switched', 'fix_switched_status', 'stop_fix_switched'):
+            from .opds import start_or_get_switched_no_match_batch
+            sub_act = 'stop' if action == 'stop_fix_switched' else ('status' if action == 'fix_switched_status' else str(body.get('sub_action') or 'start'))
+            sw_dry = str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            sw_lim = int(body.get('limit') or request.GET.get('limit') or 0)
+            sw_likely = str(body.get('only_likely', request.GET.get('only_likely', 'false'))).lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sub_act, dry_run=sw_dry, limit=sw_lim, only_likely=sw_likely))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         file_path = (body.get('file_path') or request.GET.get('file_path') or '').strip()
@@ -4333,6 +4551,13 @@ class MoveToMagAPIView(APIView):
                 str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
             )
             return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
+        if action in ('batch_fix_switched', 'fix_switched_status', 'stop_fix_switched'):
+            from .opds import start_or_get_switched_no_match_batch
+            sub_act = 'stop' if action == 'stop_fix_switched' else ('status' if action == 'fix_switched_status' else str(body.get('sub_action') or 'start'))
+            sw_dry = str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            sw_lim = int(body.get('limit') or request.GET.get('limit') or 0)
+            sw_likely = str(body.get('only_likely', request.GET.get('only_likely', 'false'))).lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sub_act, dry_run=sw_dry, limit=sw_lim, only_likely=sw_likely))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         target_bucket = str(body.get('target_bucket') or request.GET.get('target_bucket') or '').strip()
@@ -4386,6 +4611,13 @@ class MoveToBookAPIView(APIView):
                 str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
             )
             return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
+        if action in ('batch_fix_switched', 'fix_switched_status', 'stop_fix_switched'):
+            from .opds import start_or_get_switched_no_match_batch
+            sub_act = 'stop' if action == 'stop_fix_switched' else ('status' if action == 'fix_switched_status' else str(body.get('sub_action') or 'start'))
+            sw_dry = str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            sw_lim = int(body.get('limit') or request.GET.get('limit') or 0)
+            sw_likely = str(body.get('only_likely', request.GET.get('only_likely', 'false'))).lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sub_act, dry_run=sw_dry, limit=sw_lim, only_likely=sw_likely))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         target_folder = (body.get('target_folder') or request.GET.get('target_folder') or '').strip() or None
@@ -4426,6 +4658,13 @@ class UndoMoveToMagAPIView(APIView):
                 str(body.get('apply_merge', request.GET.get('apply_merge', 'false'))).lower() in ('1', 'true', 'yes')
             )
             return Response(scan_and_merge_enriched_duplicates(apply_merge=apply_m))
+        if action in ('batch_fix_switched', 'fix_switched_status', 'stop_fix_switched'):
+            from .opds import start_or_get_switched_no_match_batch
+            sub_act = 'stop' if action == 'stop_fix_switched' else ('status' if action == 'fix_switched_status' else str(body.get('sub_action') or 'start'))
+            sw_dry = str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            sw_lim = int(body.get('limit') or request.GET.get('limit') or 0)
+            sw_likely = str(body.get('only_likely', request.GET.get('only_likely', 'false'))).lower() in ('1', 'true', 'yes')
+            return Response(start_or_get_switched_no_match_batch(action=sub_act, dry_run=sw_dry, limit=sw_lim, only_likely=sw_likely))
         item_id = str(body.get('item_id') or request.GET.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or request.GET.get('file_id') or '').strip()
         moved_files = body.get('moved_files')
@@ -4742,9 +4981,26 @@ class AiDescriptionGenerateAPIView(APIView):
     default_mode = 'description'
 
     def post(self, request):
-        from .opds import generate_ai_description_from_content
+        from .opds import generate_ai_description_from_content, repair_truncated_descriptions_in_bookdb
 
         body = request.data or {}
+        action = str(body.get('action') or request.GET.get('action') or '').strip().lower()
+        if action == 'repair_truncated_status':
+            from .opds import get_truncated_repair_job_status
+            return Response(get_truncated_repair_job_status(), status=200)
+        if action in ('repair_truncated', 'scan_truncated'):
+            dry_run = (action == 'scan_truncated') or (
+                str(body.get('dry_run', request.GET.get('dry_run', 'false'))).lower() in ('1', 'true', 'yes')
+            )
+            bg = str(body.get('background', request.GET.get('background', 'false'))).lower() in ('1', 'true', 'yes')
+            try:
+                limit = int(body.get('limit') or request.GET.get('limit') or 100)
+            except Exception:
+                limit = 100
+            if bg and not dry_run:
+                from .opds import start_background_truncated_description_repair
+                return Response(start_background_truncated_description_repair(limit=limit), status=200)
+            return Response(repair_truncated_descriptions_in_bookdb(limit=limit, dry_run=dry_run), status=200)
         item_id = str(body.get('item_id') or '').strip()
         file_id = str(body.get('file_id') or '').strip()
         file_path = str(body.get('file_path') or '').strip()
@@ -5472,7 +5728,45 @@ class WishlistCheckAPIView(APIView):
         import time as _t
         import urllib.parse
         from django.db.models.functions import Upper
-        from .opds import is_file_enriched
+        from .opds import (
+            _ENRICHED_PATHS_CACHE,
+            get_enriched_paths_set,
+            is_file_enriched,
+            lookup_amazon_info_for_item,
+        )
+
+        get_enriched_paths_set()
+        status_by_path = _ENRICHED_PATHS_CACHE.get('status_by_path') or {}
+
+        def _is_file_quarantined(fp: str) -> bool:
+            if not fp:
+                return False
+            st_obj = status_by_path.get(fp)
+            if st_obj is None:
+                if fp.startswith('/books/'):
+                    st_obj = status_by_path.get('/volume1/common/Media/Books/' + fp[len('/books/'):])
+                elif fp.startswith('/volume1/common/Media/Books/'):
+                    st_obj = status_by_path.get('/books/' + fp[len('/volume1/common/Media/Books/'):])
+            st_val = st_obj.get('status') if isinstance(st_obj, dict) else st_obj
+            return str(st_val or '').upper() == 'QUARANTINED'
+
+        def _get_valid_item_files(it_obj: CatalogItem) -> list[FileLocation]:
+            return [
+                fl for fl in it_obj.files.all()
+                if not fl.is_invalid and not _is_file_quarantined(fl.file_path or '')
+            ]
+
+        def _is_usable_library_item(it_obj: CatalogItem) -> bool:
+            if it_obj.item_type in ('KINDLE', 'AUDIBLE'):
+                return True
+            if _get_valid_item_files(it_obj):
+                return True
+            try:
+                if lookup_amazon_info_for_item(it_obj):
+                    return True
+            except Exception:
+                pass
+            return False
 
         t_start = _t.monotonic()
         _ensure_wishlist_fast_indexes()
@@ -5551,6 +5845,8 @@ class WishlistCheckAPIView(APIView):
             if all_isbns:
                 q_id |= Q(isbn__in=list(all_isbns)) | Q(asin__in=list(all_isbns))
             for it in CatalogItem.objects.filter(q_id).order_by().prefetch_related('files')[:500]:
+                if not _is_usable_library_item(it):
+                    continue
                 if it.asin:
                     ca = re.sub(r'[^A-Za-z0-9]', '', it.asin).upper()
                     by_asin.setdefault(ca, []).append(it)
@@ -5577,6 +5873,8 @@ class WishlistCheckAPIView(APIView):
             if it_obj.id in seen_batch_cand_ids:
                 return
             seen_batch_cand_ids.add(it_obj.id)
+            if not _is_usable_library_item(it_obj):
+                return
             it_cf, it_cb = _clean_wishlist_title(it_obj.title or '')
             it_nf = _norm_title_preserve_qualifiers(it_cf or it_obj.title)
             it_nb = _norm_lookup_str(it_cb or it_obj.title)
@@ -5715,7 +6013,7 @@ class WishlistCheckAPIView(APIView):
                     elif sname and is_unknown_auth:
                         # Query has a known author, but library item has 'Unknown Author':
                         # Check if query author surname appears in the library item's filename or raw title
-                        it_files_text = _norm_lookup_str(f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}")
+                        it_files_text = _norm_lookup_str(f"{it.title or ''} {' '.join(f.file_name or '' for f in _get_valid_item_files(it))}")
                         if sname in it_files_text.split():
                             author_verified = True
                         elif it_norm_full == norm_ft and len(bt_words) >= 3:
@@ -5746,7 +6044,8 @@ class WishlistCheckAPIView(APIView):
                         ci_clean = re.sub(r'[^0-9Xx]', '', str(it.isbn)).upper()
                         if len(ci_clean) in (10, 13):
                             it_isbns.add(ci_clean)
-                    for m_isbn in re.findall(r'\b(97[89]\d{10})\b', f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}"):
+                    valid_it_files = _get_valid_item_files(it)
+                    for m_isbn in re.findall(r'\b(97[89]\d{10})\b', f"{it.title or ''} {' '.join(f.file_name or '' for f in valid_it_files)}"):
                         it_isbns.add(m_isbn)
                     for ci_code in list(it_isbns):
                         if len(ci_code) == 10:
@@ -5759,7 +6058,7 @@ class WishlistCheckAPIView(APIView):
                                 it_isbns.add(i10)
 
                     it_ed_markers, it_text_year = _extract_edition_and_year_markers(
-                        f"{it.title or ''} {' '.join(f.file_name or '' for f in it.files.all())}"
+                        f"{it.title or ''} {' '.join(f.file_name or '' for f in valid_it_files)}"
                     )
                     it_pub_year = it.pub_date.year if it.pub_date else it_text_year
 
@@ -5824,7 +6123,7 @@ class WishlistCheckAPIView(APIView):
             def _serialize_match_obj(it: CatalogItem, note: str = '') -> dict:
                 files_data = []
                 is_enr = False
-                for fl in it.files.all():
+                for fl in _get_valid_item_files(it):
                     if not is_enr and fl.file_path and is_file_enriched(fl.file_path):
                         is_enr = True
                     fmt = (fl.file_format or '').upper()
@@ -5896,6 +6195,33 @@ class WishlistCheckAPIView(APIView):
             search_q = title_core or entry['raw_asin']
             annas_q = primary_isbn or annas_title_q or search_q
 
+            # Check if this book is also owned in Packt / Springer Owned shelves (synced via sync_owned.bat)
+            server_owned_sources = []
+            try:
+                from .opds import get_dynamic_publisher_owned_shelf, lookup_publisher_owned_info_for_item
+                pub_shelf = get_dynamic_publisher_owned_shelf()
+                for it_m in matched_items:
+                    p_info = lookup_publisher_owned_info_for_item(it_m)
+                    if p_info:
+                        lbl = p_info.get('short_badge') or ('Owned on Springer' if 'SPRINGER' in str(p_info.get('source', '')).upper() else 'Owned on Packt')
+                        if lbl not in server_owned_sources:
+                            server_owned_sources.append(lbl)
+                if not server_owned_sources:
+                    for ci_code in sorted_isbns:
+                        p_info = (pub_shelf.get('by_isbn') or {}).get(ci_code)
+                        if p_info:
+                            lbl = p_info.get('short_badge') or ('Owned on Springer' if 'SPRINGER' in str(p_info.get('source', '')).upper() else 'Owned on Packt')
+                            if lbl not in server_owned_sources:
+                                server_owned_sources.append(lbl)
+                if not server_owned_sources and entry['norm_base_title']:
+                    p_info = (pub_shelf.get('by_norm_title') or {}).get(entry['norm_base_title'])
+                    if p_info:
+                        lbl = p_info.get('short_badge') or ('Owned on Springer' if 'SPRINGER' in str(p_info.get('source', '')).upper() else 'Owned on Packt')
+                        if lbl not in server_owned_sources:
+                            server_owned_sources.append(lbl)
+            except Exception:
+                pass
+
             results.append({
                 'key': entry['key'],
                 'asin': entry['raw_asin'],
@@ -5907,6 +6233,7 @@ class WishlistCheckAPIView(APIView):
                 'cleaned_author': entry['clean_author'],
                 'author_surname': entry['surname'],
                 'in_library': bool(serialized_matches),
+                'owned_sources': server_owned_sources,
                 'match_type': match_type,
                 'match_count': len(serialized_matches),
                 'is_enriched': any_enriched,
@@ -5956,6 +6283,55 @@ class WishlistCheckAPIView(APIView):
         })
         resp['Access-Control-Allow-Origin'] = '*'
         return resp
+
+
+class QuarantinedMissingShelfAPIView(APIView):
+    """
+    REST API endpoint (`/mylibrary/api/quarantined-missing/`) to list quarantined books
+    that have no valid copy in `BookDB`, or to dismiss / restore entries.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        from .opds import get_quarantined_missing_shelf
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        force = request.GET.get('refresh') == '1'
+        mode = (request.GET.get('mode') or 'missing').strip().lower()
+        data = get_quarantined_missing_shelf(vx_unlocked=vx_unlocked, force_refresh=force)
+        if mode == 'covered':
+            items = data.get('covered_items', [])
+        elif mode == 'dismissed':
+            items = data.get('dismissed_items', [])
+        elif mode == 'all':
+            items = data.get('all_items', [])
+        else:
+            items = data.get('missing_items', [])
+        return Response({
+            'ok': True,
+            'mode': mode,
+            'counts': data.get('counts', {}),
+            'items': items,
+        })
+
+    def post(self, request):
+        from .opds import get_quarantined_missing_shelf, set_quarantined_book_dismissed
+        vx_unlocked = bool(request.session.get('vx_unlocked', False))
+        body = request.data or {}
+        action = str(body.get('action') or 'dismiss').strip().lower()
+        if action == 'refresh':
+            data = get_quarantined_missing_shelf(vx_unlocked=vx_unlocked, force_refresh=True)
+            return Response({'ok': True, 'counts': data.get('counts', {})})
+
+        quar_key = str(body.get('quar_key') or '').strip()
+        dismissed = action not in ('undismiss', 'restore', 'false', '0')
+        res = set_quarantined_book_dismissed(quar_key, dismissed=dismissed)
+        if not res.get('ok'):
+            return Response(res, status=status.HTTP_400_BAD_REQUEST)
+        data = get_quarantined_missing_shelf(vx_unlocked=vx_unlocked, force_refresh=True)
+        res['counts'] = data.get('counts', {})
+        return Response(res)
+
 
 
 

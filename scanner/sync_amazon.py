@@ -525,12 +525,23 @@ def push_items_to_mylibrary(server_url: str, api_token: str, items: List[Dict[st
     print(f"Syncing {len(items):,} Amazon/Kindle/Audible records to {url}...")
     chunk_size = 500
     last_res: Dict[str, Any] = {}
+    synced_types = sorted({str(it.get("item_type") or "KINDLE").upper() for it in items})
 
     for start_idx in range(0, len(items), chunk_size):
         chunk = items[start_idx : start_idx + chunk_size]
+        is_final = (start_idx + chunk_size) >= len(items)
         if len(items) > chunk_size:
             print(f"  -> Uploading batch {start_idx + 1:,}..{start_idx + len(chunk):,} of {len(items):,}...")
-        resp = requests.post(url, json={"items": chunk}, headers=headers, timeout=120)
+        resp = requests.post(
+            url,
+            json={
+                "items": chunk,
+                "synced_types": synced_types if is_final else [],
+                "is_final_chunk": is_final,
+            },
+            headers=headers,
+            timeout=120,
+        )
         if resp.status_code in (200, 201):
             last_res = resp.json()
         else:
@@ -544,6 +555,7 @@ def push_items_to_mylibrary(server_url: str, api_token: str, items: List[Dict[st
     print(f" Purchased on Amazon      : {last_res.get('kindle_purchased', 0):,}")
     print(f" Kindle+ (KU / Prime)     : {last_res.get('kindle_plus', 0):,}")
     print(f" Audible Audiobooks       : {last_res.get('audible_total', 0):,}")
+    print(f" Missing Owned (Removed)  : {last_res.get('amazon_missing_owned', 0):,}")
     print(f" With Kindle Bookmarks    : {last_res.get('with_bookmarks', 0):,}")
     print(f" Matched to NAS Books     : {last_res.get('matched_catalog_items', 0):,}")
     print("=" * 88)

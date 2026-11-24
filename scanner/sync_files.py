@@ -28,11 +28,12 @@ def process_file_metadata(args):
         return abspath, None, str(e)
 
 
-def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
+def process_drop_folders_with_orgperiodicals(epubmeta_config=None, server_url=None, api_token=None):
     """
     Pre-Stage 0: Automatically organize incoming periodicals from `/toMags` into `/periodicals`
     (or `/xAdult` when classified as 'Adult Periodicals'), `/xtoAdult` into `/xAdult`,
     and incoming books from `/toBooks` into `/books/<Category>/<Shard>/`.
+    Immediately syncs newly organized `/toBooks` files to the catalog server so they appear in Recently Added right away.
     """
     try:
         from pathlib import Path
@@ -46,6 +47,18 @@ def process_drop_folders_with_orgperiodicals(epubmeta_config=None):
                 for r in tb_res:
                     if r.get('ok'):
                         print(f"  [OrgBooks] {r.get('status_msg')}", flush=True)
+                        dest_p = r.get('target_path')
+                        if dest_p and Path(dest_p).exists() and server_url and api_token:
+                            try:
+                                os.utime(str(dest_p), None)
+                                abspath = os.path.abspath(str(dest_p))
+                                stat = os.stat(abspath)
+                                meta = extract_metadata(abspath, item_type='BOOK')
+                                meta['item_type'] = 'BOOK'
+                                if send_to_server(server_url, api_token, meta):
+                                    update_cached_state(abspath, str(stat.st_mtime), stat.st_size, meta.get('file_hash'))
+                            except Exception as sync_err:
+                                print(f"  [OrgBooks] Immediate sync warning for {dest_p}: {sync_err}", flush=True)
                     else:
                         print(f"  [OrgBooks] Error: {r.get('error')}", flush=True)
     except Exception as e_tb:
@@ -583,7 +596,7 @@ if __name__ == '__main__':
             print(f"Connecting to central server: {server_url}")
 
             if not args.dir:
-                process_drop_folders_with_orgperiodicals(epubmeta_config)
+                process_drop_folders_with_orgperiodicals(epubmeta_config, server_url=server_url, api_token=api_token)
 
             total_dis = 0
             total_sync = 0

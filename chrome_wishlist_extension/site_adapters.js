@@ -953,6 +953,154 @@
         const mPub = bodyTxt.match(/(?:Published|Publication\s+Date|Release\s+Date|On\s+Sale)\s*:?\s*[^\n\r]{0,30}?\b(19[5-9]\d|20[0-3]\d)\b/i);
         return mPub ? parseInt(mPub[1], 10) : null;
       }
+    },
+
+    // =========================================================================
+    // 11. Packt Publishing (packtpub.com & subscription.packtpub.com)
+    // =========================================================================
+    {
+      id: 'packt',
+      name: 'Packt',
+      hostRegex: /(^|\.)packtpub\.com$/i,
+      pathRegex: /^(?:\/[a-z]{2}(?:-[a-z]{2})?)?\/(?:product|book|video)\/[^/]+/i,
+      imageAnchorSelectors: [
+        '.product-info__image',
+        '.product-image',
+        '[class*="product-image"]',
+        '[class*="product-info__header"]',
+        'img[src*="static.packt-cdn.com/products/"]',
+        'img[src*="content.packt.com"]',
+        'h1.product-info__title',
+        'main h1',
+        'h1'
+      ],
+      titleSelectors: [
+        'h1.product-info__title',
+        'main h1',
+        'h1'
+      ],
+      authorSelectors: [
+        '.product-info__author',
+        '[class*="product-info__author"]',
+        '[class*="author-name"]',
+        'a[href*="/authors/"]'
+      ],
+      getTitle(doc, url) {
+        // 1. Check H1
+        const h1 = firstElementBySelectors(doc, ['h1.product-info__title', 'main h1', 'h1']);
+        if (h1 && h1.textContent && h1.textContent.trim()) {
+          const cleanedH1 = h1.textContent
+            .replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (cleanedH1) return cleanedH1;
+        }
+        // 2. Check JSON-LD Book/Product name
+        const ldScripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ldScripts) {
+          try {
+            const parsed = JSON.parse(s.textContent || '{}');
+            const items = Array.isArray(parsed) ? parsed : (parsed['@graph'] || [parsed]);
+            for (const item of items) {
+              if (item && item.name && /book|product/i.test(String(item['@type'] || ''))) {
+                return String(item.name)
+                  .replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+              }
+            }
+          } catch (_) {}
+        }
+        // 3. Check og:title or document.title
+        const ogTitle = doc.querySelector('meta[property="og:title"]');
+        const rawMetaTitle = (ogTitle && ogTitle.getAttribute('content')) || doc.title || '';
+        if (rawMetaTitle) {
+          const t = rawMetaTitle
+            .split(/\s*\|\s*/)[0]
+            .replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '')
+            .replace(/\s*-\s*eBook\s*$/i, '')
+            .trim();
+          if (t && !/^packt$/i.test(t)) return t;
+        }
+        // 4. Fallback to URL slug (/en-us/product/parsing-algorithms-9781801074445 or /book/programming/9781801074445/...)
+        const mSlug = (url.pathname || '').match(/\/(?:product|book|video)\/(?:[^/]+\/)?([^/?#]+)/i);
+        if (mSlug && mSlug[1]) {
+          const slug = decodeURIComponent(mSlug[1]).replace(/-(?:97[89][0-9]{10}|\d{9}[0-9Xx])$/i, '');
+          if (!/^97[89][0-9]{10}$/.test(slug)) {
+            return slug
+              .split('-')
+              .filter(Boolean)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+              .join(' ');
+          }
+        }
+        return '';
+      },
+      getAuthor(doc) {
+        // 1. JSON-LD or meta tags
+        const ldAuthor = extractAuthorFromMetaOrJsonLd(doc);
+        if (ldAuthor) return ldAuthor;
+        // 2. Check Packt author DOM selectors
+        const domNodes = Array.from(
+          doc.querySelectorAll(
+            '.product-info__author, [class*="product-info__author"], [class*="author-name"], main a[href*="/authors/"]'
+          )
+        );
+        if (domNodes.length > 0) {
+          const names = domNodes
+            .map((el) => cleanExtractedAuthor((el.textContent || '').replace(/^by\s+/i, '')))
+            .filter((n) => n && n.length < 80 && !/packt|subscribe|free trial/i.test(n));
+          if (names.length > 0) return Array.from(new Set(names)).join(', ');
+        }
+        // 3. Look for "By <Author>" near H1
+        const h1 = doc.querySelector('h1.product-info__title, main h1, h1');
+        if (h1 && h1.parentElement) {
+          const containerTxt = (h1.parentElement.innerText || '').trim();
+          const mBy = containerTxt.match(/(?:^|\n)\s*By\s+([^\n\r|]{3,90})/i);
+          if (mBy && mBy[1]) {
+            return cleanExtractedAuthor(mBy[1]);
+          }
+        }
+        return '';
+      },
+      getIsbn(doc, url) {
+        // 1. Extract directly from URL path (/en-us/product/parsing-algorithms-9781801074445 or /book/programming/9781801074445/1)
+        const mUrl = (url.pathname || '').match(/(?:^|[\/\-])(97[89][0-9]{10}|\d{9}[0-9Xx])(?:[\/?#]|$)/i);
+        if (mUrl) {
+          const norm = normalizeIsbn13(mUrl[1]);
+          if (norm.digits) return norm;
+        }
+        // 2. Check Packt CDN product cover image URL
+        const packtImg = doc.querySelector('img[src*="static.packt-cdn.com/products/"], img[src*="content.packt.com/"]');
+        if (packtImg && packtImg.getAttribute('src')) {
+          const mImg = packtImg.getAttribute('src').match(/\/(97[89][0-9]{10})(?:\/|\.)/);
+          if (mImg) return { raw: mImg[1], digits: mImg[1] };
+        }
+        // 3. Meta tags / JSON-LD
+        const metaIsbn = extractIsbnFromMetaOrJsonLd(doc);
+        if (metaIsbn.digits) return metaIsbn;
+        // 4. Page text
+        const bodyTxt = (doc.body && doc.body.textContent) || '';
+        const mTxt = bodyTxt.match(/ISBN(?:-13)?\s*[:\s]*?(97[89][0-9\-]{10,14})/i);
+        if (mTxt) return normalizeIsbn13(mTxt[1]);
+        return { raw: '', digits: '' };
+      },
+      getPubYear(doc) {
+        const ldScripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ldScripts) {
+          const m = (s.textContent || '').match(/"(?:datePublished|releaseDate|publicationDate)"\s*:\s*"(19[7-9]\d|20[0-3]\d)/i);
+          if (m) return parseInt(m[1], 10);
+        }
+        const bodyTxt = (doc.querySelector('main') || doc.body).textContent || '';
+        const mPub = bodyTxt.match(/(?:Publication\s+date|Published|Release\s+date)\s*:?\s*(?:[A-Za-z]+\s+\d{1,2},?\s*)?\b(19[7-9]\d|20[0-3]\d)\b/i);
+        return mPub ? parseInt(mPub[1], 10) : null;
+      },
+      getEdition(doc, url) {
+        const h1 = doc.querySelector('h1');
+        const titleTxt = (h1 && h1.textContent) || (url && url.pathname) || '';
+        const m = titleTxt.match(/\b(\d+(?:st|nd|rd|th)|First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth)[-_\s]+Edition\b/i);
+        return m ? m[0].replace(/[-_]+/g, ' ').trim() : '';
+      }
     }
   ];
 
@@ -1456,6 +1604,159 @@
           author,
           edition: '',
           pub_year: null,
+          cardEl,
+          mountEl: cardEl
+        });
+      });
+    }
+
+    // 8. Packt Catalog, Search, Owned & Category Cards (packtpub.com/en-us/search, /catalog, subscription.packtpub.com/owned, etc.)
+    if (/(^|\.)packtpub\.com$/i.test(host) && !/^(?:\/[a-z]{2}(?:-[a-z]{2})?)?\/(?:product|book|video)\/[^/]+/i.test(url.pathname || '')) {
+      const productNodes = Array.from(
+        doc.querySelectorAll(
+          'a[href*="/product/"], a[href*="/book/"], a[href*="/video/"], img[src*="static.packt-cdn.com/products/"], img[src*="content.packt.com/"]'
+        )
+      );
+      const seenCardEls = new Set();
+
+      productNodes.forEach((nodeEl, idx) => {
+        const cardEl =
+          nodeEl.closest(
+            '.product-card, [class*="product-card"], [class*="ProductCard"], [class*="owned"], .search-result-item, .card, tr, article, li'
+          ) || nodeEl.parentElement;
+        if (!cardEl || seenCardEls.has(cardEl)) return;
+
+        // Find ISBN from links, image URLs, or card text
+        let rawIsbnStr = '';
+        let slugTitle = '';
+        const linkEl = cardEl.querySelector('a[href*="/product/"], a[href*="/book/"], a[href*="/video/"]') || (nodeEl.tagName === 'A' ? nodeEl : null);
+        if (linkEl) {
+          const href = linkEl.getAttribute('href') || '';
+          const mProd = href.match(/\/(?:product|book|video)\/([^/?#]+?)(?:[\/\-](97[89][0-9]{10}|\d{9}[0-9Xx]))(?:[\/?#]|$)/i);
+          const mBook = href.match(/\/(?:book|video)\/[^/?#]+\/(97[89][0-9]{10}|\d{9}[0-9Xx])(?:[\/?#]|$)/i);
+          if (mProd) {
+            slugTitle = decodeURIComponent(mProd[1] || '')
+              .replace(/-/g, ' ')
+              .trim()
+              .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+            rawIsbnStr = mProd[2];
+          } else if (mBook) {
+            rawIsbnStr = mBook[1];
+          }
+        }
+        if (!rawIsbnStr) {
+          const imgWithIsbn = cardEl.querySelector('img[src*="static.packt-cdn.com/products/"], img[src*="content.packt.com/"]');
+          if (imgWithIsbn) {
+            const mImg = (imgWithIsbn.getAttribute('src') || '').match(/\/(97[89][0-9]{10})(?:\/|\.)/);
+            if (mImg) rawIsbnStr = mImg[1];
+          }
+        }
+        if (!rawIsbnStr) {
+          const mTxt = (cardEl.textContent || '').match(/\b(97[89][0-9\-]{10,14})\b/);
+          if (mTxt) rawIsbnStr = mTxt[1];
+        }
+
+        const isbnObj = rawIsbnStr ? normalizeIsbn13(rawIsbnStr) : { raw: '', digits: '' };
+
+        const titleEl = cardEl.querySelector(
+          '.product-card__title, [class*="product-title"], [class*="title"], h2, h3, h4, h5, strong'
+        );
+        const imgEl = cardEl.querySelector('img[alt]');
+        const rawTitle =
+          (titleEl && titleEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          (imgEl && (imgEl.getAttribute('alt') || '').replace(/\s+/g, ' ').trim()) ||
+          (linkEl && linkEl.textContent && linkEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          slugTitle;
+        const title = rawTitle.replace(/\s*\[(?:Video|eBook|Print|Book|Audio)\]\s*$/i, '').trim();
+        if (!title && !isbnObj.digits) return;
+
+        seenCardEls.add(cardEl);
+
+        const authorEl = cardEl.querySelector('.product-card__author, [class*="author"], a[href*="/authors/"]');
+        const author = authorEl ? cleanExtractedAuthor(authorEl.textContent.replace(/^by\s+/i, '')) : '';
+
+        const ym = (cardEl.textContent || '').match(/\b(19[8-9]\d|20[0-3]\d)\b/);
+        const pub_year = ym ? parseInt(ym[1], 10) : null;
+
+        cards.push({
+          key: `packt_card_${isbnObj.digits || idx}_${title.slice(0, 24)}`,
+          siteName: 'Packt',
+          isbnRaw: isbnObj.raw,
+          isbnDigits: isbnObj.digits,
+          title,
+          author,
+          edition: '',
+          pub_year,
+          cardEl,
+          mountEl: cardEl
+        });
+      });
+    }
+
+    // 9. Springer My Bookshelf / Library Owned Cards (library.springer.com)
+    if (/^library\.springer\.com$/i.test(host)) {
+      const bookContainers = Array.from(
+        doc.querySelectorAll(
+          '[data-test*="book"], .app-card-open, .c-card-open, .c-card, article, li, tr, .book-item, [class*="book-card"], [class*="BookCard"]'
+        )
+      );
+      const candidateEls =
+        bookContainers.length > 0
+          ? bookContainers
+          : Array.from(doc.querySelectorAll('a[href*="/book/10."], a[href*="978-"], a[href*="978"]')).map(
+              (a) => a.closest('article, li, tr, div') || a.parentElement
+            );
+      const seenCardEls = new Set();
+
+      candidateEls.forEach((cardEl, idx) => {
+        if (!cardEl || seenCardEls.has(cardEl)) return;
+        const linkEl = cardEl.querySelector(
+          'a[href*="/book/"], a[href*="/referencework/"], a[href*="link.springer.com"], a[href*="10.1007/"]'
+        );
+        const imgEl = cardEl.querySelector('img[src*="978"], img[alt]');
+        const titleEl = cardEl.querySelector('h2, h3, h4, [class*="title"], [data-test*="title"]');
+
+        let rawIsbnStr = '';
+        if (linkEl) {
+          const mHref = (linkEl.getAttribute('href') || '').match(/(97[89][0-9\-]{10,14})/);
+          if (mHref) rawIsbnStr = mHref[1];
+        }
+        if (!rawIsbnStr && imgEl) {
+          const mImg = (imgEl.getAttribute('src') || '').match(/(97[89][0-9\-]{10,14})/);
+          if (mImg) rawIsbnStr = mImg[1];
+        }
+        if (!rawIsbnStr) {
+          const mTxt = (cardEl.textContent || '').match(/\b(97[89][0-9\-]{10,14})\b/);
+          if (mTxt) rawIsbnStr = mTxt[1];
+        }
+        const isbnObj = rawIsbnStr
+          ? { raw: rawIsbnStr, digits: rawIsbnStr.replace(/[^0-9]/g, '') }
+          : { raw: '', digits: '' };
+
+        const title =
+          (titleEl && titleEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          (linkEl && linkEl.textContent.replace(/\s+/g, ' ').trim()) ||
+          (imgEl && (imgEl.getAttribute('alt') || '').replace(/\s+/g, ' ').trim()) ||
+          '';
+        if ((!title || title.length < 3) && !isbnObj.digits) return;
+        // Skip container wrappers that wrap multiple books
+        if (cardEl.querySelectorAll('h2, h3').length > 2) return;
+
+        seenCardEls.add(cardEl);
+        const authorEl = cardEl.querySelector('[class*="author"], [data-test*="author"], .c-author-list');
+        const author = authorEl ? cleanExtractedAuthor(authorEl.textContent) : '';
+        const ym = (cardEl.textContent || '').match(/\b(19[5-9]\d|20[0-3]\d)\b/);
+        const pub_year = ym ? parseInt(ym[1], 10) : null;
+
+        cards.push({
+          key: `springer_lib_${isbnObj.digits || idx}_${title.slice(0, 24)}`,
+          siteName: 'Springer Library',
+          isbnRaw: isbnObj.raw,
+          isbnDigits: isbnObj.digits,
+          title,
+          author,
+          edition: '',
+          pub_year,
           cardEl,
           mountEl: cardEl
         });

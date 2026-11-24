@@ -63,6 +63,16 @@ DROP FUNCTION IF EXISTS catalog_top_folder(text);
 """
 
 
+def _apply_pg_functions(apps, schema_editor):
+    if schema_editor.connection.vendor == 'postgresql':
+        schema_editor.execute(SQL_FORWARD)
+
+
+def _reverse_pg_functions(apps, schema_editor):
+    if schema_editor.connection.vendor == 'postgresql':
+        schema_editor.execute(SQL_REVERSE)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -70,5 +80,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL(SQL_FORWARD, SQL_REVERSE),
+        migrations.RunPython(_apply_pg_functions, _reverse_pg_functions),
     ]

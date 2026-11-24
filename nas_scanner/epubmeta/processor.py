@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_text_only_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
-    """Return True if `raw_bytes` decodes to a plain white/monochrome text-only title page."""
+    """Return True if `raw_bytes` decodes to a plain white/monochrome text-only title page or generic publisher/app template cover."""
     if not raw_bytes or len(raw_bytes) < 900:
         return True
     try:
@@ -28,35 +28,55 @@ def _is_text_only_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
         w, h = im.size
         if w < 24 or h < 24:
             return True
+        if (w / float(h)) >= 0.80 or (w == 200 and h < 225):
+            return True
         im_crop = im.crop((int(w * 0.08), int(h * 0.08), max(int(w * 0.08) + 1, int(w * 0.92)), max(int(h * 0.08) + 1, int(h * 0.92))))
-        im_small = im_crop.resize((80, 112))
+        SW, SH = 60, 90
+        im_small = im_crop.resize((SW, SH))
         px = list(im_small.get_flattened_data() if hasattr(im_small, "get_flattened_data") else im_small.getdata())
         n = len(px)
         if not n:
             return True
         white_bg = 0
+        light_gray_or_white = 0
         colored = 0
         dark_ink = 0
         mid_gray = 0
         buckets: Dict[Tuple[int, int, int], int] = {}
+        buckets36: Dict[Tuple[int, int, int], int] = {}
+        hue_hist = [0] * 18
         for r, g, b in px:
             mx = max(r, g, b)
             mn = min(r, g, b)
             sat_diff = mx - mn
             if mn >= 210 and sat_diff < 20:
                 white_bg += 1
+            if mn >= 165 and sat_diff < 22:
+                light_gray_or_white += 1
             if sat_diff >= 26:
                 colored += 1
+                if mx >= 45:
+                    if mx == r:
+                        hb = int(((g - b) / sat_diff) * 3) % 18
+                    elif mx == g:
+                        hb = int((2.0 + (b - r) / sat_diff) * 3) % 18
+                    else:
+                        hb = int((4.0 + (r - g) / sat_diff) * 3) % 18
+                    hue_hist[hb] += 1
             if mx <= 95:
                 dark_ink += 1
             elif mx < 210 and sat_diff < 26:
                 mid_gray += 1
             b_key = (r // 28, g // 28, b // 28)
             buckets[b_key] = buckets.get(b_key, 0) + 1
+            b36_key = (r // 36, g // 36, b // 36)
+            buckets36[b36_key] = buckets36.get(b36_key, 0) + 1
         white_ratio = white_bg / n
+        light_gray_ratio = light_gray_or_white / n
         color_ratio = colored / n
         dark_ratio = dark_ink / n
         mid_ratio = mid_gray / n
+        gray_ratio = 1.0 - color_ratio
         if white_ratio >= 0.78 and color_ratio <= 0.025 and mid_ratio <= 0.16:
             return True
         if white_ratio >= 0.93 or dark_ratio >= 0.96:
@@ -66,6 +86,76 @@ def _is_text_only_cover_bytes(raw_bytes: Optional[bytes]) -> bool:
         top2_ratio = (sorted_b[0] + (sorted_b[1] if len(sorted_b) > 1 else 0)) / n if sorted_b else 0.0
         if top1_ratio >= 0.87 and top2_ratio >= 0.95 and len(buckets) <= 14:
             return True
+        sorted_b36 = sorted(buckets36.values(), reverse=True)
+        sum2_36 = sum(sorted_b36[:2]) / n if sorted_b36 else 0.0
+        sum3_36 = sum(sorted_b36[:3]) / n if sorted_b36 else 0.0
+        if gray_ratio >= 0.96 and white_ratio >= 0.20 and dark_ratio >= 0.18 and (white_ratio + dark_ratio) >= 0.65 and len(buckets36) <= 14:
+            return True
+        chroma_tot = sum(hue_hist)
+        max_adj_hue = 0
+        if chroma_tot > 0:
+            for i in range(18):
+                adj = hue_hist[i] + hue_hist[(i + 1) % 18]
+                if adj > max_adj_hue:
+                    max_adj_hue = adj
+        adj_hue_ratio = (max_adj_hue / chroma_tot) if chroma_tot > 0 else 1.0
+        unif_rows = 0
+        for y in range(SH):
+            row = [px[y * SW + x] for x in range(SW)]
+            rm = sorted(p[0] for p in row)[SW // 2]
+            gm = sorted(p[1] for p in row)[SW // 2]
+            bm = sorted(p[2] for p in row)[SW // 2]
+            same = sum(1 for r, g, b in row if abs(r - rm) <= 16 and abs(g - gm) <= 16 and abs(b - bm) <= 16)
+            if same >= int(SW * 0.74):
+                unif_rows += 1
+        unif_row_ratio = unif_rows / SH
+        if light_gray_ratio >= 0.85 and dark_ratio <= 0.015 and 0.01 <= color_ratio <= 0.15 and sum2_36 >= 0.82 and unif_row_ratio >= 0.65:
+            return True
+        if color_ratio <= 0.05 and light_gray_ratio >= 0.65 and sum3_36 >= 0.86 and unif_row_ratio >= 0.72 and len(buckets36) <= 24:
+            return True
+        if color_ratio >= 0.78 and adj_hue_ratio >= 0.93 and white_ratio <= 0.12 and dark_ratio <= 0.25 and len(buckets36) <= 30 and unif_row_ratio >= 0.42:
+            return True
+        if (
+            0.22 <= white_ratio <= 0.72 and 0.22 <= color_ratio <= 0.68 and dark_ratio <= 0.08 and mid_ratio <= 0.06 and adj_hue_ratio >= 0.88 and sum2_36 >= 0.70
+        ) or (
+            0.42 <= white_ratio <= 0.74 and 0.12 <= color_ratio <= 0.50 and dark_ratio <= 0.16 and adj_hue_ratio >= 0.94 and sum3_36 >= 0.68 and len(buckets36) <= 36
+        ) or (
+            sum2_36 >= 0.78 and sum3_36 >= 0.84 and unif_row_ratio >= 0.74 and adj_hue_ratio >= 0.90 and len(buckets36) <= 34
+        ) or (
+            0.50 <= light_gray_ratio <= 0.78 and 0.18 <= color_ratio <= 0.45 and dark_ratio <= 0.03 and mid_ratio <= 0.03 and adj_hue_ratio >= 0.92 and unif_row_ratio >= 0.60
+        ):
+            return True
+        s_full = im.resize((SW, SH))
+        px_full = list(s_full.get_flattened_data() if hasattr(s_full, "get_flattened_data") else s_full.getdata())
+        inner_px = [px_full[y * SW + x] for y in range(16, 74) for x in range(13, 47)]
+        if inner_px:
+            in_rm = sorted(p[0] for p in inner_px)[len(inner_px) // 2]
+            in_gm = sorted(p[1] for p in inner_px)[len(inner_px) // 2]
+            in_bm = sorted(p[2] for p in inner_px)[len(inner_px) // 2]
+            if min(in_rm, in_gm, in_bm) >= 145:
+                in_bg_match = sum(
+                    1 for r, g, b in inner_px
+                    if abs(r - in_rm) <= 20 and abs(g - in_gm) <= 20 and abs(b - in_bm) <= 20
+                ) / len(inner_px)
+                in_dark_text = sum(1 for r, g, b in inner_px if max(r, g, b) <= 115) / len(inner_px)
+                outer_diff = sum(
+                    1 for y in range(SH) for x in (2, 3, SW - 4, SW - 3)
+                    if max(abs(px_full[y * SW + x][0] - in_rm), abs(px_full[y * SW + x][1] - in_gm), abs(px_full[y * SW + x][2] - in_bm)) >= 28
+                ) / (SH * 4.0)
+                if in_bg_match >= 0.70 and (in_bg_match + in_dark_text) >= 0.84 and outer_diff >= 0.45:
+                    return True
+        if dark_ratio <= 0.015 and adj_hue_ratio >= 0.90 and len(buckets36) <= 36 and unif_row_ratio >= 0.45:
+            mirror_match = 0
+            mirror_tot = 0
+            for y in range(10, 80):
+                for x in range(6, 30):
+                    p_l = px_full[y * SW + x]
+                    p_r = px_full[y * SW + (SW - 1 - x)]
+                    mirror_tot += 1
+                    if abs(p_l[0] - p_r[0]) <= 28 and abs(p_l[1] - p_r[1]) <= 28 and abs(p_l[2] - p_r[2]) <= 28:
+                        mirror_match += 1
+            if mirror_tot > 0 and (mirror_match / mirror_tot) >= 0.78:
+                return True
         return False
     except Exception:
         return False
@@ -397,27 +487,102 @@ class BookProcessor:
         emb_title = clean_book_title(embedded_meta.title)
         fn_isbn = file_clues.get("isbn")
 
-        # Fallback candidate title and author from embedded metadata or filename
+        from .authors import (
+            clean_swapped_author_candidates,
+            clean_swapped_title_candidates,
+            extract_inline_author_and_clean_title,
+            looks_like_swapped_title_and_author,
+            split_and_normalize_authors,
+            strip_series_and_redundant_author_from_title,
+        )
+        from .matcher import score_authors as _disc_score_a, score_title as _disc_score_t
+
+        # Extract inline 'Title by Author' / 'Title (by Author)' when embedded author is missing
+        if emb_title and not valid_emb_authors:
+            in_t, in_a = extract_inline_author_and_clean_title(
+                embedded_meta.title,
+                raw_authors=None,
+                file_name=reader.file_path.name,
+            )
+            if in_t and in_a:
+                emb_title = in_t
+                valid_emb_authors = list(in_a)
+
+        emb_looks_swapped = bool(
+            emb_title
+            and valid_emb_authors
+            and looks_like_swapped_title_and_author(emb_title, valid_emb_authors)
+        )
+        fn_looks_swapped = bool(
+            file_clues.get("title")
+            and file_clues.get("authors")
+            and looks_like_swapped_title_and_author(file_clues["title"], file_clues["authors"])
+        )
+
+        # Strip redundant author and/or series-number segments from title clues when not inverted
+        # (e.g. 'Robert Asprin - Phule 04 - Phule Me Twice' with Author='Robert Asprin, Peter J. Heck' -> 'Phule Me Twice')
+        if emb_title and valid_emb_authors and not emb_looks_swapped:
+            emb_title = strip_series_and_redundant_author_from_title(emb_title, valid_emb_authors) or emb_title
+
         clue_title = file_clues.get("title")
-        if emb_title and clue_title:
-            if (":" in clue_title or " - " in clue_title) and not (":" in emb_title or " - " in emb_title):
-                fallback_title = clue_title
-            elif (":" in emb_title or " - " in emb_title) and not (":" in clue_title or " - " in clue_title):
-                fallback_title = emb_title
-            else:
-                fallback_title = clue_title if len(clue_title) > len(emb_title) else emb_title
-        else:
-            fallback_title = emb_title or clue_title
+        if clue_title and not fn_looks_swapped:
+            ref_authors = valid_emb_authors if (valid_emb_authors and not emb_looks_swapped) else (file_clues.get("authors") or [])
+            if ref_authors:
+                clue_title = strip_series_and_redundant_author_from_title(clue_title, ref_authors) or clue_title
+
         fn_primary_author = file_clues["authors"][0] if file_clues.get("authors") else None
-        if valid_emb_authors and fn_primary_author:
-            emb_a0 = valid_emb_authors[0].strip()
-            # If embedded author is a single-word OS username (e.g. 'Axel') while filename has a multi-part author ('W. Calvin'), prefer filename author
-            if " " not in emb_a0 and " " in fn_primary_author and emb_a0.lower() not in fn_primary_author.lower():
+        norm_emb_a0 = None
+        if valid_emb_authors:
+            raw_emb_a0 = valid_emb_authors[0].strip()
+            norm_list = split_and_normalize_authors(raw_emb_a0)
+            norm_emb_a0 = norm_list[0][0] if norm_list else raw_emb_a0
+
+        # If embedded OPF has Title & Author inverted while filename has 'Author - Title' in the right order
+        # (e.g. file='Martin H Greenberg (ed) - Journey to Infinity.epub', OPF title='Martin H. Greenberg (ed)', OPF creator='Journey to Infinity'),
+        # avoid mixing Title+Title or sending the inverted OPF pair first.
+        if emb_looks_swapped and clue_title and fn_primary_author and not fn_looks_swapped:
+            sw_emb_titles = clean_swapped_title_candidates(valid_emb_authors)
+            _, sw_emb_authors = clean_swapped_author_candidates(emb_title)
+            if (
+                sw_emb_titles
+                and sw_emb_authors
+                and _disc_score_t(sw_emb_titles[0], clue_title) >= 0.70
+                and _disc_score_a(sw_emb_authors, file_clues["authors"]) >= 0.65
+            ):
+                fallback_title = clue_title
                 fallback_author = fn_primary_author
             else:
-                fallback_author = emb_a0
+                fallback_title = clue_title
+                fallback_author = fn_primary_author
         else:
-            fallback_author = valid_emb_authors[0] if valid_emb_authors else fn_primary_author
+            if emb_title and clue_title:
+                if (":" in clue_title or " - " in clue_title) and not (":" in emb_title or " - " in emb_title):
+                    fallback_title = clue_title
+                elif (":" in emb_title or " - " in emb_title) and not (":" in clue_title or " - " in clue_title):
+                    fallback_title = emb_title
+                else:
+                    fallback_title = clue_title if len(clue_title) > len(emb_title) else emb_title
+            else:
+                fallback_title = emb_title or clue_title
+
+            if norm_emb_a0 and fn_primary_author:
+                # If embedded author is a single-word OS username (e.g. 'Axel') while filename has a multi-part author ('W. Calvin'), prefer filename author
+                if " " not in norm_emb_a0 and " " in fn_primary_author and norm_emb_a0.lower() not in fn_primary_author.lower():
+                    fallback_author = fn_primary_author
+                else:
+                    fallback_author = norm_emb_a0
+            else:
+                fallback_author = norm_emb_a0 if norm_emb_a0 else fn_primary_author
+
+            # Prevent Franken-pairs where fallback_title and fallback_author both picked the book title
+            # because embedded OPF and filename clues were swapped relative to each other
+            if fallback_title and fallback_author and _disc_score_t(fallback_title, fallback_author) >= 0.75:
+                if clue_title and fn_primary_author and _disc_score_t(clue_title, fn_primary_author) < 0.65:
+                    fallback_title = clue_title
+                    fallback_author = fn_primary_author
+                elif emb_title and norm_emb_a0 and _disc_score_t(emb_title, norm_emb_a0) < 0.65:
+                    fallback_title = emb_title
+                    fallback_author = norm_emb_a0
 
         if precomputed_ai_result is not None:
             if precomputed_ai_result:
@@ -619,6 +784,97 @@ class BookProcessor:
         )
         return True
 
+    def _lookup_switched_title_author(
+        self,
+        embedded_meta: Optional[BookMetadata],
+        fn_info: Optional[Dict[str, Any]],
+        candidate_title: Optional[str],
+        candidate_author: Optional[str],
+    ) -> Tuple[Optional[BookMetadata], Optional[str], Optional[str]]:
+        """
+        Check if Title and Author were switched in embedded metadata or filename clues.
+        Queries local cache and external catalog providers using swapped `(title, author)` pairs,
+        returning `(matched_metadata, swapped_title, swapped_primary_author)` ONLY when BOTH
+        title (`>= 0.70`) and author (`>= 0.65`) match the swapped clues.
+        """
+        import re as _re_sw
+        from .authors import clean_swapped_author_candidates, clean_swapped_title_candidates
+        from .filename_parser import is_garbage_embedded_author, is_garbage_embedded_title
+        from .matcher import score_authors, score_title
+
+        raw_sources: List[Tuple[str, Any]] = []
+        if embedded_meta and embedded_meta.title and embedded_meta.authors:
+            raw_sources.append((embedded_meta.title, embedded_meta.authors))
+        if candidate_title and candidate_author:
+            raw_sources.append((candidate_title, [candidate_author]))
+        if fn_info and fn_info.get("title") and fn_info.get("authors"):
+            raw_sources.append((fn_info["title"], fn_info["authors"]))
+
+        orig_pair_norm = (
+            (candidate_title or "").strip().lower(),
+            (candidate_author or "").strip().lower(),
+        )
+
+        pairs_to_try: List[Tuple[str, str, List[str]]] = []
+        seen_pairs: set[Tuple[str, str]] = set()
+        for src_title, src_authors in raw_sources:
+            sw_primary_a, sw_all_a = clean_swapped_author_candidates(src_title)
+            if not sw_primary_a or is_garbage_embedded_author(sw_primary_a):
+                continue
+            for sw_t in clean_swapped_title_candidates(src_authors):
+                if not sw_t or is_garbage_embedded_title(sw_t):
+                    continue
+                if score_title(sw_t, sw_primary_a) >= 0.80:
+                    continue
+                key = (sw_t.strip().lower(), sw_primary_a.strip().lower())
+                if key == orig_pair_norm or key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                pairs_to_try.append((sw_t, sw_primary_a, sw_all_a))
+
+        for sw_title, sw_author_primary, sw_all_authors in pairs_to_try[:3]:
+            logger.info(
+                "Checking switched Title/Author match: title='%s', author='%s'...",
+                sw_title,
+                sw_author_primary,
+            )
+            sw_cand: Optional[BookMetadata] = None
+            if not getattr(self, "skip_cache", False):
+                cached = self._lookup_cache(
+                    orig_hash=None,
+                    isbn=None,
+                    norm_stem=None,
+                    title=sw_title,
+                    author=sw_author_primary,
+                )
+                if cached and not cached.is_empty():
+                    sw_cand = cached
+
+            if not sw_cand or sw_cand.is_empty():
+                sw_cand = self.aggregator.fetch_by_query(sw_title, sw_author_primary)
+                if (
+                    (not sw_cand or sw_cand.is_empty())
+                    and (":" in sw_title or " - " in sw_title or "(" in sw_title or "[" in sw_title)
+                ):
+                    short_sw = _re_sw.split(r"\s*(?::| - |\(|\[)\s*", sw_title, maxsplit=1)[0].strip()
+                    if short_sw and short_sw != sw_title:
+                        sw_cand = self.aggregator.fetch_by_query(short_sw, sw_author_primary)
+
+            if sw_cand and not sw_cand.is_empty() and sw_cand.title and sw_cand.authors:
+                t_sc = score_title(sw_cand.title, sw_title)
+                a_sc = score_authors(sw_cand.authors, sw_all_authors)
+                if t_sc >= 0.70 and a_sc >= 0.65:
+                    logger.info(
+                        "Verified switched Title/Author match: '%s' by %s (title=%d%%, author=%d%%)",
+                        sw_cand.title,
+                        sw_cand.authors,
+                        int(t_sc * 100),
+                        int(a_sc * 100),
+                    )
+                    return sw_cand, sw_title, sw_author_primary
+
+        return None, None, None
+
     def prepare_metadata(
         self,
         file_path: Path,
@@ -710,17 +966,35 @@ class BookProcessor:
                         break
 
                     # Fallback: if ISBN lookup had no match, search by title and author
+                    matched_via_swap = False
                     if (not fetched_meta or fetched_meta.is_empty()) and candidate_title and not (is_pdf and self.pdf_require_isbn):
                         logger.info("ISBN lookup yielded no results; searching by title '%s'...", candidate_title)
                         fallback_meta = self.aggregator.fetch_by_query(candidate_title, candidate_author)
                         if fallback_meta and not fallback_meta.is_empty():
                             fetched_meta = fallback_meta
-                        elif ":" in candidate_title or " - " in candidate_title:
-                            short_title = _re_t.split(r"\s*(?::| - )\s*", candidate_title, maxsplit=1)[0].strip()
-                            logger.info("Searching with short title '%s'...", short_title)
-                            short_meta = self.aggregator.fetch_by_query(short_title, candidate_author)
-                            if short_meta and not short_meta.is_empty():
-                                fetched_meta = short_meta
+                        elif ":" in candidate_title or " - " in candidate_title or "(" in candidate_title or "[" in candidate_title:
+                            short_title = _re_t.split(r"\s*(?::| - |\(|\[)\s*", candidate_title, maxsplit=1)[0].strip()
+                            if short_title and short_title != candidate_title:
+                                logger.info("Searching with short title '%s'...", short_title)
+                                short_meta = self.aggregator.fetch_by_query(short_title, candidate_author)
+                                if short_meta and not short_meta.is_empty():
+                                    fetched_meta = short_meta
+
+                    # Fallback 1b: check if Title and Author were switched (e.g. Title='Martin H. Greenberg (ed)', Author='Journey to Infinity')
+                    if (not fetched_meta or fetched_meta.is_empty()) and not (is_pdf and self.pdf_require_isbn):
+                        sw_meta, sw_title, sw_author = self._lookup_switched_title_author(
+                            embedded_meta=embedded_meta,
+                            fn_info=fn_info,
+                            candidate_title=candidate_title,
+                            candidate_author=candidate_author,
+                        )
+                        if sw_meta and not sw_meta.is_empty():
+                            fetched_meta = sw_meta
+                            candidate_title = sw_title or candidate_title
+                            candidate_author = sw_author or candidate_author
+                            last_candidate_title = candidate_title
+                            last_candidate_author = candidate_author
+                            matched_via_swap = True
 
                     # Fallback 2: if external search had no results, use Gemini AI discovered metadata
                     if (not fetched_meta or fetched_meta.is_empty()) and ai_meta and not ai_meta.is_empty():
@@ -792,14 +1066,48 @@ class BookProcessor:
                     ):
                         fetched_meta.published_date = embedded_meta.published_date
 
-                target_meta = fetched_meta.merge_with(embedded_meta, combine_lists=False)
+                # Do not merge inverted title/authors from embedded_meta when embedded_meta had Title & Author swapped
+                emb_is_inverted_vs_fetched = bool(
+                    locals().get("matched_via_swap", False)
+                    or (
+                        embedded_meta
+                        and embedded_meta.title
+                        and embedded_meta.authors
+                        and fetched_meta.title
+                        and score_title(fetched_meta.title, embedded_meta.title) < 0.45
+                        and score_title(fetched_meta.title, " ".join(embedded_meta.authors)) >= 0.65
+                    )
+                )
+                if emb_is_inverted_vs_fetched and embedded_meta:
+                    sanitized_emb = BookMetadata(
+                        title=None,
+                        authors=[],
+                        description=embedded_meta.description,
+                        subjects=list(embedded_meta.subjects or []),
+                        publisher=embedded_meta.publisher,
+                        published_date=embedded_meta.published_date,
+                        isbn13=embedded_meta.isbn13,
+                        isbn10=embedded_meta.isbn10,
+                        asin=embedded_meta.asin,
+                        language=embedded_meta.language,
+                        source=embedded_meta.source,
+                    )
+                    target_meta = fetched_meta.merge_with(sanitized_emb, combine_lists=False)
+                else:
+                    target_meta = fetched_meta.merge_with(embedded_meta, combine_lists=False)
 
                 if ai_meta and (ai_meta.isbn13 == isbn or fetched_meta == ai_meta or force_ai):
                     target_meta.ai_used = True
 
                 from .filename_parser import clean_book_title
+                from .authors import strip_series_and_redundant_author_from_title
                 if target_meta.title:
                     target_meta.title = clean_book_title(target_meta.title) or target_meta.title.strip()
+                    if target_meta.authors:
+                        target_meta.title = (
+                            strip_series_and_redundant_author_from_title(target_meta.title, target_meta.authors)
+                            or target_meta.title
+                        )
 
                 # Preserve subtitle and proper Title Case from clue/filename ONLY when candidate_title has a genuine subtitle separator (':' or ' - ')
                 if target_meta.title and candidate_title:
@@ -840,10 +1148,13 @@ class BookProcessor:
                     self._match_scores[str(file_path)] = match_result.score
 
                 if match_result.is_confident:
-                    # If the confident match (e.g., from a specific edition ISBN) is missing synopsis or cover,
-                    # supplement missing fields via a title+author query before finishing.
+                    # If the confident match (e.g., from a specific edition ISBN or Goodreads auto_complete)
+                    # is missing synopsis, has a truncated `…` / `...` synopsis, or lacks a cover,
+                    # supplement via a title+author query before finishing.
+                    from .models import is_truncated_description
                     if (
                         not best_target_meta.description
+                        or is_truncated_description(best_target_meta.description)
                         or not best_target_meta.cover_url
                     ):
                         q_title = best_target_meta.title or candidate_title
@@ -855,6 +1166,32 @@ class BookProcessor:
                                     best_target_meta = best_target_meta.merge_with(supp_meta, combine_lists=True)
                             except Exception as supp_err:
                                 logger.debug("Supplemental query lookup failed: %s", supp_err)
+                    # If description is STILL truncated (`…` / `...`) and Gemini AI is available, generate a complete synopsis from book content!
+                    if (
+                        best_target_meta.description
+                        and is_truncated_description(best_target_meta.description)
+                        and self.ai_extractor
+                        and self.ai_extractor.is_available
+                        and not getattr(self.ai_extractor, "batch_mode", False)
+                    ):
+                        try:
+                            norm_f_key = str(file_path.resolve())
+                            ft_for_desc = self._front_texts.get(norm_f_key)
+                            if not ft_for_desc and reader is not None:
+                                ft_for_desc = reader.extract_front_text(max_pages=20)
+                                self._front_texts[norm_f_key] = ft_for_desc
+                            if ft_for_desc and len(ft_for_desc.strip()) >= 80:
+                                ai_res = self.ai_extractor.extract(
+                                    text=f"BOOK TITLE: {best_target_meta.title}\nAUTHOR: {', '.join(best_target_meta.authors or [])}\nPARTIAL SYNOPSIS CLUE: {best_target_meta.description}\n\n{ft_for_desc}",
+                                    images=[],
+                                )
+                                ai_desc = (ai_res or {}).get("description") if isinstance(ai_res, dict) else None
+                                if ai_desc and len(str(ai_desc).strip()) >= 60 and not is_truncated_description(str(ai_desc)):
+                                    best_target_meta.description = str(ai_desc).strip()
+                                    best_target_meta.ai_used = True
+                                    logger.info("Replaced truncated ellipsis synopsis with full AI content synopsis for '%s'", best_target_meta.title)
+                        except Exception as ai_d_err:
+                            logger.debug("AI truncated description replacement skipped: %s", ai_d_err)
                     break
 
                 # Low confidence (e.g. 0% match because filename/OPF ISBN is inaccurate):
@@ -920,10 +1257,53 @@ class BookProcessor:
                         best_match_result = q_match
                         self._match_scores[str(file_path)] = q_match.score
 
+            # Also try switched Title/Author lookup if previous attempts still yielded no confident match
+            if (
+                (best_match_result is None or not best_match_result.is_confident)
+                and not (is_pdf and self.pdf_require_isbn)
+            ):
+                sw_meta2, sw_t2, _ = self._lookup_switched_title_author(
+                    embedded_meta=embedded_meta,
+                    fn_info=fn_info,
+                    candidate_title=last_candidate_title,
+                    candidate_author=last_candidate_author,
+                )
+                if sw_meta2 and not sw_meta2.is_empty():
+                    sanitized_emb2 = BookMetadata(
+                        title=None,
+                        authors=[],
+                        description=embedded_meta.description if embedded_meta else None,
+                        subjects=list(embedded_meta.subjects or []) if embedded_meta else [],
+                        publisher=embedded_meta.publisher if embedded_meta else None,
+                        published_date=embedded_meta.published_date if embedded_meta else None,
+                        isbn13=embedded_meta.isbn13 if embedded_meta else None,
+                        isbn10=embedded_meta.isbn10 if embedded_meta else None,
+                        asin=embedded_meta.asin if embedded_meta else None,
+                        language=embedded_meta.language if embedded_meta else None,
+                    )
+                    sw_target2 = sw_meta2.merge_with(sanitized_emb2, combine_lists=False)
+                    if sw_target2.title and sw_t2 and sw_target2.title.strip().lower() == sw_t2.strip().lower():
+                        if sum(1 for ch in sw_t2 if ch.isupper()) > sum(1 for ch in sw_target2.title if ch.isupper()):
+                            sw_target2.title = sw_t2.strip()
+                    sw_match2 = calculate_match_confidence(
+                        candidate=sw_target2,
+                        filename_info=fn_info,
+                        existing_meta=embedded_meta,
+                        isbn_matched_in_front_matter=False,
+                        min_confidence=self.min_confidence,
+                        allow_swapped_clues=True,
+                    )
+                    if best_match_result is None or sw_match2.score > best_match_result.score:
+                        best_target_meta = sw_target2
+                        best_isbn = sw_target2.isbn13 or sw_target2.isbn10 or best_isbn
+                        best_match_result = sw_match2
+                        self._match_scores[str(file_path)] = sw_match2.score
+
             # Guard against replacing a book's valid embedded metadata (title + authors + ISBN or publisher/description)
             # with a low-confidence match from a cited 'About the Author'/'Also By' or wrong filename ISBN
             # (e.g. 'Data Fabric and Data Mesh Approaches with AI', 'Helidon' by Nikki Mottram, or 'Java Basics' by Madison Giroux).
             from .matcher import score_title
+            from .authors import looks_like_swapped_title_and_author
             emb_has_rich_meta = bool(
                 embedded_meta.isbn13
                 or (embedded_meta.description and len(embedded_meta.description.strip()) >= 30)
@@ -934,6 +1314,7 @@ class BookProcessor:
                 and embedded_meta.title
                 and embedded_meta.authors
                 and emb_has_rich_meta
+                and not looks_like_swapped_title_and_author(embedded_meta.title, embedded_meta.authors)
                 and (not fn_info.get("title") or score_title(embedded_meta.title, fn_info.get("title")) >= 0.70)
             ):
                 logger.info(
@@ -1098,6 +1479,20 @@ class BookProcessor:
                     cand_isbn = best_target_meta.isbn13 or best_target_meta.isbn10 or best_isbn or ""
                     alt_urls: List[str] = []
                     if cand_isbn:
+                        clean_c_isbn = _re.sub(r"[^0-9Xx]", "", str(cand_isbn)).upper()
+                        if len(clean_c_isbn) == 10:
+                            isbn10_c = clean_c_isbn
+                        elif len(clean_c_isbn) == 13 and clean_c_isbn.startswith("978") and clean_c_isbn[3:12].isdigit():
+                            core9 = clean_c_isbn[3:12]
+                            tot9 = sum((10 - i) * int(ch) for i, ch in enumerate(core9))
+                            rem9 = (11 - (tot9 % 11)) % 11
+                            isbn10_c = f"{core9}{'X' if rem9 == 10 else rem9}"
+                        else:
+                            isbn10_c = ""
+                        if isbn10_c:
+                            amz_u = f"https://m.media-amazon.com/images/P/{isbn10_c}.01._SCLZZZZZZZ_.jpg"
+                            if amz_u not in alt_urls and amz_u != best_target_meta.cover_url:
+                                alt_urls.append(amz_u)
                         ol_isbn_url = f"https://covers.openlibrary.org/b/isbn/{cand_isbn}-L.jpg?default=false"
                         if ol_isbn_url != best_target_meta.cover_url:
                             alt_urls.append(ol_isbn_url)
@@ -1106,12 +1501,38 @@ class BookProcessor:
                     q_authors = [a.strip() for a in (best_target_meta.authors or []) if a and a.strip()]
                     q_term = f"{q_title} {q_authors[0] if q_authors else ''}".strip()
                     if q_term:
+                        try:
+                            r_gr = requests.get(
+                                f"https://www.goodreads.com/book/auto_complete?format=json&q={_up.quote(q_term)}",
+                                timeout=4,
+                                headers={"User-Agent": "Mozilla/5.0"},
+                            )
+                            if r_gr.status_code == 200:
+                                gr_scored: List[Tuple[float, float, str]] = []
+                                for gr_it in (r_gr.json() or [])[:6]:
+                                    gr_img = (gr_it.get("imageUrl") or "").strip()
+                                    if not gr_img or "nophoto" in gr_img:
+                                        continue
+                                    gr_t = str(gr_it.get("title") or "").strip()
+                                    gr_a = str(((gr_it.get("author") or {}).get("name") or "")).strip()
+                                    t_sc = _score_t(gr_t, q_title) if q_title else 0.0
+                                    a_sc = _score_a([gr_a] if gr_a else [], q_authors) if q_authors else 1.0
+                                    if t_sc >= 0.65 and (not q_authors or a_sc >= 0.55):
+                                        hi_gr = _re.sub(r"\._S[XY]\d+(?:_S[XY]\d+)?_\.", ".", gr_img)
+                                        gr_scored.append((a_sc, t_sc, hi_gr))
+                                gr_scored.sort(key=lambda x: (-x[0], -x[1]))
+                                for _, _, hi_gr in gr_scored[:2]:
+                                    if hi_gr not in alt_urls:
+                                        alt_urls.append(hi_gr)
+                        except Exception:
+                            pass
                         r_ab = requests.get(
                             f"https://itunes.apple.com/search?media=ebook&entity=ebook&limit=5&term={_up.quote(q_term)}",
                             timeout=5,
                             headers={"User-Agent": "Mozilla/5.0"},
                         )
                         if r_ab.status_code == 200:
+                            ab_scored: List[Tuple[float, float, str]] = []
                             for ab_it in (r_ab.json().get("results") or []):
                                 ab_art = ab_it.get("artworkUrl100")
                                 if not ab_art:
@@ -1121,8 +1542,11 @@ class BookProcessor:
                                 t_sc = _score_t(ab_t, q_title) if q_title else 0.0
                                 a_sc = _score_a([ab_a] if ab_a else [], q_authors) if q_authors else 1.0
                                 if t_sc >= 0.70 and (not q_authors or a_sc >= 0.55):
-                                    alt_urls.append(_re.sub(r"/\d+x\d+bb\.", "/600x600bb.", str(ab_art)))
-                                    break
+                                    ab_scored.append((a_sc, t_sc, _re.sub(r"/\d+x\d+bb\.", "/600x600bb.", str(ab_art))))
+                            ab_scored.sort(key=lambda x: (-x[0], -x[1]))
+                            for _, _, ab_u in ab_scored[:2]:
+                                if ab_u not in alt_urls:
+                                    alt_urls.append(ab_u)
 
                     cur_col = _cover_colorfulness_score_bytes(cur_cov_bytes) if cur_cov_bytes else 0.0
                     for alt_u in alt_urls:
@@ -1181,6 +1605,10 @@ class BookProcessor:
                         logger.warning(msg)
                         if self.state_tracker:
                             self.state_tracker.record_failure(file_path, str(exc), status="QUARANTINED")
+                        if self.scanner_bridge and hasattr(self.scanner_bridge, "remove_file_state"):
+                            self.scanner_bridge.remove_file_state(file_path)
+                        if self.mylibrary_client and hasattr(self.mylibrary_client, "prune_deleted_file"):
+                            self.mylibrary_client.prune_deleted_file(file_path)
                         return None, None, None, None, None, msg
                     except Exception as move_err:
                         logger.error("Failed moving %s to quarantine: %s", file_path.name, move_err)
@@ -1319,7 +1747,7 @@ class BookProcessor:
                         )
 
                 cover_thumbnail = None
-                if self.mylibrary_client:
+                if self.mylibrary_client or getattr(target_meta, "cover_bytes", None):
                     orig_cover_bytes = None
                     try:
                         orig_cover_bytes = reader.extract_cover_bytes()
@@ -1332,7 +1760,8 @@ class BookProcessor:
                             cover_bytes = orig_cover_bytes
                     else:
                         cover_bytes = target_meta.cover_bytes or orig_cover_bytes
-                    cover_thumbnail = generate_cover_thumbnail(cover_bytes)
+                    if cover_bytes:
+                        cover_thumbnail = generate_cover_thumbnail(cover_bytes)
 
                 result["file_sha256"] = new_sha256
                 result["orig_sha256"] = orig_sha256

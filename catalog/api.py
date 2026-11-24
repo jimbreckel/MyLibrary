@@ -150,7 +150,10 @@ class FileSyncAPIView(APIView):
             file_loc.file_hash = file_hash
             file_loc.file_size = file_size
             file_loc.file_name = file_name
-            file_loc.file_modified_at = modified_at
+            if modified_at is not None:
+                file_loc.file_modified_at = modified_at
+            if created_at is not None and not file_loc.file_created_at:
+                file_loc.file_created_at = created_at
             file_loc.is_invalid = is_invalid
             file_loc.has_drm = has_drm
             if library_name:
@@ -425,10 +428,29 @@ class AmazonBatchSyncAPIView(APIView):
         from .opds import get_dynamic_amazon_shelf
 
         amz = get_dynamic_amazon_shelf()
-        return Response({
+        resp_data = {
             "ok": True,
             "counts": amz.get("counts", {}),
-        })
+        }
+        if request.GET.get("missing") == "1":
+            missing_kindle = []
+            missing_audible = []
+            for cid in amz.get("amazon_only_ids") or []:
+                rec = (amz.get("by_item_id") or {}).get(str(cid)) or {}
+                if rec.get("item_type") == "AUDIBLE":
+                    missing_audible.append(rec)
+                else:
+                    missing_kindle.append({
+                        "id": str(cid),
+                        "asin": rec.get("asin") or "",
+                        "title": rec.get("title") or "",
+                        "authors": rec.get("authors") or "",
+                        "origin_type": rec.get("origin_type") or "",
+                        "is_kindle_plus": bool(rec.get("is_kindle_plus")),
+                    })
+            resp_data["missing_kindle"] = missing_kindle
+            resp_data["missing_audible_count"] = len(missing_audible)
+        return Response(resp_data)
 
     def post(self, request):
         from .opds import save_and_link_amazon_items
@@ -439,7 +461,85 @@ class AmazonBatchSyncAPIView(APIView):
         if not isinstance(items, list):
             return Response({"error": "'items' must be a list."}, status=status.HTTP_400_BAD_REQUEST)
 
-        res = save_and_link_amazon_items(items)
+        synced_types = body.get("synced_types") or None
+        is_final_chunk = bool(body.get("is_final_chunk", False))
+        res = save_and_link_amazon_items(items, synced_types=synced_types, is_final_chunk=is_final_chunk)
+        _MAIN_DASHBOARD_CACHE["expires_at"] = 0.0
+        return Response(res, status=status.HTTP_200_OK)
+
+
+class PublisherOwnedBatchSyncAPIView(APIView):
+    """
+    Batch API endpoint (`/mylibrary/api/sync/owned/`) for `scanner/sync_owned.py`
+    (`sync_owned.bat`) to sync Packt Owned Titles (`https://subscription.packtpub.com/owned`)
+    and Springer Owned Titles (`https://library.springer.com/`) into MyLibrary.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        from .opds import get_dynamic_publisher_owned_shelf
+
+        pub = get_dynamic_publisher_owned_shelf()
+        resp_data = {
+            "ok": True,
+            "counts": pub.get("counts", {}),
+        }
+        if request.GET.get("missing") == "1":
+            missing_list = []
+            for cid in pub.get("publisher_only_ids") or []:
+                rec = (pub.get("by_item_id") or {}).get(str(cid)) or {}
+                missing_list.append({
+                    "id": str(cid),
+                    "source": rec.get("source"),
+                    "isbn": rec.get("isbn") or rec.get("ebook_isbn") or rec.get("print_isbn") or "",
+                    "title": rec.get("title"),
+                    "authors": rec.get("authors"),
+                    "is_video": bool(rec.get("is_video")),
+                    "url": rec.get("web_reader_url") or "",
+                })
+            resp_data["missing_items"] = missing_list
+        if request.GET.get("disappeared") == "1":
+            from .opds import get_dynamic_amazon_shelf
+            amz = get_dynamic_amazon_shelf()
+            disappeared = []
+            for cid in amz.get("amazon_missing_owned_ids") or []:
+                rec = (amz.get("by_item_id") or {}).get(str(cid)) or {}
+                disappeared.append({
+                    "id": str(cid),
+                    "source": rec.get("item_type") or "KINDLE",
+                    "identifier": rec.get("asin") or "",
+                    "title": rec.get("title") or "",
+                    "authors": rec.get("authors") or "",
+                    "missing_since": rec.get("missing_since") or "",
+                    "has_local_file": bool(rec.get("has_local_file")),
+                })
+            for cid in pub.get("publisher_missing_owned_ids") or []:
+                rec = (pub.get("by_item_id") or {}).get(str(cid)) or {}
+                disappeared.append({
+                    "id": str(cid),
+                    "source": rec.get("source") or "PACKT",
+                    "identifier": rec.get("isbn") or "",
+                    "title": rec.get("title") or "",
+                    "authors": rec.get("authors") or "",
+                    "missing_since": rec.get("missing_since") or "",
+                    "has_local_file": bool(rec.get("has_local_file")),
+                })
+            resp_data["disappeared_items"] = disappeared
+        return Response(resp_data)
+
+    def post(self, request):
+        from .opds import save_and_link_publisher_owned_items
+        from .views import _MAIN_DASHBOARD_CACHE
+
+        body = clean_val(request.data or {})
+        items = body.get("items") or []
+        if not isinstance(items, list):
+            return Response({"error": "'items' must be a list."}, status=status.HTTP_400_BAD_REQUEST)
+
+        synced_sources = body.get("synced_sources") or None
+        is_final_chunk = bool(body.get("is_final_chunk", False))
+        res = save_and_link_publisher_owned_items(items, synced_sources=synced_sources, is_final_chunk=is_final_chunk)
         _MAIN_DASHBOARD_CACHE["expires_at"] = 0.0
         return Response(res, status=status.HTTP_200_OK)
 
@@ -776,5 +876,290 @@ class CatalogCacheAPIView(APIView):
             "complete_hashes": complete_hashes,
             "complete_paths": complete_paths,
         }, status=status.HTTP_200_OK)
+
+
+ACTIVE_KINDLE_DEVICE_ACCOUNT_IDS = {
+    "A101329625FBGFO0QECXO",  # JAMES's Kindle for Windows (PC) - oscarman007_8YLYgU@kindle.com
+    "A015285311F3W73S7EA31",  # JAMES's 18th Android Device (Tab S11) - oscarman007_RfOPZk@kindle.com
+    "A018607231PVOX7INFXHE",  # JAMES's 12th Android Device (Galaxy S25 Ultra) - oscarman007_GNgiXh@kindle.com
+    "A0440102192GKG2EE19T3",  # JAMES's 8th Android Device (Tab S8 Ultra) - oscarman007_vlEewv@kindle.com
+    "A02063483UBXG3PKOGGOX",  # Jimmy's tablet (Tab A8)
+    "A05507311ZARZZO8ORYGN",  # JAMES's Main (Cloud Reader)
+}
+
+DEFAULT_KINDLE_DEVICES = [
+    {
+        "deviceName": "JAMES's Kindle for Windows (Default - PC)",
+        "deviceAccountID": "A101329625FBGFO0QECXO",
+        "deviceSerialNumber": "C36839180E3E566C07FCEF7DEFD96D32",
+        "deviceTypeID": "A1UOUY6O7B48AR",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "PC (Kindle for Windows)",
+        "friendlyLabel": "JAMES's Kindle for Windows",
+        "isDefault": True,
+    },
+    {
+        "deviceName": "Jimmy's Tab S11",
+        "deviceAccountID": "A015285311F3W73S7EA31",
+        "deviceSerialNumber": "fbc9082131a2444bb978c0bf861ac3bc",
+        "deviceTypeID": "A2Y8LFC259B97P",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "Kindle for Android",
+        "friendlyLabel": "Jimmy's Tab S11",
+        "isDefault": False,
+    },
+    {
+        "deviceName": "Jimmy's Galaxy S25 Ultra",
+        "deviceAccountID": "A018607231PVOX7INFXHE",
+        "deviceSerialNumber": "657a28b98877458fbdcae5c9069c0976",
+        "deviceTypeID": "A3VNNDO1I14V03",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "Kindle for Android",
+        "friendlyLabel": "Jimmy's Galaxy S25 Ultra",
+        "isDefault": False,
+    },
+    {
+        "deviceName": "Jimmy's Tab S8 Ultra",
+        "deviceAccountID": "A0440102192GKG2EE19T3",
+        "deviceSerialNumber": "61bacf27b0444b12825b3bd51a8031f2",
+        "deviceTypeID": "A2Y8LFC259B97P",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "Kindle for Android",
+        "friendlyLabel": "Jimmy's Tab S8 Ultra",
+        "isDefault": False,
+    },
+    {
+        "deviceName": "Jimmy's Tab A8",
+        "deviceAccountID": "A02063483UBXG3PKOGGOX",
+        "deviceSerialNumber": "e73d7ef3536d46aaae7f8156125ede47",
+        "deviceTypeID": "A2Y8LFC259B97P",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "Kindle for Android",
+        "friendlyLabel": "Jimmy's Tab A8",
+        "isDefault": False,
+    },
+    {
+        "deviceName": "JAMES's Kindle for Web",
+        "deviceAccountID": "A05507311ZARZZO8ORYGN",
+        "deviceSerialNumber": "A3SF9CPPQ8XQON00A2CTZ977SKFQZY",
+        "deviceTypeID": "A2CTZ977SKFQZY",
+        "deviceFamily": "KINDLE_APP",
+        "deviceTypeString": "Kindle Cloud Reader",
+        "friendlyLabel": "JAMES's Kindle for Web",
+        "isDefault": False,
+    },
+]
+
+
+class KindlePCControlAPIView(APIView):
+    """
+    API endpoint (`/mylibrary/api/kindle-pc/`) for the Amazon Only (Not on NAS) shelf:
+    - GET: Returns registered Kindle devices (defaulting to JAMES's Kindle for Windows),
+           all Amazon-Only Kindle books (with ASIN, title, originType), and local Kindle for Windows
+           download status or PowerShell one-liner to empty downloaded entries on the Windows PC.
+    - POST:
+      - `action="empty_local"`: Empties downloaded `<ASIN>_EBOK` folders and clears `book_asset.db`
+        when running on the Windows PC (and always returns the ready-to-run PowerShell command &
+        `.ps1` download script if MyLibrary is hosted on the NAS).
+      - `action="save_devices"`: Persists updated device list fetched from Amazon MYCD.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    @staticmethod
+    def _get_devices_cache_path():
+        from pathlib import Path
+        base = Path(settings.BASE_DIR)
+        sc = base / "scanner"
+        return (sc if sc.exists() else base) / "amazon_kindle_devices.json"
+
+    @classmethod
+    def _load_devices(cls):
+        import json
+        p = cls._get_devices_cache_path()
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, list) and data:
+                    return data
+            except Exception:
+                pass
+        return DEFAULT_KINDLE_DEVICES
+
+    @staticmethod
+    def _map_mycd_origin_type(raw_origin: str) -> str:
+        ot = str(raw_origin or "PURCHASE").strip().upper()
+        if ot in ("KINDLE_UNLIMITED", "KU"):
+            return "Ku"
+        if ot in ("PRIME_READING", "PRIME", "KOLL"):
+            return "Prime"
+        if ot in ("COMIXOLOGY", "COMIXOLOGY_UNLIMITED"):
+            return "Comixology"
+        if ot == "SAMPLE":
+            return "Sample"
+        return "Purchase"
+
+    @staticmethod
+    def _get_windows_empty_ps_command(close_app: bool = True) -> str:
+        kill_part = "Stop-Process -Name Kindle -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 600; " if close_app else ""
+        return (
+            f"{kill_part}"
+            "$c = \"$env:LOCALAPPDATA\\Packages\\AMZNKindle.AmazonKindleReadingApp_m1sc522ngdk36\\LocalState\\Classic\\Content\"; "
+            "if (Test-Path $c) { "
+            "$dirs = Get-ChildItem -Path $c -Directory; "
+            "$cnt = $dirs.Count; "
+            "$dirs | Remove-Item -Recurse -Force; "
+            "python -c \"import os,sqlite3; db=os.path.expandvars(r'%LOCALAPPDATA%\\Packages\\AMZNKindle.AmazonKindleReadingApp_m1sc522ngdk36\\LocalState\\Classic\\Content\\book_asset.db'); "
+            "conn=sqlite3.connect(db) if os.path.exists(db) else None; "
+            "[conn.execute(q) for q in ('DELETE FROM AssetDownloadInfo','DELETE FROM Asset','DELETE FROM BookDownloadInfo','DELETE FROM Book')] if conn else None; "
+            "conn.commit() if conn else None; conn.execute('VACUUM') if conn else None; conn.close() if conn else None\"; "
+            "Write-Host \"Emptied $cnt downloaded Kindle books and cleared book_asset.db!\" -ForegroundColor Green "
+            "} else { Write-Host \"Kindle Content folder not found: $c\" -ForegroundColor Yellow }"
+        )
+
+    @staticmethod
+    def _try_empty_local_windows_kindle(close_app: bool = True) -> dict:
+        import shutil
+        import sqlite3
+        import subprocess
+        from pathlib import Path
+
+        local_app_data = os.environ.get("LOCALAPPDATA") or r"C:\Users\oscar\AppData\Local"
+        content_dir = Path(local_app_data) / "Packages" / "AMZNKindle.AmazonKindleReadingApp_m1sc522ngdk36" / "LocalState" / "Classic" / "Content"
+        if not content_dir.exists():
+            alt_dir = Path(r"C:\Users\oscar\AppData\Local\Packages\AMZNKindle.AmazonKindleReadingApp_m1sc522ngdk36\LocalState\Classic\Content")
+            if alt_dir.exists():
+                content_dir = alt_dir
+
+        if not content_dir.exists():
+            return {
+                "ran_locally": False,
+                "reason": "Server is running inside NAS Docker container (not directly on Windows host).",
+            }
+
+        if close_app and os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "Kindle.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+        removed_folders = 0
+        for d in list(content_dir.iterdir()):
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+                removed_folders += 1
+
+        db_path = content_dir / "book_asset.db"
+        rem_books = 0
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            for q in ("DELETE FROM AssetDownloadInfo", "DELETE FROM Asset", "DELETE FROM BookDownloadInfo", "DELETE FROM Book"):
+                try:
+                    cur.execute(q)
+                except Exception:
+                    pass
+            conn.commit()
+            try:
+                cur.execute("VACUUM")
+                rem_books = cur.execute("SELECT COUNT(*) FROM Book").fetchone()[0]
+            except Exception:
+                pass
+            conn.close()
+
+        return {
+            "ran_locally": True,
+            "removed_folders": removed_folders,
+            "remaining_books_in_db": rem_books,
+            "content_dir": str(content_dir),
+        }
+
+    def get(self, request):
+        from .opds import get_dynamic_amazon_shelf
+
+        if request.GET.get("download_script") == "1":
+            from django.http import HttpResponse
+            ps_body = (
+                "# Empty Downloaded Kindle for Windows Books & Clear book_asset.db\r\n"
+                "Write-Host '====================================================================' -ForegroundColor Cyan\r\n"
+                "Write-Host ' EMPTYING KINDLE FOR WINDOWS DOWNLOADED BOOKS (Classic\\Content)' -ForegroundColor Cyan\r\n"
+                "Write-Host '====================================================================' -ForegroundColor Cyan\r\n"
+                + self._get_windows_empty_ps_command(close_app=True)
+                + "\r\n"
+            )
+            resp = HttpResponse(ps_body, content_type="application/octet-stream")
+            resp["Content-Disposition"] = 'attachment; filename="empty_kindle_pc.ps1"'
+            return resp
+
+        amz = get_dynamic_amazon_shelf()
+        missing_kindle = []
+        for cid in amz.get("amazon_only_ids") or []:
+            rec = (amz.get("by_item_id") or {}).get(str(cid)) or {}
+            if rec.get("item_type") == "AUDIBLE":
+                continue
+            asin = str(rec.get("asin") or "").strip()
+            if not asin:
+                continue
+            missing_kindle.append({
+                "id": str(cid),
+                "asin": asin,
+                "title": rec.get("title") or "Untitled",
+                "authors": rec.get("authors") or "",
+                "originType": self._map_mycd_origin_type(rec.get("origin_type")),
+                "is_kindle_plus": bool(rec.get("is_kindle_plus")),
+            })
+
+        devices = self._load_devices()
+        return Response({
+            "ok": True,
+            "devices": devices,
+            "default_device_account_id": "A101329625FBGFO0QECXO",
+            "missing_kindle_count": len(missing_kindle),
+            "missing_kindle": missing_kindle,
+            "powershell_empty_cmd": self._get_windows_empty_ps_command(close_app=True),
+        })
+
+    def post(self, request):
+        import json
+        body = clean_val(request.data or {})
+        action = str(body.get("action") or "").strip().lower()
+
+        if action == "save_devices":
+            raw_devs = body.get("devices") or []
+            if isinstance(raw_devs, list) and raw_devs:
+                p = self._get_devices_cache_path()
+                p.write_text(json.dumps(raw_devs, indent=2, ensure_ascii=False), encoding="utf-8")
+                return Response({"ok": True, "saved_count": len(raw_devs), "devices": raw_devs})
+            return Response({"ok": False, "error": "No devices provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if action == "empty_local":
+            close_app = bool(body.get("close_app", True))
+            res = self._try_empty_local_windows_kindle(close_app=close_app)
+            res["ok"] = True
+            res["powershell_empty_cmd"] = self._get_windows_empty_ps_command(close_app=close_app)
+            return Response(res)
+
+        if action in ("ingest_tobooks", "process_tobooks"):
+            from .opds import (
+                _AMAZON_SHELF_CACHE,
+                _QUARANTINED_MISSING_SHELF_CACHE,
+                _RECENTLY_ADDED_BOOKS_CACHE,
+                get_dynamic_amazon_shelf,
+                ingest_tobooks_now,
+            )
+            ing = ingest_tobooks_now(sync_db=True)
+            if ing.get("processed_count"):
+                _AMAZON_SHELF_CACHE["expires_at"] = 0.0
+                _RECENTLY_ADDED_BOOKS_CACHE["expires_at"] = 0.0
+                _QUARANTINED_MISSING_SHELF_CACHE["expires_at"] = 0.0
+            amz = get_dynamic_amazon_shelf()
+            return Response({
+                "ok": True,
+                "ingest": ing,
+                "counts": amz.get("counts") or {},
+            })
+
+        return Response({"ok": False, "error": f"Unknown action: {action}"}, status=status.HTTP_400_BAD_REQUEST)
+
 
 

@@ -216,13 +216,28 @@ class EpubReader(BaseReader):
                 asin = m_asin.group(1).upper()
 
         if not asin:
-            for el in metadata_el:
-                scheme = (el.get(f"{{{NS_OPF}}}scheme") or el.get("scheme") or el.get("name") or "").lower()
-                if scheme in ("amazon", "asin", "mobi-asin"):
+            for el in metadata_el.iter():
+                scheme = (
+                    el.get(f"{{{NS_OPF}}}scheme")
+                    or el.get("scheme")
+                    or el.get("name")
+                    or el.get("property")
+                    or ""
+                ).lower()
+                if scheme in ("amazon", "asin", "mobi-asin") or "asin" in scheme:
                     val = (el.text or el.get("content") or "").strip().upper()
                     if re.match(r"^[A-Z0-9]{10}$", val):
                         asin = val
                         break
+            if not asin and opf_bytes:
+                raw_opf_s = opf_bytes.decode("utf-8", errors="ignore")
+                m_meta_asin = re.search(
+                    r'(?:name=["\'](?:MOBI-ASIN|asin)["\'][^>]*content=["\']([A-Z0-9]{10})["\']|content=["\']([A-Z0-9]{10})["\'][^>]*name=["\'](?:MOBI-ASIN|asin)["\'])',
+                    raw_opf_s,
+                    re.IGNORECASE,
+                )
+                if m_meta_asin:
+                    asin = (m_meta_asin.group(1) or m_meta_asin.group(2)).upper()
 
         return BookMetadata(
             title=title,

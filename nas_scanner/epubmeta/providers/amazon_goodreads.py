@@ -9,7 +9,7 @@ import re
 from typing import Any, Dict, List, Optional
 import requests
 
-from ..models import BookMetadata
+from ..models import BookMetadata, is_non_english_for_book, is_truncated_description
 from ..isbn.validator import normalize_isbn
 from .base import BaseProvider
 
@@ -78,6 +78,8 @@ class AmazonGoodreadsProvider(BaseProvider):
 
         desc_obj = item.get("description") or {}
         description = _clean_html_text(desc_obj.get("html"))
+        if description and is_non_english_for_book(description, title):
+            description = None
         cover_url = _upgrade_goodreads_cover(item.get("imageUrl"))
 
         return BookMetadata(
@@ -89,17 +91,37 @@ class AmazonGoodreadsProvider(BaseProvider):
             source="amazon-goodreads",
         )
 
-    def _try_fetch_next_data_by_isbn_or_asin(self, identifier: str) -> Optional[BookMetadata]:
-        """Attempt to fetch full Apollo book details from /book/isbn/{identifier} when available."""
-        url = f"https://www.goodreads.com/book/isbn/{identifier.strip()}"
+    def _try_fetch_next_data_by_isbn_or_asin(
+        self,
+        identifier: str,
+        book_id: Optional[str] = None,
+    ) -> Optional[BookMetadata]:
+        """Attempt to fetch full Apollo book details from `/book/show/{book_id}.json` (or `/book/isbn/{identifier}`)."""
+        candidate_urls: List[str] = []
+        clean_bid = re.sub(r"[^0-9]", "", str(book_id or ""))
+        if clean_bid:
+            candidate_urls.append(f"https://www.goodreads.com/book/show/{clean_bid}.json")
+        clean_ident = (identifier or "").strip()
+        if clean_ident and clean_ident != clean_bid:
+            candidate_urls.append(f"https://www.goodreads.com/book/isbn/{clean_ident}")
+
+        resp = None
+        for url in candidate_urls:
+            try:
+                r = self.session.get(
+                    url,
+                    headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                    timeout=self.timeout,
+                )
+                if r.status_code == 200 and "__NEXT_DATA__" in r.text:
+                    resp = r
+                    break
+            except Exception as req_e:
+                logger.debug("Goodreads page fetch failed for %s: %s", url, req_e)
+
+        if resp is None:
+            return None
         try:
-            resp = self.session.get(
-                url,
-                headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
-                timeout=self.timeout,
-            )
-            if resp.status_code != 200 or "__NEXT_DATA__" not in resp.text:
-                return None
 
             m = re.search(r'id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', resp.text, re.S)
             if not m:
@@ -121,6 +143,8 @@ class AmazonGoodreadsProvider(BaseProvider):
 
             title = (book_obj.get("titleComplete") or book_obj.get("title") or "").strip() or None
             description = _clean_html_text(book_obj.get("description"))
+            if description and is_non_english_for_book(description, title):
+                description = None
             cover_url = _upgrade_goodreads_cover(book_obj.get("imageUrl"))
 
             # Contributors (Authors)
@@ -183,11 +207,65 @@ class AmazonGoodreadsProvider(BaseProvider):
             logger.debug("Goodreads Apollo lookup failed for %s: %s", identifier, e)
             return None
 
+    def _enrich_from_audible_catalog(self, title: str, author: Optional[str] = None) -> Optional[BookMetadata]:
+        """Query Audible's public catalog JSON API for official untruncated Amazon/Audible publisher_summary."""
+        if not title:
+            return None
+        short_title = re.split(r"\s*(?::|\()\s*", title, maxsplit=1)[0].strip() or title.strip()
+        params: Dict[str, Any] = {
+            "title": short_title,
+            "response_groups": "product_desc,product_attrs,contributors",
+            "num_results": 5,
+        }
+        if author and author.lower() not in ("unknown", "unknown author"):
+            params["author_name"] = author
+        try:
+            resp = self.session.get(
+                "https://api.audible.com/1.0/catalog/products",
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=self.timeout,
+            )
+            if resp.status_code != 200:
+                return None
+            products = (resp.json() or {}).get("products") or []
+            if not products:
+                return None
+            from ..matcher import score_title, score_authors
+            for prod in products:
+                cand_t = (prod.get("title") or "").strip()
+                if not cand_t or (score_title(cand_t, title) < 0.45 and score_title(cand_t, short_title) < 0.45):
+                    continue
+                cand_authors = [
+                    (a.get("name") or "").strip()
+                    for a in (prod.get("authors") or [])
+                    if isinstance(a, dict) and (a.get("name") or "").strip()
+                ]
+                if author and author.lower() not in ("unknown", "unknown author") and cand_authors:
+                    if score_authors(cand_authors, [author]) < 0.40:
+                        continue
+                desc = _clean_html_text(prod.get("publisher_summary") or prod.get("merchandising_summary"))
+                if desc and is_non_english_for_book(desc, cand_t):
+                    desc = None
+                if not desc or is_truncated_description(desc):
+                    continue
+                return BookMetadata(
+                    title=cand_t,
+                    authors=cand_authors,
+                    description=desc,
+                    publisher=(prod.get("publisher_name") or "").strip() or None,
+                    published_date=(prod.get("release_date") or "")[:10] or None,
+                    source="audible-catalog",
+                )
+        except Exception as e:
+            logger.debug("Audible catalog lookup failed for '%s': %s", short_title, e)
+        return None
+
     def _enrich_from_apple_books(self, title: str, author: Optional[str] = None) -> Optional[BookMetadata]:
         """Query Apple Books ebook catalog for full untruncated description, genres, and release date."""
         if not title:
             return None
-        short_title = title.split(":", 1)[0].strip()
+        short_title = re.split(r"\s*(?::|\()\s*", title, maxsplit=1)[0].strip() or title.strip()
         term = f"{short_title} {author}".strip() if author else short_title
         try:
             resp = self.session.get(
@@ -248,6 +326,7 @@ class AmazonGoodreadsProvider(BaseProvider):
 
         # 1. Fast JSON auto_complete lookup (works for both ASIN and ISBN)
         base_meta: Optional[BookMetadata] = None
+        matched_book_id: Optional[str] = None
         try:
             resp = self.session.get(
                 "https://www.goodreads.com/book/auto_complete",
@@ -257,29 +336,42 @@ class AmazonGoodreadsProvider(BaseProvider):
             if resp.status_code == 200:
                 items = resp.json()
                 if isinstance(items, list) and items:
+                    matched_book_id = str(items[0].get("bookId") or "").strip() or None
                     base_meta = self._parse_autocomplete_item(items[0], queried_asin=ident)
         except Exception as e:
             logger.debug("Amazon/Goodreads auto_complete error for %s: %s", ident, e)
 
-        # 2. Try full Apollo page details for untruncated description, publisher, date, genres
-        full_meta = self._try_fetch_next_data_by_isbn_or_asin(ident)
+        # 2. Try full Apollo page details via `/book/show/{bookId}.json` for untruncated description, publisher, date, genres
+        full_meta = self._try_fetch_next_data_by_isbn_or_asin(ident, book_id=matched_book_id)
         if full_meta and base_meta:
             merged = full_meta.merge_with(base_meta, combine_lists=True)
         else:
             merged = full_meta or base_meta
 
         # 3. If description is still truncated/missing, enrich from Apple Books
-        if merged and (not merged.description or merged.description.endswith("…") or not merged.subjects):
+        if merged and (not merged.description or is_truncated_description(merged.description) or not merged.subjects):
             apple_meta = self._enrich_from_apple_books(
                 merged.title or "",
                 merged.authors[0] if merged.authors else None,
             )
             if apple_meta:
                 if apple_meta.description and (
-                    not merged.description or len(apple_meta.description) > len(merged.description)
+                    not merged.description
+                    or is_truncated_description(merged.description)
+                    or len(apple_meta.description) > len(merged.description)
                 ):
                     merged.description = apple_meta.description
                 merged = merged.merge_with(apple_meta, combine_lists=True)
+
+        # 4. If description is STILL truncated/missing, query Audible's public JSON catalog API
+        if merged and (not merged.description or is_truncated_description(merged.description)):
+            aud_meta = self._enrich_from_audible_catalog(
+                merged.title or "",
+                merged.authors[0] if merged.authors else None,
+            )
+            if aud_meta and aud_meta.description:
+                merged.description = aud_meta.description
+                merged = merged.merge_with(aud_meta, combine_lists=True)
 
         return merged
 
@@ -288,20 +380,30 @@ class AmazonGoodreadsProvider(BaseProvider):
         if not title:
             return None
 
+        from ..filename_parser import strip_trailing_year_tag
+        from ..authors import strip_author_role_tags
         clean_t = re.sub(r"\s+(?:no)?drm$", "", title.strip(), flags=re.IGNORECASE).strip()
+        clean_t = strip_trailing_year_tag(clean_t) or clean_t
+        clean_author = strip_author_role_tags(author) if author else author
+        if clean_author and "," in clean_author and len(clean_author.split(",")) == 2:
+            p_last, p_first = [p.strip() for p in clean_author.split(",", 1)]
+            if p_first and p_last:
+                clean_author = f"{p_first} {p_last}"
         queries = []
-        if author and author.lower() not in ("unknown", "unknown author"):
-            queries.append(f"{clean_t} {author}")
+        if clean_author and clean_author.lower() not in ("unknown", "unknown author"):
+            queries.append(f"{clean_t} {clean_author}")
         queries.append(clean_t)
 
-        if ":" in clean_t:
-            short_t = clean_t.split(":", 1)[0].strip()
-            if author and author.lower() not in ("unknown", "unknown author"):
-                queries.append(f"{short_t} {author}")
-            queries.append(short_t)
+        if ":" in clean_t or "(" in clean_t:
+            short_t = re.split(r"\s*(?::|\()\s*", clean_t, maxsplit=1)[0].strip()
+            if short_t:
+                if clean_author and clean_author.lower() not in ("unknown", "unknown author"):
+                    queries.append(f"{short_t} {clean_author}")
+                queries.append(short_t)
 
         seen_q = set()
         found_meta: Optional[BookMetadata] = None
+        matched_book_id: Optional[str] = None
         for q in queries:
             q_norm = q.lower().strip()
             if not q_norm or q_norm in seen_q:
@@ -328,21 +430,48 @@ class AmazonGoodreadsProvider(BaseProvider):
                                     continue
                             if found_meta is None:
                                 found_meta = cand
+                                matched_book_id = str(it.get("bookId") or "").strip() or None
                             else:
                                 found_meta = found_meta.merge_with(cand, combine_lists=False)
-                            if found_meta.title and found_meta.authors and found_meta.description and found_meta.cover_url:
+                                if not matched_book_id and it.get("bookId"):
+                                    matched_book_id = str(it.get("bookId")).strip()
+                            if (
+                                found_meta.title
+                                and found_meta.authors
+                                and found_meta.description
+                                and not is_truncated_description(found_meta.description)
+                                and found_meta.cover_url
+                            ):
                                 break
                         if found_meta:
                             break
             except Exception as e:
                 logger.debug("Amazon/Goodreads query error for '%s': %s", q, e)
 
+        if matched_book_id and found_meta and (
+            not found_meta.description
+            or is_truncated_description(found_meta.description)
+            or not found_meta.subjects
+            or not found_meta.publisher
+        ):
+            full_q_meta = self._try_fetch_next_data_by_isbn_or_asin(matched_book_id, book_id=matched_book_id)
+            if full_q_meta:
+                found_meta = full_q_meta.merge_with(found_meta, combine_lists=True)
+
         apple_meta = self._enrich_from_apple_books(clean_t, author)
         if found_meta and apple_meta:
             if apple_meta.description and (
-                not found_meta.description or len(apple_meta.description) > len(found_meta.description)
+                not found_meta.description
+                or is_truncated_description(found_meta.description)
+                or len(apple_meta.description) > len(found_meta.description)
             ):
                 found_meta.description = apple_meta.description
             return found_meta.merge_with(apple_meta, combine_lists=True)
+
+        if found_meta and (not found_meta.description or is_truncated_description(found_meta.description)):
+            aud_q_meta = self._enrich_from_audible_catalog(clean_t, clean_author)
+            if aud_q_meta and aud_q_meta.description:
+                found_meta.description = aud_q_meta.description
+                found_meta = found_meta.merge_with(aud_q_meta, combine_lists=True)
 
         return found_meta or apple_meta
