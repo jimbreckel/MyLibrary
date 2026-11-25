@@ -144,6 +144,65 @@ def clean_book_title(raw_title: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+def strip_edition_suffix(text: Optional[str]) -> str:
+    """
+    Strip trailing or bracketed edition markers such as 'Animal Clinical Chemistry 2nd ed',
+    'Animal Cognition (3E)', 'Title, Second Edition', or 'Title - 4th ed.' for catalog fallback queries.
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = re.sub(
+        r"\s*[\(\[]\s*(?:\d+(?:st|nd|rd|th)?\s*(?:ed\.?|edition|e)|(?:first|second|third|fourth|fifth|sixth|revised)\s+edition)\s*[\)\]]",
+        " ",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"(?:,|\s+-)?\s+\b(?:\d+(?:st|nd|rd|th)\s+ed(?:ition|\.)?|(?:first|second|third|fourth|fifth|sixth)\s+edition)\s*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", s).strip(" -:,;")
+
+
+def _split_top_level_dash(text: str) -> List[str]:
+    """
+    Split `text` on `' - '` ONLY when outside `(...)` and `[...]` brackets,
+    preventing splits inside '[Vol 2 - Polymer Matrix Composites]'.
+    """
+    norm = re.sub(r"\s+-\s+", " - ", text)
+    parts: List[str] = []
+    cur: List[str] = []
+    depth_paren = 0
+    depth_brack = 0
+    i = 0
+    n = len(norm)
+    while i < n:
+        ch = norm[i]
+        if ch == "(":
+            depth_paren += 1
+        elif ch == ")" and depth_paren > 0:
+            depth_paren -= 1
+        elif ch == "[":
+            depth_brack += 1
+        elif ch == "]" and depth_brack > 0:
+            depth_brack -= 1
+        if depth_paren == 0 and depth_brack == 0 and norm[i : i + 3] == " - ":
+            parts.append("".join(cur).strip())
+            cur = []
+            i += 3
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur).strip())
+    return [p for p in parts if p]
+
+
+_ET_AL_RE_FN = re.compile(r"(?:,\s*|\s+)et\s+al\.?(?:,)?\s*$", re.IGNORECASE)
+
+
 def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     """
     Extract clues from a file name.
@@ -162,27 +221,44 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
     isbns = extract_isbns_from_text(stem)
     found_isbn = isbns[0][0] if isbns else None
 
-    # 2. Strip junk suffixes and trailing (Publisher, Year) WW release tags before splitting
+    # 2. Extract trailing (Publisher, Year) WW / (Publisher) WW BEFORE generic year-tag stripping
     cleaned = stem
     for pat in JUNK_SUFFIXES:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"^SS\s+(?=[A-Z])", "", cleaned).strip()
-    cleaned = _strip_inline_release_and_isbn_junk(cleaned)
-    if "." in cleaned and " " not in cleaned and cleaned.count(".") >= 2:
-        cleaned = cleaned.replace(".", " ").strip()
 
     author_candidate = None
     title_candidate = None
     pub_year_candidate = None
     had_trailing_pub_paren = False
 
-    m_pub_tail = re.search(r"\s*\((?:[^)]*?\b(18\d{2}|19\d{2}|20\d{2})\b[^)]*)\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$", cleaned, re.I)
+    m_pub_tail = re.search(
+        r"\s*\((?:[^)]*?\b(18\d{2}|19\d{2}|20\d{2})\b[^)]*)\)\s*(?:WW|YYePG|BLG|TLRG|DDU|LotB)?$",
+        cleaned,
+        re.I,
+    )
     if m_pub_tail:
         pub_year_candidate = m_pub_tail.group(1)
         had_trailing_pub_paren = True
-        cleaned = cleaned[:m_pub_tail.start()].strip()
+        cleaned = cleaned[: m_pub_tail.start()].strip()
     else:
-        cleaned = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$", "", cleaned).strip()
+        # Also match publisher-only parens before release group tag, e.g. "(Humana) WW", "(Springer) WW", "(CRC) WW"
+        m_pub_no_yr = re.search(
+            r"\s*\([A-Za-z][A-Za-z0-9\s&.,'\-]{1,35}\)\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$",
+            cleaned,
+            re.I,
+        )
+        if m_pub_no_yr:
+            had_trailing_pub_paren = True
+            cleaned = cleaned[: m_pub_no_yr.start()].strip()
+        else:
+            cleaned = re.sub(r"\s+(?:WW|YYePG|BLG|TLRG|DDU|LotB)$", "", cleaned).strip()
+
+    cleaned = _strip_inline_release_and_isbn_junk(cleaned)
+    if "." in cleaned and " " not in cleaned and cleaned.count(".") >= 2:
+        cleaned = cleaned.replace(".", " ").strip()
+
+    top_dash_parts = _split_top_level_dash(cleaned) if " -- " not in cleaned else []
 
     # 3. Detect Anna's Archive "Title -- Author -- Publisher, Year -- ISBN -- MD5" or "Author(s) - Title" pattern
     if " -- " in cleaned:
@@ -196,10 +272,10 @@ def parse_filename(file_path: Union[str, Path]) -> Dict[str, Any]:
             if m_yr:
                 pub_year_candidate = m_yr.group(1)
                 break
-    elif " - " in cleaned:
-        parts = cleaned.split(" - ")
+    elif len(top_dash_parts) >= 2:
+        parts = top_dash_parts
         first_seg = parts[0].strip()
-        last_seg = parts[-1].strip()
+        last_seg = _ET_AL_RE_FN.sub("", parts[-1].strip()).strip(" ,;") if "et al" in parts[-1].lower() else parts[-1].strip()
         from .authors import is_series_number_segment, strip_series_and_redundant_author_from_title
 
         first_is_series = is_series_number_segment(first_seg)

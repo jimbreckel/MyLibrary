@@ -972,13 +972,23 @@ class BookProcessor:
                         fallback_meta = self.aggregator.fetch_by_query(candidate_title, candidate_author)
                         if fallback_meta and not fallback_meta.is_empty():
                             fetched_meta = fallback_meta
-                        elif ":" in candidate_title or " - " in candidate_title or "(" in candidate_title or "[" in candidate_title:
-                            short_title = _re_t.split(r"\s*(?::| - |\(|\[)\s*", candidate_title, maxsplit=1)[0].strip()
-                            if short_title and short_title != candidate_title:
-                                logger.info("Searching with short title '%s'...", short_title)
+                        else:
+                            from .filename_parser import strip_edition_suffix
+                            no_ed_title = strip_edition_suffix(candidate_title)
+                            short_cands: List[str] = []
+                            if no_ed_title and no_ed_title != candidate_title:
+                                short_cands.append(no_ed_title)
+                            if ":" in candidate_title or " - " in candidate_title or "(" in candidate_title or "[" in candidate_title:
+                                st_base = _re_t.split(r"\s*(?::| - |\(|\[)\s*", no_ed_title or candidate_title, maxsplit=1)[0].strip()
+                                st_base = strip_edition_suffix(st_base) or st_base
+                                if st_base and st_base != candidate_title and st_base not in short_cands:
+                                    short_cands.append(st_base)
+                            for short_title in short_cands:
+                                logger.info("Searching with cleaned/short title '%s'...", short_title)
                                 short_meta = self.aggregator.fetch_by_query(short_title, candidate_author)
                                 if short_meta and not short_meta.is_empty():
                                     fetched_meta = short_meta
+                                    break
 
                     # Fallback 1b: check if Title and Author were switched (e.g. Title='Martin H. Greenberg (ed)', Author='Journey to Infinity')
                     if (not fetched_meta or fetched_meta.is_empty()) and not (is_pdf and self.pdf_require_isbn):

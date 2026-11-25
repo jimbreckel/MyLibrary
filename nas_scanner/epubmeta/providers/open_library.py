@@ -177,9 +177,10 @@ class OpenLibraryProvider(BaseProvider):
         if not title or self._disabled:
             return None
         import re as _re
-        from ..filename_parser import strip_trailing_year_tag
+        from ..filename_parser import strip_trailing_year_tag, strip_edition_suffix
         from ..authors import strip_author_role_tags
         clean_title = strip_trailing_year_tag(title) or title
+        no_ed_title = strip_edition_suffix(clean_title)
         clean_author = strip_author_role_tags(author) if author else author
         if clean_author and "," in clean_author and len(clean_author.split(",")) == 2:
             p_last, p_first = [p.strip() for p in clean_author.split(",", 1)]
@@ -196,8 +197,17 @@ class OpenLibraryProvider(BaseProvider):
                 self._disabled = True
                 return None
             docs = resp.json().get("docs", []) if resp.status_code == 200 else []
-            if not docs and not self._disabled and (":" in clean_title or " - " in clean_title or "(" in clean_title or (clean_author and "." in clean_author)):
-                short_title = _re.split(r"\s*(?::| - |\()\s*", clean_title, maxsplit=1)[0].strip() or clean_title
+            if not docs and not self._disabled and (
+                (no_ed_title and no_ed_title != clean_title)
+                or ":" in clean_title
+                or " - " in clean_title
+                or "(" in clean_title
+                or "[" in clean_title
+                or (clean_author and "." in clean_author)
+            ):
+                base_for_short = no_ed_title or clean_title
+                short_title = _re.split(r"\s*(?::| - |\(|\[)\s*", base_for_short, maxsplit=1)[0].strip() or base_for_short
+                short_title = strip_edition_suffix(short_title) or short_title
                 alt_author = clean_author
                 if clean_author and "." in clean_author and len(clean_author.split()) >= 2:
                     alt_author = clean_author.split()[-1].strip()

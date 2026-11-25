@@ -380,10 +380,11 @@ class AmazonGoodreadsProvider(BaseProvider):
         if not title:
             return None
 
-        from ..filename_parser import strip_trailing_year_tag
+        from ..filename_parser import strip_trailing_year_tag, strip_edition_suffix
         from ..authors import strip_author_role_tags
         clean_t = re.sub(r"\s+(?:no)?drm$", "", title.strip(), flags=re.IGNORECASE).strip()
         clean_t = strip_trailing_year_tag(clean_t) or clean_t
+        no_ed_t = strip_edition_suffix(clean_t)
         clean_author = strip_author_role_tags(author) if author else author
         if clean_author and "," in clean_author and len(clean_author.split(",")) == 2:
             p_last, p_first = [p.strip() for p in clean_author.split(",", 1)]
@@ -394,8 +395,14 @@ class AmazonGoodreadsProvider(BaseProvider):
             queries.append(f"{clean_t} {clean_author}")
         queries.append(clean_t)
 
-        if ":" in clean_t or "(" in clean_t:
-            short_t = re.split(r"\s*(?::|\()\s*", clean_t, maxsplit=1)[0].strip()
+        if no_ed_t and no_ed_t != clean_t:
+            if clean_author and clean_author.lower() not in ("unknown", "unknown author"):
+                queries.append(f"{no_ed_t} {clean_author}")
+            queries.append(no_ed_t)
+
+        if ":" in clean_t or "(" in clean_t or "[" in clean_t:
+            short_t = re.split(r"\s*(?::|\(|\[)\s*", no_ed_t or clean_t, maxsplit=1)[0].strip()
+            short_t = strip_edition_suffix(short_t) or short_t
             if short_t:
                 if clean_author and clean_author.lower() not in ("unknown", "unknown author"):
                     queries.append(f"{short_t} {clean_author}")

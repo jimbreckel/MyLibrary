@@ -5809,6 +5809,44 @@ const initCatalogSearch = () => {
         const abortCtrl = new AbortController();
         activeEnrichControllers.add(abortCtrl);
 
+        const checkIfAlreadyEnrichedOnBackend = async () => {
+            if (!itemId) return null;
+            for (const waitMs of [2200, 3500, 4500]) {
+                await new Promise(res => setTimeout(res, waitMs));
+                if (abortCtrl.signal.aborted) return null;
+                try {
+                    const chkResp = await fetch(`${BASE_PREFIX}/api/catalog/${encodeURIComponent(itemId)}/`, {
+                        signal: abortCtrl.signal,
+                        headers: { 'Accept': 'application/json' }
+                    });
+                    if (!chkResp.ok) continue;
+                    const chkData = await chkResp.json();
+                    const it = chkData && chkData.item;
+                    if (it && (it.isbn || (it.description && it.description.trim().length > 25))) {
+                        return {
+                            ok: true,
+                            status: 'SUCCESS',
+                            already_enriched: false,
+                            unchanged: true,
+                            item_id: it.id || itemId,
+                            title: it.title || '',
+                            authors: it.authors || '',
+                            isbn: it.isbn || '',
+                            asin: it.asin || '',
+                            publisher: it.publisher || '',
+                            pub_date: it.pub_date || '',
+                            description: it.description || '',
+                            cover_url: it.cover_image_url || `${BASE_PREFIX}/opds/cover/${it.id || itemId}.jpg`,
+                            message: `Successfully enriched ${it.title || 'item'}`
+                        };
+                    }
+                } catch (e) {
+                    if (e && e.name === 'AbortError') throw e;
+                }
+            }
+            return null;
+        };
+
         const doFetchEnrich = (attempt = 1) => fetch(`${BASE_PREFIX}/api/enrich/`, {
             method: 'POST',
             signal: abortCtrl.signal,
@@ -5823,6 +5861,10 @@ const initCatalogSearch = () => {
                 try {
                     return JSON.parse(rawText);
                 } catch (parseErr) {
+                    if (resp.status === 502 || resp.status === 504 || resp.status === 524) {
+                        const recovered = await checkIfAlreadyEnrichedOnBackend();
+                        if (recovered) return recovered;
+                    }
                     if (attempt < 2 && (resp.status >= 500 || resp.status === 0)) {
                         await new Promise(res => setTimeout(res, 1500));
                         return doFetchEnrich(attempt + 1);
@@ -5832,6 +5874,8 @@ const initCatalogSearch = () => {
             })
             .catch(async fetchErr => {
                 if (fetchErr && fetchErr.name === 'AbortError') throw fetchErr;
+                const recovered = await checkIfAlreadyEnrichedOnBackend();
+                if (recovered) return recovered;
                 if (attempt < 2) {
                     await new Promise(res => setTimeout(res, 1500));
                     return doFetchEnrich(attempt + 1);

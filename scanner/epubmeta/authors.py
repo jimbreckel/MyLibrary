@@ -97,6 +97,24 @@ def normalize_single_author(raw: str) -> Tuple[str, str]:
     return display_name, file_as
 
 
+_ET_AL_SUFFIX_RE = re.compile(r"(?:,\s*|\s+)et\s+al\.?(?:,)?\s*$", re.IGNORECASE)
+
+
+def _looks_like_natural_order_person(seg: str) -> bool:
+    """Return True if `seg` looks like 'B. Frier', 'G. O. Evans', or 'Vivian A. Fonseca' rather than 'Last' or 'First' alone."""
+    s = strip_author_role_tags(seg).strip()
+    if not s or "," in s:
+        return False
+    toks = [t for t in s.split() if t]
+    if not (2 <= len(toks) <= 4):
+        return False
+    if any(any(ch.isdigit() for ch in t) for t in toks):
+        return False
+    if toks[-1].lower() in COMMON_SUFFIXES:
+        return False
+    return all(t[0].isupper() or t.lower() in ("de", "del", "van", "von", "le", "la", "da", "di") for t in toks if t[0].isalpha())
+
+
 def split_and_normalize_authors(
     authors_input: Union[str, List[str]]
 ) -> List[Tuple[str, str]]:
@@ -108,6 +126,7 @@ def split_and_normalize_authors(
     - Lists: ["Nikolas Bowie", "Daphna Renan"]
     - Semicolon delimited: "Renan, Daphna; Bowie, Nikolas"
     - 'and' / '&' delimited: "Daphna Renan and Nikolas Bowie"
+    - Comma-separated natural/initialed co-authors: "B. Frier, M. Fisher" or "A. Graesser, et al."
     - Alternating 'Last, First, Last, First': "Renan, Daphna, Bowie, Nikolas"
     """
     if not authors_input:
@@ -118,17 +137,27 @@ def split_and_normalize_authors(
     if isinstance(authors_input, list):
         for item in authors_input:
             if item and item.strip():
-                # Check if item itself contains semicolons or ' and '
-                if ";" in item:
-                    raw_list.extend([x.strip() for x in item.split(";") if x.strip()])
-                elif " and " in item.lower():
-                    raw_list.extend([x.strip() for x in re.split(r"\s+and\s+", item, flags=re.IGNORECASE) if x.strip()])
-                elif " & " in item:
-                    raw_list.extend([x.strip() for x in item.split("&") if x.strip()])
+                s_item = _ET_AL_SUFFIX_RE.sub("", item.strip()).strip(" ,;")
+                if not s_item:
+                    continue
+                if ";" in s_item:
+                    raw_list.extend([x.strip() for x in s_item.split(";") if x.strip()])
+                elif " and " in s_item.lower():
+                    raw_list.extend([x.strip() for x in re.split(r"\s+and\s+", s_item, flags=re.IGNORECASE) if x.strip()])
+                elif " & " in s_item:
+                    raw_list.extend([x.strip() for x in s_item.split("&") if x.strip()])
+                elif "," in s_item:
+                    c_parts = [p.strip() for p in s_item.split(",") if p.strip()]
+                    if len(c_parts) >= 2 and all(_looks_like_natural_order_person(p) for p in c_parts):
+                        raw_list.extend(c_parts)
+                    else:
+                        raw_list.append(s_item)
                 else:
-                    raw_list.append(item.strip())
+                    raw_list.append(s_item)
     else:
-        s = authors_input.strip()
+        s = _ET_AL_SUFFIX_RE.sub("", authors_input.strip()).strip(" ,;")
+        if not s:
+            return []
         if ";" in s:
             raw_list = [x.strip() for x in s.split(";") if x.strip()]
         elif " and " in s.lower():
@@ -137,9 +166,9 @@ def split_and_normalize_authors(
             raw_list = [x.strip() for x in s.split("&") if x.strip()]
         elif "," in s:
             comma_parts = [p.strip() for p in s.split(",") if p.strip()]
-            # If 4 or more parts, e.g. ["Renan", "Daphna", "Bowie", "Nikolas"]
-            # Even number of parts often indicates pairs of (Lastname, Firstname)
-            if len(comma_parts) >= 4 and len(comma_parts) % 2 == 0:
+            if len(comma_parts) >= 2 and all(_looks_like_natural_order_person(p) for p in comma_parts):
+                raw_list = comma_parts
+            elif len(comma_parts) >= 4 and len(comma_parts) % 2 == 0:
                 raw_list = [
                     f"{comma_parts[i]}, {comma_parts[i+1]}"
                     for i in range(0, len(comma_parts), 2)
